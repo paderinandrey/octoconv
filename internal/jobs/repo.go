@@ -23,8 +23,10 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-// CreateParams describes a new convert job and its single input.
+// CreateParams describes a new convert job and its single input. ID is the
+// caller-provided job id so storage keys (which embed the id) and the row match.
 type CreateParams struct {
+	ID           uuid.UUID
 	Operation    string
 	Engine       string
 	SourceFormat string
@@ -33,19 +35,21 @@ type CreateParams struct {
 }
 
 // Create inserts a job (status=queued), its input row, and the initial
-// job_events transition in one transaction, returning the new job id. The
-// caller enqueues the asynq task only after this succeeds (Postgres-first
-// double write).
+// job_events transition in one transaction, returning the job id. If ID is the
+// zero value one is generated. The caller enqueues the asynq task only after
+// this succeeds (Postgres-first double write).
 func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
-	var jobID uuid.UUID
+	jobID := p.ID
+	if jobID == uuid.Nil {
+		jobID = uuid.New()
+	}
 
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO jobs (operation, engine, status, source_format, target_format)
-			VALUES ($1, $2, 'queued', $3, $4)
-			RETURNING id`,
-			p.Operation, p.Engine, p.SourceFormat, p.TargetFormat,
-		).Scan(&jobID); err != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO jobs (id, operation, engine, status, source_format, target_format)
+			VALUES ($1, $2, $3, 'queued', $4, $5)`,
+			jobID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat,
+		); err != nil {
 			return fmt.Errorf("insert job: %w", err)
 		}
 
