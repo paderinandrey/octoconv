@@ -23,20 +23,21 @@ truth), Redis — брокер очереди и горячий прогресс
 
 ```
 cmd/
-  api/        — HTTP-сервер (приём файла, статусы)        [этап 6]
-  worker/     — обработчик очереди (asynq)                [этап 7]
+  api/        — HTTP-сервер (приём файла, статусы)
+  worker/     — обработчик очереди (asynq), движок image
   migrate/    — применение миграций БД
 internal/
-  api/        — роуты и хендлеры                          [этап 6]
-  convert/    — интерфейс Converter, реестр пар, hardened exec, libvips [этап 3]
-  jobs/       — репозиторий задач в Postgres              [этап 5]
-  queue/      — тип asynq-задачи и payload                [этап 4]
-  storage/    — обёртка над MinIO/S3                      [этап 2]
+  api/        — роуты и хендлеры
+  convert/    — интерфейс Converter, реестр пар, hardened exec, libvips
+  jobs/       — репозиторий задач в Postgres
+  queue/      — тип asynq-задачи и payload
+  storage/    — обёртка над MinIO/S3
+  worker/     — обработчик image:convert (скачать → vips → загрузить)
   db/         — pgx pool + раннер миграций (+ migrations/*.sql)
 ```
 
-> Пометки `[этап N]` — модули появляются по мере реализации (см. план проекта).
-> Реализовано на данный момент: инфраструктура, схема БД и раннер миграций.
+Реализован сквозной срез для класса движка **image** (libvips): png/jpg/webp/heic/tiff
+между собой.
 
 ## Требования
 
@@ -59,10 +60,16 @@ docker compose up -d
 | postgres | postgres:18      | **5433**    | `octo / octo-pass / octo_db`     |
 | redis    | redis:8          | 6379        | брокер asynq                     |
 | minio    | minio/minio      | **9100** (API), **9101** (консоль) | `minioadmin / minioadmin`, бакет `octoconv` создаётся автоматически |
+| api      | Dockerfile.api   | 8080        | HTTP API                         |
+| worker   | Dockerfile.worker| —           | воркер image (libvips), под `nobody`, лимиты CPU/RAM |
 
 > Нестандартные хост-порты (5433, 9100/9101) выбраны, чтобы не конфликтовать с другими
 > локальными стеками. Меняются в `docker-compose.yml` и `.env`.
 > MinIO-консоль: http://localhost:9101
+>
+> **Presigned URL в полном compose:** сервис `api` в контейнере presign'ит ссылки на
+> внутренний endpoint `minio:9000`, недоступный с хоста. Для скачивания результата с хоста
+> запускайте `api` локально (вариант ниже) — тогда ссылки идут на `localhost:9100`.
 
 ### 2. Применить миграции
 
@@ -75,14 +82,25 @@ go run ./cmd/migrate
 `webhook_deliveries` (полный DDL — `internal/db/migrations/0001_init.sql`). Раннер идемпотентен:
 применённые версии фиксируются в `schema_migrations`.
 
-### 3. Запустить сервисы *(появятся на следующих этапах)*
+### 3. Запустить сервисы
+
+Воркеру нужен `vips`, поэтому его удобнее запускать в контейнере. Рекомендуемый для локальной
+разработки вариант — воркер в Docker, API на хосте (чтобы presigned-ссылки указывали на
+`localhost:9100` и скачивались с хоста):
 
 ```bash
-go run ./cmd/api       # HTTP API на :8080         [этап 6]
-go run ./cmd/worker    # воркер очереди image       [этап 7]
+docker compose up -d --build worker     # воркер image с libvips, в compose-сети
+set -a && . ./.env && set +a
+go run ./cmd/api                         # HTTP API на :8080
 ```
 
-## API *(черновик, реализуется на этапе 6)*
+Полностью в Docker (с оговоркой про presigned URL выше):
+
+```bash
+docker compose up -d --build            # postgres, redis, minio, api, worker
+```
+
+## API
 
 Поставить задачу:
 

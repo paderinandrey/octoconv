@@ -140,6 +140,33 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	return &j, nil
 }
 
+// Inputs lists a job's inputs ordered by ordinal.
+func (r *Repo) Inputs(ctx context.Context, jobID uuid.UUID) ([]Input, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT ordinal, object_key, filename, format, size_bytes, content_type
+		FROM job_inputs WHERE job_id = $1 ORDER BY ordinal`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("query inputs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Input
+	for rows.Next() {
+		var in Input
+		var name, format, ct *string
+		var size *int64
+		if err := rows.Scan(&in.Ordinal, &in.ObjectKey, &name, &format, &size, &ct); err != nil {
+			return nil, fmt.Errorf("scan input: %w", err)
+		}
+		in.Filename, in.Format, in.ContentType = deref(name), deref(format), deref(ct)
+		if size != nil {
+			in.SizeBytes = *size
+		}
+		out = append(out, in)
+	}
+	return out, rows.Err()
+}
+
 // Outputs lists a job's outputs ordered by ordinal.
 func (r *Repo) Outputs(ctx context.Context, jobID uuid.UUID) ([]Output, error) {
 	rows, err := r.pool.Query(ctx, `

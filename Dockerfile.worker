@@ -1,0 +1,17 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
+
+# Runtime stage: image engine needs the libvips CLI.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libvips-tools \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/worker /usr/local/bin/worker
+# Run unprivileged: the worker shells out to untrusted-input engines.
+USER nobody
+ENTRYPOINT ["/usr/local/bin/worker"]
