@@ -213,6 +213,18 @@ func TestCreateJob_TooLarge(t *testing.T) {
 	}
 }
 
+func TestHealthz_NoAuthRequired(t *testing.T) {
+	srv, _ := newTestServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil) // deliberately no Authorization header
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (D-09: /healthz must stay reachable without a key)", rec.Code)
+	}
+}
+
 func TestGetJob_DonePresigned(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
