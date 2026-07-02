@@ -22,6 +22,7 @@ const (
 // Job is a row of the jobs table (subset used by the image slice).
 type Job struct {
 	ID           uuid.UUID
+	ClientID     uuid.UUID
 	Operation    string
 	Engine       string
 	Status       string

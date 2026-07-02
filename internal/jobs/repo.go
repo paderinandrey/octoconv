@@ -27,6 +27,7 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 // caller-provided job id so storage keys (which embed the id) and the row match.
 type CreateParams struct {
 	ID           uuid.UUID
+	ClientID     uuid.UUID
 	Operation    string
 	Engine       string
 	SourceFormat string
@@ -46,9 +47,9 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
 
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO jobs (id, operation, engine, status, source_format, target_format)
-			VALUES ($1, $2, $3, 'queued', $4, $5)`,
-			jobID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat,
+			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format)
+			VALUES ($1, $2, $3, $4, 'queued', $5, $6)`,
+			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat,
 		); err != nil {
 			return fmt.Errorf("insert job: %w", err)
 		}
@@ -121,17 +122,24 @@ func (r *Repo) AddOutput(ctx context.Context, jobID uuid.UUID, o Output) error {
 func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	var j Job
 	var src, tgt, code, msg *string
+	var clientID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, operation, engine, status, source_format, target_format,
+		SELECT id, client_id, operation, engine, status, source_format, target_format,
 		       error_code, error_message, created_at, started_at, finished_at
 		FROM jobs WHERE id = $1`, id,
-	).Scan(&j.ID, &j.Operation, &j.Engine, &j.Status, &src, &tgt,
+	).Scan(&j.ID, &clientID, &j.Operation, &j.Engine, &j.Status, &src, &tgt,
 		&code, &msg, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get job: %w", err)
+	}
+	// client_id is ON DELETE SET NULL (0001_init.sql); a legacy or orphaned
+	// row can have a null client_id, so scan via a pointer and default to
+	// uuid.Nil, matching the nullable-column deref style used elsewhere here.
+	if clientID != nil {
+		j.ClientID = *clientID
 	}
 	j.SourceFormat = deref(src)
 	j.TargetFormat = deref(tgt)
