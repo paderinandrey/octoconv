@@ -13,9 +13,8 @@ The existing image-conversion vertical slice (currently on `feat/scaffold-and-in
 <decisions>
 ## Implementation Decisions
 
-### Merge Strategy
-- **D-01:** Merge `feat/scaffold-and-infra` into `main` via a merge commit (not squash) — preserves the 7-commit history showing how the vertical slice was built in stages.
-- **D-02:** Delete the `feat/scaffold-and-infra` branch after a successful merge — `main` becomes the single source of truth going forward.
+### Merge Strategy — SUPERSEDED, already done
+- **D-01/D-02 (moot):** Originally decided: merge `feat/scaffold-and-infra` into `main` via merge commit, then delete the branch. **Discovered during pattern-mapping (before planning) that this is already the case** — `git branch -a` shows no `feat/scaffold-and-infra` branch (local or remote), and the full vertical-slice code (`cmd/api`, `cmd/worker`, `cmd/migrate`, `internal/api`, `internal/convert`, `internal/db`, `internal/jobs`, `internal/queue`, `internal/storage`, `internal/worker`) is already committed on `main`. BASE-01 is satisfied by existing repo state — no merge task needed in Phase 1's plan. The planner should include a lightweight verification step (e.g. `go build ./... && go test ./...` passes on `main`) to confirm ROADMAP.md Phase 1 success criterion 1, not a merge task.
 
 ### API Key Provisioning
 - **D-03:** Clients are provisioned via an operator-run CLI command (e.g. `go run ./cmd/manage-clients create <name>`), following the existing `cmd/migrate`-style one-shot-binary pattern already in the codebase. The CLI creates the `clients` row, generates a random high-entropy key, hashes it, and prints the raw key exactly once — it is never stored or logged in plaintext.

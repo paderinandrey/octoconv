@@ -9,7 +9,7 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Baseline
 
-- [ ] **BASE-01**: Ветка `feat/scaffold-and-infra` влита в `main` до начала hardening-работы
+- [x] **BASE-01**: Ветка `feat/scaffold-and-infra` влита в `main` до начала hardening-работы — уже выполнено к моменту планирования Phase 1: ветка `feat/scaffold-and-infra` не существует, весь код вертикального среза (`cmd/api`, `cmd/worker`, `cmd/migrate`, `internal/*`) уже закоммичен в `main`
 
 ### Authentication
 
@@ -135,4 +135,4 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ---
 *Requirements defined: 2026-07-02*
-*Last updated: 2026-07-02 after initial definition*
+*Last updated: 2026-07-02 after roadmap creation (traceability mapped)*
