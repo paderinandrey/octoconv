@@ -100,24 +100,38 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ## Traceability
 
-Заполняется при создании roadmap.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BASE-01 | TBD | Pending |
-| AUTH-01..05 | TBD | Pending |
-| RELY-01..02 | TBD | Pending |
-| RATE-01..03 | TBD | Pending |
-| RECON-01..03 | TBD | Pending |
-| WEBHOOK-01..05 | TBD | Pending |
-| VALID-01..02 | TBD | Pending |
-| STOR-01 | TBD | Pending |
-| OBS-01..03 | TBD | Pending |
+| BASE-01 | Phase 1 | Pending |
+| AUTH-01 | Phase 1 | Pending |
+| AUTH-02 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Pending |
+| AUTH-04 | Phase 1 | Pending |
+| AUTH-05 | Phase 1 | Pending |
+| RATE-01 | Phase 1 | Pending |
+| RATE-02 | Phase 1 | Pending |
+| RATE-03 | Phase 1 | Pending |
+| WEBHOOK-01 | Phase 2 | Pending |
+| WEBHOOK-02 | Phase 2 | Pending |
+| WEBHOOK-03 | Phase 2 | Pending |
+| WEBHOOK-04 | Phase 2 | Pending |
+| WEBHOOK-05 | Phase 2 | Pending |
+| RELY-01 | Phase 3 | Pending |
+| RELY-02 | Phase 3 | Pending |
+| RECON-01 | Phase 3 | Pending |
+| RECON-02 | Phase 3 | Pending |
+| RECON-03 | Phase 3 | Pending |
+| VALID-01 | Phase 4 | Pending |
+| VALID-02 | Phase 4 | Pending |
+| STOR-01 | Phase 4 | Pending |
+| OBS-01 | Phase 4 | Pending |
+| OBS-02 | Phase 4 | Pending |
+| OBS-03 | Phase 4 | Pending |
 
 **Coverage:**
-- v1 requirements: 24 total
-- Mapped to phases: 0 (заполнит roadmapper)
-- Unmapped: 24 ⚠️ (ожидается — будет закрыто на шаге создания roadmap)
+- v1 requirements: 25 total (corrected count — original summary undercounted by 1; 9 categories × items = 1+5+2+3+3+5+2+1+3 = 25)
+- Mapped to phases: 25/25
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-02*
