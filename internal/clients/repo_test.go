@@ -1,4 +1,9 @@
-package clients
+// Package clients_test lives in the external test package (not package
+// clients) specifically to avoid an import cycle: it needs internal/auth for
+// GenerateKey/HashKey, and internal/auth in turn imports internal/clients
+// (for the ClientResolver/Resolver types added in Plan 02). An in-package
+// test file cannot import something that imports its own package back.
+package clients_test
 
 import (
 	"context"
@@ -6,13 +11,14 @@ import (
 	"testing"
 
 	"github.com/apaderin/octoconv/internal/auth"
+	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/google/uuid"
 )
 
 var testSalt = []byte("fixed-test-salt")
 
-func newTestRepo(t *testing.T) *Repo {
+func newTestRepo(t *testing.T) *clients.Repo {
 	t.Helper()
 	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("DATABASE_URL not set; skipping integration test")
@@ -26,7 +32,7 @@ func newTestRepo(t *testing.T) *Repo {
 		t.Fatalf("db.Migrate: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return NewRepo(pool)
+	return clients.NewRepo(pool)
 }
 
 func TestCreateAndGetByKeyHash(t *testing.T) {
@@ -58,7 +64,7 @@ func TestGetByKeyHashUnknown(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := r.GetByKeyHash(ctx, auth.HashKey(testSalt, "no-such-key"))
-	if err != ErrNotFound {
+	if err != clients.ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -119,7 +125,7 @@ func TestRevokeKey(t *testing.T) {
 		t.Fatalf("RevokeKey(primary): %v", err)
 	}
 
-	if _, err := r.GetByKeyHash(ctx, primaryHash); err != ErrNotFound {
+	if _, err := r.GetByKeyHash(ctx, primaryHash); err != clients.ErrNotFound {
 		t.Fatalf("expected primary key to be revoked (ErrNotFound), got %v", err)
 	}
 
