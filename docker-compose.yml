@@ -84,6 +84,7 @@ services:
       S3_USE_SSL: "false"
       API_ADDR: ":8080"
       MAX_UPLOAD_BYTES: "104857600"
+      API_KEY_SALT: "dev-only-change-me-in-real-deploys"
     ports:
       - "8080:8080"
 
