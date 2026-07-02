@@ -30,10 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A client cannot see or reference another client's job — cross-client job lookup returns 404, never confirming the job exists.
   4. API keys are stored only as salted SHA-256 hashes (never plaintext), and a client can hold two simultaneously active keys to support rotation without downtime.
   5. A client exceeding their per-client request rate receives 429 with a `Retry-After` header; a coarse pre-auth IP-based limit throttles flood traffic before it reaches auth or the database.
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 01-01: TBD
+- [ ] 01-01-PLAN.md — Auth issuance foundation: key-hash schema, salted hashing, clients repo, operator CLI
+- [ ] 01-02-PLAN.md — Auth enforcement: resolver + middleware, client_id threading, 401/404 client scoping
+- [ ] 01-03-PLAN.md — Rate limiting: coarse pre-auth IP guard + per-client 429 + Retry-After
 
 ### Phase 2: Webhook Delivery
 **Goal**: Clients receive job completion results pushed via signed webhook callbacks, removing the need to poll for status.
@@ -90,7 +92,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Merge, Auth & Rate Limiting | 0/TBD | Not started | - |
+| 1. Merge, Auth & Rate Limiting | 0/3 | Planned | - |
 | 2. Webhook Delivery | 0/TBD | Not started | - |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
