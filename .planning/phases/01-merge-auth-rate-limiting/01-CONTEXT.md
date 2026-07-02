@@ -18,9 +18,9 @@ The existing image-conversion vertical slice (currently on `feat/scaffold-and-in
 
 ### API Key Provisioning
 - **D-03:** Clients are provisioned via an operator-run CLI command (e.g. `go run ./cmd/manage-clients create <name>`), following the existing `cmd/migrate`-style one-shot-binary pattern already in the codebase. The CLI creates the `clients` row, generates a random high-entropy key, hashes it, and prints the raw key exactly once — it is never stored or logged in plaintext.
-- **D-04:** `clients` rows store only `name` at creation (plus id, key hash(es), timestamps) — no team/contact metadata field for this phase. Matches the minimal `clients` schema already in the Notion DDL.
-- **D-05:** Key revocation is a CLI command (e.g. `manage-clients revoke <key-id>`) that marks the stored hash inactive — does NOT delete the `clients` row (jobs already reference `client_id` via FK, and history should survive revocation).
-- **D-06:** No automatic time-based key rotation/expiry in this phase. The `clients` schema supports two simultaneously active key hashes (primary + secondary) so an operator CAN rotate without downtime, but rotation itself is a manual CLI-triggered operation, not a TTL/cron job.
+- **D-04 [informational]:** `clients` rows store only `name` at creation (plus id, key hash(es), timestamps) — no team/contact metadata field for this phase. Matches the minimal `clients` schema already in the Notion DDL. This is a boundary/non-goal (what NOT to add to the schema), satisfied by the migration in 01-01-PLAN.md simply not adding extra columns — not a separate actionable task.
+- **D-05:** Key revocation is a CLI command (e.g. `manage-clients revoke <key-id>`) that marks the stored hash inactive — does NOT delete the `clients` row (jobs already reference `client_id` via FK, and history should survive revocation). Implemented: 01-01-PLAN.md `RevokeKey`.
+- **D-06 [informational]:** No automatic time-based key rotation/expiry in this phase. The `clients` schema supports two simultaneously active key hashes (primary + secondary) so an operator CAN rotate without downtime, but rotation itself is a manual CLI-triggered operation, not a TTL/cron job. This is a scope boundary (explicitly NOT building auto-rotation/TTL) — satisfied by the absence of any cron/TTL code, not a separate actionable task.
 - **D-07:** Keys are stored as salted **hashes** (SHA-256, per research STACK.md — fast, high-entropy tokens don't need bcrypt/argon2), never encrypted/reversible, never plaintext, never logged.
 
 ### Auth Rollout
