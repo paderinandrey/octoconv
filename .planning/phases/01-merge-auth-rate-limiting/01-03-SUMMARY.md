@@ -115,3 +115,7 @@ None - no external service configuration required. The new `RATE_LIMIT_IP_RPM`/`
 ---
 *Phase: 01-merge-auth-rate-limiting*
 *Completed: 2026-07-03*
+
+## Self-Check: PASSED
+
+All 3 files (2 code files + this SUMMARY) verified present on disk; all 4 commits (RED, GREEN, wiring, SUMMARY) verified present in git history.
