@@ -13,7 +13,7 @@ This milestone hardens the existing image-conversion vertical slice into a produ
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse.
+- [x] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (completed 2026-07-03)
 - [ ] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling.
 - [ ] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered.
 - [ ] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health.
@@ -47,7 +47,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-03-PLAN.md — Rate limiting: coarse pre-auth IP guard + per-client 429 + Retry-After
+- [x] 01-03-PLAN.md — Rate limiting: coarse pre-auth IP guard + per-client 429 + Retry-After
 
 ### Phase 2: Webhook Delivery
 
@@ -116,7 +116,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Merge, Auth & Rate Limiting | 2/3 | In Progress|  |
+| 1. Merge, Auth & Rate Limiting | 3/3 | Complete   | 2026-07-03 |
 | 2. Webhook Delivery | 0/TBD | Not started | - |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
