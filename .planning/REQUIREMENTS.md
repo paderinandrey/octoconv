@@ -26,9 +26,9 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Rate Limiting
 
-- [ ] **RATE-01**: API применяет per-client rate limit (token bucket) на создание задач, ключ — `client_id`, не IP
-- [ ] **RATE-02**: При превышении лимита API возвращает 429 с заголовком `Retry-After`
-- [ ] **RATE-03**: Перед auth-мидлварой применяется грубый pre-auth IP-based rate limit как защита от флуда до похода в БД
+- [x] **RATE-01**: API применяет per-client rate limit (token bucket) на создание задач, ключ — `client_id`, не IP
+- [x] **RATE-02**: При превышении лимита API возвращает 429 с заголовком `Retry-After`
+- [x] **RATE-03**: Перед auth-мидлварой применяется грубый pre-auth IP-based rate limit как защита от флуда до похода в БД
 
 ### Reconciler
 
@@ -108,9 +108,9 @@ Requirements for этого этапа (production-hardening image-среза). 
 | AUTH-03 | Phase 1 | Pending |
 | AUTH-04 | Phase 1 | Pending |
 | AUTH-05 | Phase 1 | Pending |
-| RATE-01 | Phase 1 | Pending |
-| RATE-02 | Phase 1 | Pending |
-| RATE-03 | Phase 1 | Pending |
+| RATE-01 | Phase 1 | Complete |
+| RATE-02 | Phase 1 | Complete |
+| RATE-03 | Phase 1 | Complete |
 | WEBHOOK-01 | Phase 2 | Pending |
 | WEBHOOK-02 | Phase 2 | Pending |
 | WEBHOOK-03 | Phase 2 | Pending |
