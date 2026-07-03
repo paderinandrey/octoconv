@@ -43,7 +43,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-02-PLAN.md — Auth enforcement: resolver + middleware, client_id threading, 401/404 client scoping
+- [x] 01-02-PLAN.md — Auth enforcement: resolver + middleware, client_id threading, 401/404 client scoping
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -116,7 +116,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Merge, Auth & Rate Limiting | 1/3 | In Progress|  |
+| 1. Merge, Auth & Rate Limiting | 2/3 | In Progress|  |
 | 2. Webhook Delivery | 0/TBD | Not started | - |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
