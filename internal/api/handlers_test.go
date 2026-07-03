@@ -13,8 +13,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/apaderin/octoconv/internal/auth"
+	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/jobs"
 )
+
+// testClientKey is the raw key fakeResolver accepts; requests present it via
+// "Authorization: ApiKey testkey".
+const testClientKey = "testkey"
 
 // --- fakes ---
 
@@ -65,6 +71,23 @@ func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// fakeResolver implements auth.ClientResolver: it resolves testClientKey to a
+// fixed test client and rejects everything else with auth.ErrInvalidKey.
+type fakeResolver struct {
+	client *clients.Client
+}
+
+func newFakeResolver() *fakeResolver {
+	return &fakeResolver{client: &clients.Client{ID: uuid.New(), Name: "test-client"}}
+}
+
+func (f *fakeResolver) ResolveClient(_ context.Context, rawKey string) (*clients.Client, error) {
+	if rawKey != testClientKey {
+		return nil, auth.ErrInvalidKey
+	}
+	return f.client, nil
+}
+
 // --- helpers ---
 
 func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.Buffer, string) {
@@ -85,8 +108,18 @@ func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.B
 	return &b, w.FormDataContentType()
 }
 
-func newTestServer(repo Repo, store Storage, q Enqueuer) *Server {
-	return NewServer(repo, store, q, Config{MaxUploadBytes: 1 << 20})
+// newTestServer wires a Server with a fakeResolver that accepts
+// testClientKey; it returns the resolver too so tests can assert against its
+// fixed client id.
+func newTestServer(repo Repo, store Storage, q Enqueuer) (*Server, *fakeResolver) {
+	resolver := newFakeResolver()
+	return NewServer(repo, store, q, resolver, Config{MaxUploadBytes: 1 << 20}), resolver
+}
+
+// authed sets the Authorization header requests need to pass auth.Middleware.
+func authed(req *http.Request) *http.Request {
+	req.Header.Set("Authorization", "ApiKey "+testClientKey)
+	return req
 }
 
 // --- tests ---
@@ -95,10 +128,10 @@ func TestCreateJob_OK(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	q := &fakeQueue{}
-	srv := newTestServer(repo, store, q)
+	srv, resolver := newTestServer(repo, store, q)
 
 	body, ct := multipartBody(t, "in.png", "webp", []byte("fakepng"))
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", body)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
 	rec := httptest.NewRecorder()
 
@@ -113,18 +146,41 @@ func TestCreateJob_OK(t *testing.T) {
 	if repo.created == nil || repo.created.SourceFormat != "png" || repo.created.TargetFormat != "webp" {
 		t.Errorf("unexpected create params: %+v", repo.created)
 	}
+	if repo.created == nil || repo.created.ClientID != resolver.client.ID {
+		t.Errorf("expected CreateParams.ClientID = %s, got %+v", resolver.client.ID, repo.created)
+	}
 	if q.enqueued != repo.createdID {
 		t.Errorf("enqueued %s, want %s", q.enqueued, repo.createdID)
+	}
+}
+
+func TestCreateJob_NoAuthHeader_Unauthorized(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.png", "webp", []byte("fakepng"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", body)
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if repo.created != nil {
+		t.Error("must not create job when unauthenticated")
 	}
 }
 
 func TestCreateJob_UnsupportedPair(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
-	srv := newTestServer(repo, store, &fakeQueue{})
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
 
 	body, ct := multipartBody(t, "in.png", "mp3", []byte("fakepng"))
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", body)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
 	rec := httptest.NewRecorder()
 
@@ -142,11 +198,11 @@ func TestCreateJob_UnsupportedPair(t *testing.T) {
 }
 
 func TestCreateJob_TooLarge(t *testing.T) {
-	srv := newTestServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{})
+	srv, _ := newTestServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{})
 
 	big := make([]byte, (1<<20)+1024) // exceed 1 MiB test limit
 	body, ct := multipartBody(t, "in.png", "webp", big)
-	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", body)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
 	rec := httptest.NewRecorder()
 
@@ -157,21 +213,34 @@ func TestCreateJob_TooLarge(t *testing.T) {
 	}
 }
 
-func TestGetJob_DonePresigned(t *testing.T) {
-	id := uuid.New()
-	repo := &fakeRepo{
-		getJob:  &jobs.Job{ID: id, Status: jobs.StatusDone},
-		outputs: []jobs.Output{{Ordinal: 0, ObjectKey: "results/x/0-out.webp"}},
-	}
-	store := &fakeStorage{presigned: "https://example/download"}
-	srv := newTestServer(repo, store, &fakeQueue{})
+func TestHealthz_NoAuthRequired(t *testing.T) {
+	srv, _ := newTestServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil) // deliberately no Authorization header
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("status = %d, want 200 (D-09: /healthz must stay reachable without a key)", rec.Code)
+	}
+}
+
+func TestGetJob_DonePresigned(t *testing.T) {
+	id := uuid.New()
+	resolver := newFakeResolver()
+	repo := &fakeRepo{
+		getJob:  &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusDone},
+		outputs: []jobs.Output{{Ordinal: 0, ObjectKey: "results/x/0-out.webp"}},
+	}
+	store := &fakeStorage{presigned: "https://example/download"}
+	srv := NewServer(repo, store, &fakeQueue{}, resolver, Config{MaxUploadBytes: 1 << 20})
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -182,13 +251,48 @@ func TestGetJob_DonePresigned(t *testing.T) {
 
 func TestGetJob_NotFound(t *testing.T) {
 	repo := &fakeRepo{getErr: jobs.ErrNotFound}
-	srv := newTestServer(repo, &fakeStorage{}, &fakeQueue{})
+	srv, _ := newTestServer(repo, &fakeStorage{}, &fakeQueue{})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/jobs/"+uuid.New().String(), nil)
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+uuid.New().String(), nil))
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestGetJob_CrossClient_NotFound(t *testing.T) {
+	id := uuid.New()
+	otherClientID := uuid.New()
+	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: otherClientID, Status: jobs.StatusQueued}}
+	srv, _ := newTestServer(repo, &fakeStorage{}, &fakeQueue{})
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["error"] != "job not found" {
+		t.Fatalf(`error = %q, want "job not found" (identical to true-not-found)`, resp["error"])
+	}
+}
+
+func TestGetJob_SameClient_OK(t *testing.T) {
+	id := uuid.New()
+	resolver := newFakeResolver()
+	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, Config{MaxUploadBytes: 1 << 20})
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }

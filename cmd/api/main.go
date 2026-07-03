@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/apaderin/octoconv/internal/api"
+	"github.com/apaderin/octoconv/internal/auth"
+	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/queue"
@@ -44,7 +46,14 @@ func main() {
 	}
 	defer qc.Close()
 
-	srv := api.NewServer(jobs.NewRepo(pool), store, qc, api.Config{
+	salt := []byte(os.Getenv("API_KEY_SALT"))
+	if len(salt) == 0 {
+		log.Fatalf("API_KEY_SALT must be set")
+	}
+	clientRepo := clients.NewRepo(pool)
+	resolver := auth.NewResolver(clientRepo, salt)
+
+	srv := api.NewServer(jobs.NewRepo(pool), store, qc, resolver, api.Config{
 		MaxUploadBytes: envInt64("MAX_UPLOAD_BYTES", 100<<20),
 	})
 

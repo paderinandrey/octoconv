@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/storage"
@@ -80,10 +81,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Middleware guarantees a resolved client is present before this handler runs.
+	client, _ := auth.ClientFromContext(ctx)
+
 	// Postgres-first double write: record the job, then enqueue. The job id is
 	// the one already embedded in the storage key above so they stay aligned.
 	createdID, err := s.repo.Create(ctx, jobs.CreateParams{
 		ID:           jobID,
+		ClientID:     client.ID,
 		Operation:    operationConv,
 		Engine:       engineImage,
 		SourceFormat: source,
@@ -132,6 +137,16 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load job")
+		return
+	}
+
+	// Ownership guard: a job belonging to a different client is reported
+	// with the EXACT SAME status and message as a truly-missing job, so
+	// cross-client access is indistinguishable from not-found (AUTH-03) —
+	// never a 403, never a distinct message.
+	client, _ := auth.ClientFromContext(ctx)
+	if job.ClientID != client.ID {
+		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
 
