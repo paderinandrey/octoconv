@@ -54,7 +54,9 @@ func main() {
 	resolver := auth.NewResolver(clientRepo, salt)
 
 	srv := api.NewServer(jobs.NewRepo(pool), store, qc, resolver, api.Config{
-		MaxUploadBytes: envInt64("MAX_UPLOAD_BYTES", 100<<20),
+		MaxUploadBytes:     envInt64("MAX_UPLOAD_BYTES", 100<<20),
+		IPRateLimitRPM:     int(envInt64("RATE_LIMIT_IP_RPM", 60)),
+		ClientRateLimitRPM: int(envInt64("RATE_LIMIT_CLIENT_RPM", 120)),
 	})
 
 	addr := os.Getenv("API_ADDR")

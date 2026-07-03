@@ -39,12 +39,16 @@ type Server struct {
 	resolver      auth.ClientResolver
 	maxUploadByte int64
 	presignTTL    time.Duration
+	ipRateRPM     int
+	clientRateRPM int
 }
 
 // Config configures a Server.
 type Config struct {
-	MaxUploadBytes int64
-	PresignTTL     time.Duration
+	MaxUploadBytes     int64
+	PresignTTL         time.Duration
+	IPRateLimitRPM     int
+	ClientRateLimitRPM int
 }
 
 // NewServer builds an API server. resolver authenticates every /v1 request
@@ -57,6 +61,12 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 	if cfg.MaxUploadBytes == 0 {
 		cfg.MaxUploadBytes = 100 << 20 // 100 MiB
 	}
+	if cfg.IPRateLimitRPM == 0 {
+		cfg.IPRateLimitRPM = 60 // coarse pre-auth flood guard, conservative default
+	}
+	if cfg.ClientRateLimitRPM == 0 {
+		cfg.ClientRateLimitRPM = 120 // per-client, conservative for internal batch + interactive usage
+	}
 	return &Server{
 		repo:          repo,
 		storage:       storage,
@@ -64,5 +74,7 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 		resolver:      resolver,
 		maxUploadByte: cfg.MaxUploadBytes,
 		presignTTL:    cfg.PresignTTL,
+		ipRateRPM:     cfg.IPRateLimitRPM,
+		clientRateRPM: cfg.ClientRateLimitRPM,
 	}
 }
