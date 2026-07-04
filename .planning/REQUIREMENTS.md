@@ -13,11 +13,11 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Authentication
 
-- [ ] **AUTH-01**: Клиент аутентифицируется в API через API-ключ, привязанный к записи в таблице `clients`
-- [ ] **AUTH-02**: API отклоняет запросы с отсутствующим/неверным/отозванным ключом (401)
-- [ ] **AUTH-03**: API возвращает 404 (не 403) для задач, принадлежащих другому клиенту — не подтверждает существование job_id постороннему вызывающему
-- [ ] **AUTH-04**: API-ключи хранятся только в виде хешей (salted SHA-256), plaintext нигде не сохраняется и не логируется
-- [ ] **AUTH-05**: Схема `clients` поддерживает два одновременно активных ключа на клиента для ротации без даунтайма
+- [x] **AUTH-01**: Клиент аутентифицируется в API через API-ключ, привязанный к записи в таблице `clients`
+- [x] **AUTH-02**: API отклоняет запросы с отсутствующим/неверным/отозванным ключом (401)
+- [x] **AUTH-03**: API возвращает 404 (не 403) для задач, принадлежащих другому клиенту — не подтверждает существование job_id постороннему вызывающему
+- [x] **AUTH-04**: API-ключи хранятся только в виде хешей (salted SHA-256), plaintext нигде не сохраняется и не логируется
+- [x] **AUTH-05**: Схема `clients` поддерживает два одновременно активных ключа на клиента для ротации без даунтайма
 
 ### Reliability
 
@@ -102,12 +102,12 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BASE-01 | Phase 1 | Pending |
-| AUTH-01 | Phase 1 | Pending |
-| AUTH-02 | Phase 1 | Pending |
-| AUTH-03 | Phase 1 | Pending |
-| AUTH-04 | Phase 1 | Pending |
-| AUTH-05 | Phase 1 | Pending |
+| BASE-01 | Phase 1 | Complete |
+| AUTH-01 | Phase 1 | Complete |
+| AUTH-02 | Phase 1 | Complete |
+| AUTH-03 | Phase 1 | Complete |
+| AUTH-04 | Phase 1 | Complete |
+| AUTH-05 | Phase 1 | Complete |
 | RATE-01 | Phase 1 | Complete |
 | RATE-02 | Phase 1 | Complete |
 | RATE-03 | Phase 1 | Complete |

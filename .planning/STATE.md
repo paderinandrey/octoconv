@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: "Phase 1: Wave 1 (01-01) and Wave 2 (01-02) complete, merged to main, build+tests green. Wave 3 (01-03, rate limiting) not started."
-last_updated: "2026-07-04T14:11:19.149Z"
+status: ready_to_plan
+stopped_at: Phase 1 complete (4/4) — ready to discuss Phase 2
+last_updated: 2026-07-04T14:41:12.985Z
 last_activity: 2026-07-04 -- Phase 1 planning complete
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 4
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-02)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 1 — Merge, Auth & Rate Limiting
+**Current focus:** Phase 2 — webhook delivery
 
 ## Current Position
 
-Phase: 1 (Merge, Auth & Rate Limiting) — EXECUTING
-Plan: 1 of 3
-Status: Ready to execute
-Last activity: 2026-07-04 -- Phase 1 planning complete
+Phase: 2
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-04
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 4
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -44,7 +44,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1 | 4 | - | - |
 
 **Recent Trend:**
 
