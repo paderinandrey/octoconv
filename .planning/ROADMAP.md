@@ -72,8 +72,8 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — callback_url intake + SSRF validation: accept/validate callback_url on POST /v1/jobs, surface through jobs domain/repo (WEBHOOK-01, D-02, D-03)
-- [ ] 02-02-PLAN.md — webhook package: HMAC-SHA256 signing, delivery-attempt repo + dead_letter migration, single-attempt HTTPS deliverer (WEBHOOK-02/04/05, D-01/D-07/D-08/D-10)
+- [x] 02-01-PLAN.md — callback_url intake + SSRF validation: accept/validate callback_url on POST /v1/jobs, surface through jobs domain/repo (WEBHOOK-01, D-02, D-03)
+- [x] 02-02-PLAN.md — webhook package: HMAC-SHA256 signing, delivery-attempt repo + dead_letter migration, single-attempt HTTPS deliverer (WEBHOOK-02/04/05, D-01/D-07/D-08/D-10)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -127,6 +127,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
-| 2. Webhook Delivery | 0/3 | Not started | - |
+| 2. Webhook Delivery | 2/3 | In Progress|  |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
