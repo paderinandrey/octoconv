@@ -13,7 +13,7 @@ This milestone hardens the existing image-conversion vertical slice into a produ
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [x] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (completed 2026-07-03)
+- [ ] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (gap closure in progress — verification found 2 gaps)
 - [ ] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling.
 - [ ] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered.
 - [ ] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health.
@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. API keys are stored only as salted SHA-256 hashes (never plaintext), and a client can hold two simultaneously active keys to support rotation without downtime.
   5. A client exceeding their per-client request rate receives 429 with a `Retry-After` header; a coarse pre-auth IP-based limit throttles flood traffic before it reaches auth or the database.
 
-**Plans**: 3 plans
+**Plans**: 4 plans (3 original + 1 gap closure)
 
 Plans:
 **Wave 1**
@@ -48,6 +48,10 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 01-03-PLAN.md — Rate limiting: coarse pre-auth IP guard + per-client 429 + Retry-After
+
+**Wave 4** *(gap closure — from 01-VERIFICATION.md)*
+
+- [ ] 01-04-PLAN.md — Close Gap 1 (jobs integration tests fail live jobs_client_id_fkey — BASE-01/SC1) and Gap 2 (spoofable pre-auth IP flood guard via deprecated middleware.RealIP — RATE-03/SC5, == REVIEW CR-01)
 
 ### Phase 2: Webhook Delivery
 
@@ -116,7 +120,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Merge, Auth & Rate Limiting | 3/3 | Complete   | 2026-07-03 |
+| 1. Merge, Auth & Rate Limiting | 3/4 | Gap closure | - |
 | 2. Webhook Delivery | 0/TBD | Not started | - |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
