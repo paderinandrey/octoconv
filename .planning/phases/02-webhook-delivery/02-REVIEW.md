@@ -22,11 +22,12 @@ files_reviewed_list:
   - internal/worker/worker.go
   - cmd/worker/main.go
 findings:
-  critical: 2
+  critical: 0
+  critical_fixed: 2
   warning: 4
   info: 3
   total: 9
-status: issues_found
+status: fixed
 ---
 
 # Phase 2: Code Review Report
@@ -34,7 +35,14 @@ status: issues_found
 **Reviewed:** 2026-07-04T19:01:44Z
 **Depth:** standard
 **Files Reviewed:** 17
-**Status:** issues_found
+**Status:** fixed (2 critical findings fixed post-review; 4 warnings + 3 info remain open, non-blocking)
+
+## Fixes Applied
+
+- **CR-01** (redirect SSRF bypass): fixed in `internal/webhook/deliver.go` — `CheckRedirect` now returns `http.ErrUseLastResponse`, so no redirect is followed. Commit `6a96518`.
+- **CR-02** (retry backoff off-by-one): fixed in `internal/queue/queue.go` — `WebhookRetryDelay` now indexes `webhookRetrySchedule` directly with asynq's 0-based `n`, no `-1` shift. Added `TestWebhookRetryDelaySchedule` regression test in `internal/queue/queue_test.go`. Commit `df85b27`.
+
+Warnings (WR-01..04) and info items (IN-01..03) below were left open — none are blocking for this phase; they're candidates for a follow-up pass.
 
 ## Summary
 
