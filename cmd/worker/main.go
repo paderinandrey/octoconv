@@ -16,6 +16,7 @@ import (
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
+	"github.com/apaderin/octoconv/internal/webhook"
 	"github.com/apaderin/octoconv/internal/worker"
 )
 
@@ -38,17 +39,40 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 
-	h := worker.NewHandler(jobs.NewRepo(pool), store, convert.Default, envDuration("ENGINE_TIMEOUT", 120*time.Second))
+	signingSecret := []byte(os.Getenv("WEBHOOK_SIGNING_SECRET"))
+	if len(signingSecret) == 0 {
+		log.Fatalf("WEBHOOK_SIGNING_SECRET must be set")
+	}
+
+	qc, err := queue.NewClient()
+	if err != nil {
+		log.Fatalf("queue client: %v", err)
+	}
+	defer qc.Close()
+
+	h := worker.NewHandler(
+		jobs.NewRepo(pool),
+		store,
+		convert.Default,
+		envDuration("ENGINE_TIMEOUT", 120*time.Second),
+		webhook.NewRepo(pool),
+		webhook.NewDeliverer(),
+		qc,
+		signingSecret,
+		envDuration("WEBHOOK_PRESIGN_TTL", 6*time.Hour),
+	)
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeImageConvert, h.HandleImageConvert)
+	mux.HandleFunc(queue.TypeWebhookDeliver, h.HandleWebhookDeliver)
 
 	srv := asynq.NewServer(redisOpt, asynq.Config{
-		Concurrency: envInt("WORKER_CONCURRENCY", 4),
-		Queues:      map[string]int{queue.QueueImage: 1},
+		Concurrency:    envInt("WORKER_CONCURRENCY", 4),
+		Queues:         map[string]int{queue.QueueImage: 2, queue.QueueWebhook: 1},
+		RetryDelayFunc: queue.WebhookRetryDelay,
 	})
 
-	log.Printf("🐙 image worker starting (queue=%s)", queue.QueueImage)
+	log.Printf("🐙 worker starting (queues=%s,%s)", queue.QueueImage, queue.QueueWebhook)
 	// Run blocks until SIGINT/SIGTERM and shuts down gracefully.
 	if err := srv.Run(mux); err != nil {
 		log.Fatalf("worker: %v", err)
