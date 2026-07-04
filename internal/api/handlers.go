@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	formFieldFile   = "file"
-	formFieldTarget = "target"
-	engineImage     = "image"
-	operationConv   = "convert"
+	formFieldFile        = "file"
+	formFieldTarget      = "target"
+	formFieldCallbackURL = "callback_url"
+	engineImage          = "image"
+	operationConv        = "convert"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -72,6 +73,17 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// callback_url is optional (per-job, D-02); an empty value leaves the
+	// existing polling path unchanged. When present it is SSRF-validated
+	// BEFORE writing anything to storage, same discipline as the format pair.
+	callbackURL := r.FormValue(formFieldCallbackURL)
+	if callbackURL != "" {
+		if err := validateCallbackURL(callbackURL); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid callback_url")
+			return
+		}
+	}
+
 	jobID := uuid.New()
 	key := storage.InputKey(jobID, 0, filename)
 	contentType := header.Header.Get("Content-Type")
@@ -93,6 +105,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Engine:       engineImage,
 		SourceFormat: source,
 		TargetFormat: target,
+		CallbackURL:  callbackURL,
 		Input: jobs.Input{
 			Ordinal:     0,
 			ObjectKey:   key,

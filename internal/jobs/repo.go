@@ -32,6 +32,7 @@ type CreateParams struct {
 	Engine       string
 	SourceFormat string
 	TargetFormat string
+	CallbackURL  string
 	Input        Input
 }
 
@@ -47,9 +48,9 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
 
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format)
-			VALUES ($1, $2, $3, $4, 'queued', $5, $6)`,
-			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat,
+			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format, callback_url)
+			VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7)`,
+			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat, p.CallbackURL,
 		); err != nil {
 			return fmt.Errorf("insert job: %w", err)
 		}
@@ -121,14 +122,14 @@ func (r *Repo) AddOutput(ctx context.Context, jobID uuid.UUID, o Output) error {
 // Get loads a job by id. Returns ErrNotFound if it does not exist.
 func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	var j Job
-	var src, tgt, code, msg *string
+	var src, tgt, cb, code, msg *string
 	var clientID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, client_id, operation, engine, status, source_format, target_format,
-		       error_code, error_message, created_at, started_at, finished_at
+		       callback_url, error_code, error_message, created_at, started_at, finished_at
 		FROM jobs WHERE id = $1`, id,
 	).Scan(&j.ID, &clientID, &j.Operation, &j.Engine, &j.Status, &src, &tgt,
-		&code, &msg, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
+		&cb, &code, &msg, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -143,6 +144,7 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	}
 	j.SourceFormat = deref(src)
 	j.TargetFormat = deref(tgt)
+	j.CallbackURL = deref(cb)
 	j.ErrorCode = deref(code)
 	j.ErrorMessage = deref(msg)
 	return &j, nil
