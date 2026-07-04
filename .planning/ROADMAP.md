@@ -67,11 +67,17 @@ Plans:
   4. Every delivery attempt (status, attempt number, HTTP response code) is recorded in `webhook_deliveries`.
   5. After retries are exhausted, a delivery is marked terminal (dead-letter) rather than silently dropped, and remains available for manual investigation.
 
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
+**Wave 1**
 
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md — callback_url intake + SSRF validation: accept/validate callback_url on POST /v1/jobs, surface through jobs domain/repo (WEBHOOK-01, D-02, D-03)
+- [ ] 02-02-PLAN.md — webhook package: HMAC-SHA256 signing, delivery-attempt repo + dead_letter migration, single-attempt HTTPS deliverer (WEBHOOK-02/04/05, D-01/D-07/D-08/D-10)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-03-PLAN.md — delivery execution wiring: webhook asynq task/queue + bounded backoff, enqueue-on-completion, HandleWebhookDeliver (fresh presigned URL per attempt), cmd/worker registration + signing secret (WEBHOOK-01/03/04/05, D-04/D-05/D-09)
 
 ### Phase 3: Retry-Safety & Reconciler
 
@@ -121,6 +127,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
-| 2. Webhook Delivery | 0/TBD | Not started | - |
+| 2. Webhook Delivery | 0/3 | Not started | - |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
