@@ -17,8 +17,20 @@ type Deliverer struct {
 // NewDeliverer builds a Deliverer bound to a 10s per-attempt HTTP timeout
 // (D-08), independent of the task queue's own inter-attempt retry backoff
 // (D-05).
+//
+// CheckRedirect refuses to follow any redirect: a callback_url that passed
+// SSRF validation once (D-03) could otherwise 302 the delivery to a blocked
+// address (e.g. 169.254.169.254) and bypass isBlockedIP entirely, since
+// net/http follows redirects automatically by default. Returning
+// http.ErrUseLastResponse makes the redirect response itself the result,
+// which the 2xx-only success check below correctly treats as a failure.
 func NewDeliverer() *Deliverer {
-	return &Deliverer{hc: &http.Client{Timeout: 10 * time.Second}}
+	return &Deliverer{hc: &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}}
 }
 
 // Deliver POSTs body to url with signature/timestamp headers, executing a
