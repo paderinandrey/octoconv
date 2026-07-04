@@ -20,10 +20,12 @@ package ratelimit
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 
 	"github.com/apaderin/octoconv/internal/auth"
@@ -50,13 +52,36 @@ func PerClient(rpm int) func(http.Handler) http.Handler {
 // source IP. It is meant to run BEFORE auth: it needs no request context
 // beyond the IP, so it throttles unauthenticated flood traffic before it can
 // reach the auth resolver's Postgres lookup.
+//
+// It keys on the unforgeable peer IP set by
+// middleware.ClientIPFromRemoteAddr (via ipKey/middleware.GetClientIP), not
+// httprate.KeyByIP — which would read net/http's RemoteAddr after it may
+// have been overwritten by a client-supplied forwarding header. This closes
+// the spoofing bypass where varying X-Forwarded-For per request lands each
+// request in a fresh bucket and evades the limiter entirely.
 func ByIP(rpm int) func(http.Handler) http.Handler {
 	return httprate.Limit(
 		rpm,
 		window,
-		httprate.WithKeyFuncs(httprate.KeyByIP),
+		httprate.WithKeyFuncs(ipKey),
 		httprate.WithLimitHandler(limitHandler(window)),
 	)
+}
+
+// ipKey is an httprate.KeyFunc that reads the client IP set by
+// middleware.ClientIPFromRemoteAddr. If that middleware did not run (e.g. a
+// direct unit test exercising ByIP in isolation), it falls back to the raw
+// peer host parsed from r.RemoteAddr — never to a client-supplied header
+// such as X-Forwarded-For, X-Real-IP, or True-Client-IP.
+func ipKey(r *http.Request) (string, error) {
+	if ip := middleware.GetClientIP(r.Context()); ip != "" {
+		return ip, nil
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr, nil
+	}
+	return host, nil
 }
 
 // clientKey is an httprate.KeyFunc that keys on the authenticated client's
