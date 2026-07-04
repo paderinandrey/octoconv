@@ -28,6 +28,7 @@ type Job struct {
 	Status       string
 	SourceFormat string
 	TargetFormat string
+	CallbackURL  string
 	ErrorCode    string
 	ErrorMessage string
 	CreatedAt    time.Time
