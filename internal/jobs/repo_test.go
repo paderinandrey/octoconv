@@ -26,11 +26,26 @@ func newTestRepo(t *testing.T) *Repo {
 	return NewRepo(pool)
 }
 
+// createTestClient inserts a minimal clients row (name only, leaving
+// api_key_hash NULL so no UNIQUE constraint on the key-hash columns is
+// touched) and returns its id, so integration tests can satisfy the
+// jobs.client_id foreign key without a cross-package import.
+func createTestClient(t *testing.T, r *Repo) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	err := r.pool.QueryRow(context.Background(), "INSERT INTO clients (name) VALUES ($1) RETURNING id", "jobs-test-client").Scan(&id)
+	if err != nil {
+		t.Fatalf("create test client: %v", err)
+	}
+	return id
+}
+
 func TestJobLifecycle(t *testing.T) {
 	r := newTestRepo(t)
 	ctx := context.Background()
 
 	id, err := r.Create(ctx, CreateParams{
+		ClientID:     createTestClient(t, r),
 		Operation:    "convert",
 		Engine:       "image",
 		SourceFormat: "png",
@@ -104,6 +119,7 @@ func TestMarkFailed(t *testing.T) {
 	ctx := context.Background()
 
 	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
 		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
 		Input: Input{ObjectKey: "uploads/y/0-in.png", Filename: "in.png", Format: "png"},
 	})

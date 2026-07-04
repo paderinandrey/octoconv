@@ -16,10 +16,18 @@ import (
 // coarse pre-auth flood guard (before any DB lookup), then auth.Middleware
 // resolves the client, then ratelimit.PerClient — keyed on the now-resolved
 // client_id — enforces the fair per-client quota.
+//
+// Pre-auth IP identity comes from middleware.ClientIPFromRemoteAddr, which
+// trusts only the raw TCP peer address of the connection. This service sits
+// behind no trusted reverse proxy (PROJECT.md / 01-CONTEXT.md), so any
+// client-supplied forwarding header (X-Forwarded-For, X-Real-IP,
+// True-Client-IP) is intentionally ignored — trusting them here would let a
+// single attacker manufacture unlimited fresh rate-limit buckets by varying
+// the header per request, defeating ratelimit.ByIP entirely.
 func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(middleware.ClientIPFromRemoteAddr)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
