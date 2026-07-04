@@ -61,7 +61,7 @@ func main() {
 
 	addr := os.Getenv("API_ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = ":8090"
 	}
 	httpSrv := &http.Server{
 		Addr:              addr,

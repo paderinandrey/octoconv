@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: octo-pass
       POSTGRES_DB: octo_db
     ports:
-      - "5433:5432"
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -82,13 +82,13 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: octoconv
       S3_USE_SSL: "false"
-      API_ADDR: ":8080"
+      API_ADDR: ":8090"
       MAX_UPLOAD_BYTES: "104857600"
       API_KEY_SALT: "dev-only-change-me-in-real-deploys"
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
     ports:
-      - "8080:8080"
+      - "8090:8090"
 
   worker:
     build:

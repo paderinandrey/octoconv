@@ -57,14 +57,15 @@ docker compose up -d
 
 | Сервис   | Образ            | Порт (host) | Заметки                          |
 |----------|------------------|-------------|----------------------------------|
-| postgres | postgres:18      | **5433**    | `octo / octo-pass / octo_db`     |
+| postgres | postgres:18      | **5434**    | `octo / octo-pass / octo_db`     |
 | redis    | redis:8          | 6379        | брокер asynq                     |
 | minio    | minio/minio      | **9100** (API), **9101** (консоль) | `minioadmin / minioadmin`, бакет `octoconv` создаётся автоматически |
-| api      | Dockerfile.api   | 8080        | HTTP API                         |
+| api      | Dockerfile.api   | **8090**    | HTTP API                         |
 | worker   | Dockerfile.worker| —           | воркер image (libvips), под `nobody`, лимиты CPU/RAM |
 
-> Нестандартные хост-порты (5433, 9100/9101) выбраны, чтобы не конфликтовать с другими
-> локальными стеками. Меняются в `docker-compose.yml` и `.env`.
+> Нестандартные хост-порты (5434, 9100/9101, 8090) выбраны, чтобы не конфликтовать с другими
+> локальными стеками (8080 занят локальным Ruby-приложением, 5433/5432 — локальным Rails-приложением).
+> Меняются в `docker-compose.yml` и `.env`.
 > MinIO-консоль: http://localhost:9101
 >
 > **Presigned URL в полном compose:** сервис `api` в контейнере presign'ит ссылки на
@@ -91,7 +92,7 @@ go run ./cmd/migrate
 ```bash
 docker compose up -d --build worker     # воркер image с libvips, в compose-сети
 set -a && . ./.env && set +a
-go run ./cmd/api                         # HTTP API на :8080
+go run ./cmd/api                         # HTTP API на :8090
 ```
 
 Полностью в Docker (с оговоркой про presigned URL выше):
@@ -100,21 +101,58 @@ go run ./cmd/api                         # HTTP API на :8080
 docker compose up -d --build            # postgres, redis, minio, api, worker
 ```
 
+## Аутентификация
+
+Все `/v1/*` эндпоинты требуют API-ключ клиента (`/healthz` — исключение, остаётся публичным).
+Ключи выпускаются и управляются через CLI `manage-clients`, а не через API.
+
+### Выпустить ключ
+
+```bash
+docker compose up -d                       # если инфраструктура ещё не поднята
+set -a && . ./.env && set +a
+go run ./cmd/migrate                       # применить миграции (идемпотентно)
+go run ./cmd/manage-clients create "имя-клиента"
+# client id: <uuid>
+# api key (save now, shown once): <raw-key>
+```
+
+**Ключ печатается ровно один раз** — сохраните его сразу, он никогда не хранится и не
+логируется в открытом виде (в БД — только salted SHA-256 хеш).
+
+### Ротация без даунтайма и отзыв
+
+Схема поддерживает два одновременно активных ключа на клиента (primary/secondary):
+
+```bash
+go run ./cmd/manage-clients add-key <client-id>
+# добавляет второй активный ключ — оба валидны, пока не отозван старый
+# api key (save now, shown once): <new-raw-key>
+
+go run ./cmd/manage-clients revoke <client-id> <primary|secondary>
+# отзывает конкретный слот; запись клиента не удаляется — история задач сохраняется
+```
+
 ## API
 
 Поставить задачу:
 
 ```bash
-curl -F file=@report.png -F target=webp http://localhost:8080/v1/jobs
+curl -H "Authorization: ApiKey <raw-key>" \
+  -F file=@report.png -F target=webp http://localhost:8090/v1/jobs
 # {"job_id":"...","status":"queued"}
 ```
 
 Статус / результат:
 
 ```bash
-curl http://localhost:8080/v1/jobs/<job_id>
+curl -H "Authorization: ApiKey <raw-key>" http://localhost:8090/v1/jobs/<job_id>
 # {"job_id":"...","status":"done","download_url":"..."}
 ```
+
+Без ключа или с неверным/отозванным ключом — `401`. Чужой job (не принадлежащий клиенту) —
+`404`, как и реально несуществующий (никогда `403` — не подтверждаем существование чужого job).
+Превышение лимита запросов — `429` с заголовком `Retry-After`.
 
 ## Конфигурация (`.env`)
 
@@ -128,6 +166,9 @@ curl http://localhost:8080/v1/jobs/<job_id>
 | `S3_USE_SSL`      | `true`/`false`                      |
 | `API_ADDR`        | адрес HTTP API                      |
 | `MAX_UPLOAD_BYTES`| лимит размера загрузки (100 MiB)    |
+| `API_KEY_SALT`    | server-side pepper для хеширования API-ключей (обязателен для `cmd/api` и `cmd/manage-clients`) |
+| `RATE_LIMIT_IP_RPM` | грубый pre-auth лимит по IP, запросов/мин (по умолчанию 60) |
+| `RATE_LIMIT_CLIENT_RPM` | per-client лимит, запросов/мин (по умолчанию 120) |
 | `WORKER_CONCURRENCY` | число воркеров в процессе        |
 | `ENGINE_TIMEOUT`  | таймаут на один запуск движка       |
 

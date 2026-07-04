@@ -75,7 +75,7 @@
 
 **Production:**
 - Docker Compose deployment target (services: `postgres:18`, `redis:8`, `minio/minio:latest`, plus built `api` and `worker` images) — see `docker-compose.yml`
-- Non-standard host ports used to avoid local conflicts: Postgres on `5433`, MinIO API/console on `9100`/`9101` (`README.md:66`)
+- Non-standard host ports used to avoid local conflicts: Postgres on `5434`, MinIO API/console on `9100`/`9101` (`README.md:66`)
 - Worker container resource-limited (2 CPU / 1 GiB RAM) and runs as unprivileged `nobody` since it shells out to untrusted-input engines (`Dockerfile.worker:16`)
 
 ---

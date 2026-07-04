@@ -22,7 +22,7 @@ No outbound calls to third-party SaaS APIs (payment, email, SMS, etc.) were foun
   - Repository layer: `internal/jobs/repo.go` (job CRUD), `internal/jobs/jobs.go` (domain types)
   - Schema/migrations: `internal/db/migrations/0001_init.sql`, embedded into the binary via `go:embed` and applied idempotently at startup by both `cmd/api/main.go:32` and `cmd/migrate/main.go:19` (tracked in a `schema_migrations` table)
   - Tables: `clients`, `presets`, `jobs`, `job_inputs`, `job_outputs`, `job_events`, `webhook_deliveries`
-  - Local dev/compose instance: `postgres:18` image, host port `5433` mapped to container `5432`, credentials `octo` / `octo-pass`, db `octo_db` (`docker-compose.yml:2-18`)
+  - Local dev/compose instance: `postgres:18` image, host port `5434` mapped to container `5432`, credentials `octo` / `octo-pass`, db `octo_db` (`docker-compose.yml:2-18`)
 
 **File Storage:**
 - S3-compatible object storage (MinIO in dev/compose, any S3-compatible endpoint in general)

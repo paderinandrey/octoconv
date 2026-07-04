@@ -174,7 +174,7 @@
 
 **HTTP API (`cmd/api/main.go`):**
 - Location: `cmd/api/main.go`
-- Triggers: Process start; listens on `API_ADDR` (default `:8080`)
+- Triggers: Process start; listens on `API_ADDR` (default `:8090`)
 - Responsibilities: Connect to Postgres and run migrations, construct storage/queue clients, wire `api.NewServer`, start `net/http.Server`, handle `SIGINT`/`SIGTERM` for graceful shutdown (15s timeout)
 
 **Worker (`cmd/worker/main.go`):**
