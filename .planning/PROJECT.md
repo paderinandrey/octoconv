@@ -2,7 +2,7 @@
 
 ## What This Is
 
-OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. Сейчас реализован один сквозной вертикальный срез — конвертация изображений через libvips — рабочий end-to-end на живой инфраструктуре, но ещё не production-ready и не влит в `main`.
+OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. Реализован сквозной вертикальный срез — конвертация изображений через libvips — на `main`, теперь с обязательной API-key аутентификацией (salted-hash ключи, ротация без даунтайма) и rate limiting (per-client + pre-auth IP-guard). Остальные пункты hardening (webhooks, reconciler, content validation, storage TTL, observability) — впереди.
 
 ## Core Value
 
@@ -19,14 +19,15 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Жизненный цикл задачи отслеживается в PostgreSQL (`queued → active → done/failed`) с append-only журналом переходов (`job_events`) — existing
 - ✓ `GET /v1/jobs/{id}` отдаёт статус и presigned download URL готового результата — existing
 - ✓ Graceful shutdown API и воркера — existing
+- ✓ Ветка `feat/scaffold-and-infra` влита в `main` — Phase 1 (уже была слита до начала фазы, подтверждено при планировании)
+- ✓ API-ключи для клиентов через таблицу `clients` (`cmd/manage-clients` CLI: create/add-key/revoke), salted SHA-256 хеш, два активных слота на ротацию без даунтайма — Phase 1
+- ✓ Обязательная аутентификация на всех `/v1/*` (hard cutover, 401), `/healthz` остаётся публичным, cross-client доступ → 404 (никогда 403) — Phase 1
+- ✓ Rate limiting: per-client лимит по `client_id` (429 + Retry-After) и pre-auth IP-guard (`middleware.ClientIPFromRemoteAddr`, не спуфится) — Phase 1
 
 ### Active
 
-<!-- Этот этап: production-hardening существующего image-среза. -->
+<!-- Следующий этап: Phase 2 — Webhook Delivery. -->
 
-- [ ] Влить ветку `feat/scaffold-and-infra` в `main`
-- [ ] API-ключи для клиентов через таблицу `clients`, привязка задач к `jobs.client_id`
-- [ ] Rate limiting на клиента
 - [ ] Webhook-доставка результата (`jobs.callback_url` + `webhook_deliveries`) вместо поллинга статуса
 - [ ] Reconciler/свипер задач, зависших в `queued` без работы в очереди (и наоборот)
 - [ ] Валидация содержимого файла по magic bytes вместо доверия расширению/Content-Type
@@ -61,8 +62,8 @@ OctoConv — внутренний асинхронный сервис конве
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Слить `feat/scaffold-and-infra` в `main` в начале этапа | Дальнейший hardening должен идти поверх `main`, а не в изолированной ветке | — Pending |
-| Auth + rate limiting — первый приоритет hardening | API сейчас полностью публичный без аутентификации — самый большой риск | — Pending |
+| Слить `feat/scaffold-and-infra` в `main` в начале этапа | Дальнейший hardening должен идти поверх `main`, а не в изолированной ветке | ✓ Good — уже была слита к моменту планирования Phase 1 |
+| Auth + rate limiting — первый приоритет hardening | API сейчас полностью публичный без аутентификации — самый большой риск | ✓ Good — Phase 1 закрыта, 12/12 must-haves, включая gap-closure по spoofable IP-guard |
 | Все пункты hardening (auth, webhooks, reconciler, magic-bytes+TTL, наблюдаемость) — в v1 этого этапа, auth первым | Все критичны для production-готовности; различается только порядок реализации по убыванию риска | — Pending |
 | CAD и остальные классы движков — вне скопа этого этапа | Открытый вопрос по CAD SDK не решён; остальные движки — следующий этап роста, не текущий hardening | — Pending |
 | Контракт ядра (Handler/Capability/Input/Output) отложен | Рефакторинг делать при добавлении новых движков, а не сейчас — иначе придётся переделывать дважды | — Pending |
@@ -85,4 +86,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-02 after initialization*
+*Last updated: 2026-07-04 after Phase 1 (Merge, Auth & Rate Limiting) complete*
