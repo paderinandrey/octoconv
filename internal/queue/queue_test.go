@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -24,6 +25,38 @@ func TestConvertPayloadRoundTrip(t *testing.T) {
 	}
 	if p.JobID != id {
 		t.Errorf("job id = %s, want %s", p.JobID, id)
+	}
+}
+
+// TestWebhookRetryDelaySchedule asserts WebhookRetryDelay indexes
+// webhookRetrySchedule with asynq's 0-based retry count (msg.Retried),
+// within the ±25% jitter band, and clamps at the schedule's last entry.
+func TestWebhookRetryDelaySchedule(t *testing.T) {
+	schedule := []time.Duration{
+		30 * time.Second,
+		1 * time.Minute,
+		2 * time.Minute,
+		4 * time.Minute,
+		8 * time.Minute,
+		15 * time.Minute,
+	}
+	cases := []struct {
+		n    int
+		base time.Duration
+	}{
+		{n: 0, base: schedule[0]},
+		{n: 1, base: schedule[1]},
+		{n: 5, base: schedule[5]},
+		{n: 6, base: schedule[5]},  // clamps past the end of the schedule
+		{n: 100, base: schedule[5]},
+	}
+	for _, tc := range cases {
+		delay := WebhookRetryDelay(tc.n, nil, nil)
+		lo := time.Duration(float64(tc.base) * 0.75)
+		hi := time.Duration(float64(tc.base) * 1.25)
+		if delay < lo || delay > hi {
+			t.Errorf("WebhookRetryDelay(%d) = %v, want within [%v, %v] (base %v)", tc.n, delay, lo, hi, tc.base)
+		}
 	}
 }
 

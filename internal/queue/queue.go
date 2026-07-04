@@ -91,16 +91,18 @@ var webhookRetrySchedule = []time.Duration{
 	15 * time.Minute,
 }
 
-// WebhookRetryDelay is an asynq RetryDelayFunc for the webhook queue. It
-// returns the nth (1-based retry number) entry from webhookRetrySchedule,
+// WebhookRetryDelay is an asynq RetryDelayFunc for the webhook queue. asynq
+// calls this with n = the 0-based count of retries so far (0 on the first
+// retry, after the first delivery attempt failed), so n indexes directly
+// into webhookRetrySchedule with no off-by-one adjustment. The index is
 // clamped to the last entry once n exceeds the schedule length, with up to
 // ±25% jitter so simultaneously-failing deliveries don't thundering-herd a
 // recovering endpoint (D-05).
 func WebhookRetryDelay(n int, e error, t *asynq.Task) time.Duration {
-	if n < 1 {
-		n = 1
+	idx := n
+	if idx < 0 {
+		idx = 0
 	}
-	idx := n - 1
 	if idx >= len(webhookRetrySchedule) {
 		idx = len(webhookRetrySchedule) - 1
 	}
