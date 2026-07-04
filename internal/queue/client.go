@@ -36,3 +36,15 @@ func (c *Client) EnqueueImageConvert(ctx context.Context, jobID uuid.UUID) error
 	}
 	return nil
 }
+
+// EnqueueWebhookDeliver puts a webhook delivery task onto the webhook queue.
+func (c *Client) EnqueueWebhookDeliver(ctx context.Context, jobID uuid.UUID) error {
+	task, err := NewWebhookDeliverTask(jobID)
+	if err != nil {
+		return err
+	}
+	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
+		return fmt.Errorf("enqueue webhook deliver %s: %w", jobID, err)
+	}
+	return nil
+}
