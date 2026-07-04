@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,22 +17,43 @@ import (
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
+	"github.com/apaderin/octoconv/internal/webhook"
 )
 
 // Handler processes image conversion tasks end to end.
 type Handler struct {
-	repo         *jobs.Repo
-	store        *storage.Client
-	registry     *convert.Registry
-	engineTimout time.Duration
+	repo          *jobs.Repo
+	store         *storage.Client
+	registry      *convert.Registry
+	engineTimout  time.Duration
+	webhookRepo   *webhook.Repo
+	deliverer     *webhook.Deliverer
+	enqueuer      *queue.Client
+	signingSecret []byte
+	presignTTL    time.Duration
 }
 
 // NewHandler builds a worker handler.
-func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration) *Handler {
+func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration, webhookRepo *webhook.Repo, deliverer *webhook.Deliverer, enqueuer *queue.Client, signingSecret []byte, presignTTL time.Duration) *Handler {
 	if engineTimeout == 0 {
 		engineTimeout = 120 * time.Second
 	}
-	return &Handler{repo: repo, store: store, registry: registry, engineTimout: engineTimeout}
+	if presignTTL == 0 {
+		// D-09: comfortably exceed the ~30 min retry window so a recovering
+		// or dead-lettered client can still fetch the result.
+		presignTTL = 6 * time.Hour
+	}
+	return &Handler{
+		repo:          repo,
+		store:         store,
+		registry:      registry,
+		engineTimout:  engineTimeout,
+		webhookRepo:   webhookRepo,
+		deliverer:     deliverer,
+		enqueuer:      enqueuer,
+		signingSecret: signingSecret,
+		presignTTL:    presignTTL,
+	}
 }
 
 // HandleImageConvert runs one image conversion: load job -> mark active ->
@@ -57,7 +79,101 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 
 	if err := h.process(ctx, job); err != nil {
 		_ = h.repo.MarkFailed(ctx, jobID, "engine_error", err.Error())
+		// Postgres-first: the failed status is already committed above, so a
+		// failed enqueue must not fail the conversion — best-effort only.
+		if job.CallbackURL != "" {
+			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		}
 		return err
+	}
+	// Postgres-first: MarkDone already committed inside process(), so a
+	// failed enqueue must not fail the conversion — best-effort only.
+	if job.CallbackURL != "" {
+		_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+	}
+	return nil
+}
+
+// HandleWebhookDeliver delivers one webhook attempt for a completed job:
+// re-read the job from Postgres, regenerate a fresh presigned download_url
+// per attempt (done only, D-09), sign, deliver, record the attempt, and
+// dead-letter on final-attempt exhaustion (D-10). Delivery failures are
+// returned unwrapped so asynq applies its own retry/backoff (D-05); only
+// unparseable payloads and jobs with no callback_url are terminal.
+func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error {
+	payload, err := queue.ParseWebhookPayload(t.Payload())
+	if err != nil {
+		// Unparseable payload: nothing we can retry into success.
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	jobID := payload.JobID
+
+	job, err := h.repo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("load job %s: %w", jobID, err)
+	}
+
+	if job.CallbackURL == "" {
+		// Nothing to deliver to — terminal, not a transient failure.
+		return fmt.Errorf("%w: no callback_url", asynq.SkipRetry)
+	}
+
+	body := map[string]any{
+		"job_id": job.ID,
+		"status": job.Status,
+	}
+	if job.Status == jobs.StatusDone {
+		outs, err := h.repo.Outputs(ctx, job.ID)
+		if err != nil {
+			return fmt.Errorf("load outputs for job %s: %w", jobID, err)
+		}
+		if len(outs) == 0 {
+			return fmt.Errorf("job %s has no outputs", jobID)
+		}
+		// D-09: regenerate a fresh presigned URL on every attempt, never
+		// reuse a stale one across retries.
+		url, err := h.store.PresignGet(ctx, outs[0].ObjectKey, h.presignTTL)
+		if err != nil {
+			return fmt.Errorf("presign output for job %s: %w", jobID, err)
+		}
+		body["download_url"] = url
+	}
+	if job.Status == jobs.StatusFailed {
+		if job.ErrorCode != "" {
+			body["error_code"] = job.ErrorCode
+		}
+		if job.ErrorMessage != "" {
+			body["error_message"] = job.ErrorMessage
+		}
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal webhook body for job %s: %w", jobID, err)
+	}
+
+	ts := time.Now().Unix()
+	sig := webhook.SignPayload(h.signingSecret, ts, bodyBytes)
+
+	retryCount, _ := asynq.GetRetryCount(ctx)
+	maxRetry, _ := asynq.GetMaxRetry(ctx)
+	attempt := retryCount + 1
+
+	code, derr := h.deliverer.Deliver(ctx, job.CallbackURL, bodyBytes, ts, sig)
+
+	var statusCodePtr *int
+	if code > 0 {
+		statusCodePtr = &code
+	}
+	deliveryID, recErr := h.webhookRepo.RecordAttempt(ctx, jobID, job.CallbackURL, attempt, statusCodePtr, derr == nil)
+
+	if derr != nil {
+		if recErr == nil && retryCount >= maxRetry {
+			// Final attempt exhausted: flag for investigation (D-10).
+			_ = h.webhookRepo.MarkDeadLetter(ctx, deliveryID)
+		}
+		// Unwrapped: let asynq's own retry policy + backoff (D-05) apply.
+		return derr
 	}
 	return nil
 }
