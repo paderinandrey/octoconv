@@ -14,7 +14,7 @@ This milestone hardens the existing image-conversion vertical slice into a produ
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (gap closure in progress — verification found 2 gaps) (completed 2026-07-04)
-- [ ] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling.
+- [x] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling. (completed 2026-07-04)
 - [ ] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered.
 - [ ] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health.
 
@@ -77,7 +77,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 02-03-PLAN.md — delivery execution wiring: webhook asynq task/queue + bounded backoff, enqueue-on-completion, HandleWebhookDeliver (fresh presigned URL per attempt), cmd/worker registration + signing secret (WEBHOOK-01/03/04/05, D-04/D-05/D-09)
+- [x] 02-03-PLAN.md — delivery execution wiring: webhook asynq task/queue + bounded backoff, enqueue-on-completion, HandleWebhookDeliver (fresh presigned URL per attempt), cmd/worker registration + signing secret (WEBHOOK-01/03/04/05, D-04/D-05/D-09)
 
 ### Phase 3: Retry-Safety & Reconciler
 
@@ -127,6 +127,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
-| 2. Webhook Delivery | 2/3 | In Progress|  |
+| 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
