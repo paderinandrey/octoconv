@@ -1,40 +1,45 @@
 ---
 phase: 01-merge-auth-rate-limiting
-verified: 2026-07-03T02:17:30Z
-status: gaps_found
-score: 10/12 must-haves verified
+verified: 2026-07-04T17:40:00Z
+status: passed
+score: 12/12 must-haves verified
 overrides_applied: 0
-gaps:
-  - truth: "main runs the full existing image-conversion vertical slice (merged from feat/scaffold-and-infra); build and existing tests pass [BASE-01 / ROADMAP SC1]"
-    status: failed
-    reason: "go build ./... passes, and go test ./... passes ONLY when DATABASE_URL is unset (integration tests self-skip). Against a live Postgres (the only environment where these tests actually execute), go test ./... FAILS: internal/jobs/repo_test.go's TestJobLifecycle and TestMarkFailed call r.Create with a CreateParams that omits ClientID (zero-value uuid.Nil). Since Plan 02 threads ClientID into the jobs INSERT as the jobs.client_id column (which carries a REFERENCES clients(id) foreign key), inserting uuid.Nil (which references no client row) violates the jobs_client_id_fkey constraint (SQLSTATE 23503). Reproduced live: `DATABASE_URL=postgres://octo:octo-pass@localhost:5433/octo_db go test ./...` -> FAIL github.com/apaderin/octoconv/internal/jobs. None of the three plan SUMMARYs caught this because DATABASE_URL was unset in every execution sandbox, so these pre-existing tests silently skipped every time; the plans' own acceptance criteria ('go test ./... passes') was never actually validated end-to-end."
-    artifacts:
-      - path: "internal/jobs/repo_test.go"
-        issue: "TestJobLifecycle (~line 33) and TestMarkFailed (~line 106) build CreateParams without ClientID, which now fails the jobs_client_id_fkey constraint added implicitly by Plan 02's client_id threading (0001_init.sql's client_id FK, previously unused/unenforced by Create)"
-    missing:
-      - "Update internal/jobs/repo_test.go to create a real clients row (or otherwise obtain a valid client id) and pass it as CreateParams.ClientID in TestJobLifecycle and TestMarkFailed"
-      - "Add a DATABASE_URL-backed `go test ./...` run to the phase's own closing verification step so integration-only regressions like this are caught before a phase is marked done, not just build+vet+DB-unset test runs"
-  - truth: "A coarse pre-auth IP limit throttles flood traffic before the auth middleware / DB lookup runs [RATE-03 / ROADMAP SC5]"
-    status: failed
-    reason: "ratelimit.ByIP is correctly ordered before auth.Middleware in internal/api/routes.go (structural wiring is correct), but its actual protection is trivially bypassable. Routes() installs chi's middleware.RealIP globally, which chi v5.3.0 itself documents as `Deprecated: RealIP is vulnerable to IP spoofing` — it unconditionally overwrites r.RemoteAddr from the client-supplied True-Client-IP/X-Real-IP/X-Forwarded-For headers. ratelimit.ByIP keys on httprate.KeyByIP, which reads that spoofed RemoteAddr. Reproduced live with a Go test: 5 requests from the same real RemoteAddr (10.0.0.1), each with a distinct spoofed X-Forwarded-For header, against a ByIP limit of 2 req/min -> 0 of 5 requests returned 429 (all landed in separate per-header buckets). This was already flagged as the sole Critical finding (CR-01) in 01-REVIEW.md and remains unfixed as of HEAD (a6dd08d, a docs-only commit adding the review report). The per-client limiter (RATE-01/RATE-02, keyed on authenticated client_id) is unaffected by this and verified working."
-    artifacts:
-      - path: "internal/api/routes.go"
-        issue: "line 22: `r.Use(middleware.RealIP)` (deprecated, spoofable) runs globally before ratelimit.ByIP on line 28"
-      - path: "internal/ratelimit/ratelimit.go"
-        issue: "ByIP's key func is httprate.KeyByIP, which depends on the RemoteAddr value RealIP mutated from attacker-controlled headers"
-    missing:
-      - "Replace middleware.RealIP + httprate.KeyByIP with middleware.ClientIPFromRemoteAddr (if no trusted reverse proxy exists) or middleware.ClientIPFromXFFTrustedProxies(trustedCIDRs) + a custom KeyFunc using middleware.GetClientIP (if one does)"
-      - "Add a regression test asserting ByIP cannot be evaded by varying X-Forwarded-For across requests sharing the same real RemoteAddr"
+re_verification:
+  previous_status: gaps_found
+  previous_score: 10/12
+  gaps_closed:
+    - "main runs the full existing image-conversion vertical slice (merged from feat/scaffold-and-infra); build and existing tests pass [BASE-01 / ROADMAP SC1]"
+    - "A coarse pre-auth IP limit throttles flood traffic before the auth middleware / DB lookup runs [RATE-03 / ROADMAP SC5]"
+  gaps_remaining: []
+  regressions: []
 ---
 
 # Phase 1: Merge, Auth & Rate Limiting — Verification Report
 
 **Phase Goal:** The working image-conversion vertical slice is on `main`, and every API request must present a valid, client-scoped API key — unauthenticated, invalid, or excessive traffic is rejected before it can affect production.
-**Verified:** 2026-07-03T02:17:30Z
-**Status:** gaps_found
-**Re-verification:** No — initial verification
+**Verified:** 2026-07-04T17:40:00Z
+**Status:** passed
+**Re-verification:** Yes — after gap closure (plan 01-04)
 
-**Note on phase mode:** ROADMAP.md marks this phase `Mode: mvp`, but the phase goal text is not formatted as a User Story (`gsd-sdk query user-story.validate` returns `valid: false` for it). Per the MVP-mode verification rule this would normally require refusing verification and asking for `/gsd mvp-phase 1` to reformat the goal. Given the phase's PLAN frontmatter, ROADMAP Success Criteria, and CONTEXT/REVIEW artifacts already provide a complete goal-backward contract, standard (non-MVP) goal-backward verification was applied instead so the substantive findings below are not blocked on a goal-text formatting issue — but the mode/goal-format mismatch itself should be resolved before/at phase close.
+**Note on phase mode:** Same note carried from the initial pass — ROADMAP.md marks this phase `Mode: mvp`, but the phase goal text is not formatted as a User Story. Standard (non-MVP) goal-backward verification was applied, consistent with the initial pass, since a complete goal-backward contract already exists via PLAN frontmatter, ROADMAP Success Criteria, and CONTEXT/REVIEW artifacts.
+
+## Re-verification Summary
+
+Plan 01-04 (gap closure) targeted the exact two truths that failed in the initial pass. Both were re-reproduced independently in this session (not taken on the executor's or reviewer's word):
+
+1. **Gap 1 (BASE-01 / SC1 — jobs FK violation):** Ran `DATABASE_URL=postgres://octo:octo-pass@localhost:5434/octo_db go test ./... -count=1` myself against the live `octoconv-db` container. All packages `ok`, including `internal/jobs`. Ran `TestJobLifecycle`/`TestMarkFailed`/`TestGetNotFound` individually with `-v`: all three actually execute (not skipped) and PASS — no `jobs_client_id_fkey`/23503 error. Confirmed `internal/jobs/repo_test.go` now calls `createTestClient(t, r)` and threads a real client id into `CreateParams.ClientID` at both `Create` sites (`grep -c 'ClientID:\s*createTestClient'` → 2, no `internal/clients` import introduced).
+
+2. **Gap 2 (RATE-03 / SC5 — spoofable IP limiter):** Confirmed `internal/api/routes.go` no longer installs `middleware.RealIP` (0 occurrences) and now installs `middleware.ClientIPFromRemoteAddr` on the global chain, ahead of `ratelimit.ByIP` on `/v1`. Confirmed `internal/ratelimit/ratelimit.go`'s `ByIP` now uses a custom `ipKey` reading `middleware.GetClientIP(r.Context())` (falling back to `net.SplitHostPort(r.RemoteAddr)`, never a client header) instead of `httprate.KeyByIP`. Ran the new `TestByIP_NotEvadedByForwardedForSpoofing` myself — passes (requests 1-2 get 401, requests 3-5 get 429, despite 5 distinct spoofed `X-Forwarded-For` values sharing one `RemoteAddr`). **Went further than the plan's own test** and re-ran the exact original live-attack reproduction from the first verification pass: started a real `cmd/api` process (`RATE_LIMIT_IP_RPM=2`) and sent 5 real `curl` requests over a real TCP connection, each with a distinct spoofed `X-Forwarded-For` header:
+   ```
+   req1 (spoofed XFF=10.9.8.1): 401
+   req2 (spoofed XFF=10.9.8.2): 401
+   req3 (spoofed XFF=10.9.8.3): 429
+   req4 (spoofed XFF=10.9.8.4): 429
+   req5 (spoofed XFF=10.9.8.5): 429
+   ```
+   This is the inverse of the original repro (which got 0/5 429s); now 3/5 are correctly throttled — the spoofing bypass is closed.
+
+**Regression check on the 10 previously-passed truths:** Full `go test ./...` (live DB) passes for every package (`internal/api`, `internal/auth`, `internal/clients`, `internal/convert`, `internal/jobs`, `internal/queue`, `internal/ratelimit`, `internal/storage`). Additionally re-ran live HTTP checks against a fresh `cmd/api` process with default rate limits: no-key request → 401, invalid-key request → 401, `/healthz` → 200 — matching the initial pass exactly, no regression introduced by the gap-closure changes (only `internal/jobs/repo_test.go`, `internal/api/routes.go`, `internal/ratelimit/ratelimit.go`, and new `internal/api/routes_test.go` were touched; no other production files changed).
 
 ## Goal Achievement
 
@@ -42,53 +47,46 @@ gaps:
 
 | # | Truth | Status | Evidence |
 |---|-------|--------|----------|
-| 1 | [BASE-01/SC1] `main` runs the full vertical slice; `go build ./...` and `go test ./...` pass | FAILED | `go build ./...` clean. `go test ./...` passes with DATABASE_URL unset (integration tests skip) but **fails** against a live Postgres: `TestJobLifecycle`/`TestMarkFailed` in `internal/jobs/repo_test.go` hit `jobs_client_id_fkey` violation (SQLSTATE 23503) — reproduced live |
-| 2 | [D-03] Operator can create a client via CLI, raw key shown exactly once | VERIFIED | Live: `go run ./cmd/manage-clients create verify-demo2` printed client id + raw key once via `fmt.Println` |
-| 3 | [D-07/AUTH-04] Raw key never stored/logged; only salted SHA-256 digest persisted | VERIFIED | Live DB check: `SELECT length(api_key_hash), api_key_hash ~ '^[0-9a-f]{64}$'` → `64, t`. `internal/auth/hash.go` uses `crypto/rand`+`crypto/sha256` only, no bcrypt/argon2 import |
-| 4 | [D-05/AUTH-05] Operator can add a second active key and revoke either slot independently | VERIFIED | `internal/clients/repo_test.go` `TestAddSecondaryKey`/`TestRevokeKey` pass against live DB; schema has independent `primary_revoked_at`/`secondary_revoked_at` |
-| 5 | [D-08/AUTH-02/SC2] Missing/malformed/invalid/revoked key → 401 before any handler runs (hard cutover) | VERIFIED | Live: no-header → 401, bad key → 401; unit tests `TestMiddleware_MissingHeader_Unauthorized`, `TestMiddleware_WrongScheme_Unauthorized`, `TestMiddleware_InvalidKey_Unauthorized` all pass, assert `next` not invoked |
-| 6 | [AUTH-01] Valid key reaches handler with resolved client identity; job creation records client_id | VERIFIED | Live: created job with client2's key, `jobs.client_id` correctly attributed (confirmed via subsequent same-client fetch succeeding and cross-client fetch failing) |
-| 7 | [D-09] `/healthz` reachable without an API key | VERIFIED | Live: `GET /healthz` no header → 200. Unit test `TestHealthz_NoAuthRequired` passes |
-| 8 | [AUTH-03/SC3] Cross-client job lookup → 404, byte-identical to true-not-found, never 403 | VERIFIED | Live: cross-client fetch and truly-missing-job fetch both return `HTTP 404 {"error":"job not found"}` — identical. Unit tests `TestGetJob_CrossClient_NotFound`/`TestGetJob_NotFound` pass |
-| 9 | [RATE-01] Per-client limiter keyed on `client_id`, not IP | VERIFIED | `internal/ratelimit/ratelimit.go` `clientKey` reads `auth.ClientFromContext`; no `RemoteAddr`/`X-Forwarded-For` reference. `TestPerClient_DifferentClientsAreIsolated` passes |
-| 10 | [RATE-02/SC5a] Client exceeding per-client rate → 429 + `Retry-After` | VERIFIED | `TestPerClient_OverLimitReturns429WithRetryAfter` passes; `limitHandler` sets `Retry-After` to window seconds |
-| 11 | [RATE-03/SC5b] Coarse pre-auth IP limit throttles flood traffic before auth/DB lookup | FAILED | Structurally wired before auth (`ratelimit.ByIP` first in `/v1` chain), but relies on chi's deprecated, spoofable `middleware.RealIP`. Reproduced live via Go test: 5 requests, same RemoteAddr, 5 distinct spoofed `X-Forwarded-For` values, `ByIP` limit=2/min → 0/5 requests 429'd. Matches 01-REVIEW.md CR-01, unfixed at HEAD |
-| 12 | Rate-limit thresholds configurable via env vars, conservative defaults | VERIFIED | `RATE_LIMIT_IP_RPM`/`RATE_LIMIT_CLIENT_RPM` in `.env.example`, `docker-compose.yml`, read via `envInt64` in `cmd/api/main.go`; `api.NewServer` defaults to 60/120 when zero |
+| 1 | [BASE-01/SC1] `main` runs the full vertical slice; `go build ./...` and `go test ./...` pass | ✓ VERIFIED | Re-run live: `go build ./...` exit 0, `go vet ./...` exit 0, `DATABASE_URL=...5434... go test ./... -count=1` — all packages `ok`, including `internal/jobs` (`TestJobLifecycle`, `TestMarkFailed`, `TestGetNotFound` all PASS, verbose-confirmed not skipped) |
+| 2 | [D-03] Operator can create a client via CLI, raw key shown exactly once | ✓ VERIFIED (regression check — unchanged since initial pass) | `cmd/manage-clients/main.go` unmodified by 01-04; full test suite still green |
+| 3 | [D-07/AUTH-04] Raw key never stored/logged; only salted SHA-256 digest persisted | ✓ VERIFIED (regression check) | `internal/auth/hash.go` unmodified; `internal/auth` package tests pass live |
+| 4 | [D-05/AUTH-05] Operator can add a second active key and revoke either slot independently | ✓ VERIFIED (regression check) | `internal/clients` unmodified; `internal/clients` package tests pass live |
+| 5 | [D-08/AUTH-02/SC2] Missing/malformed/invalid/revoked key → 401 before any handler runs | ✓ VERIFIED | Re-confirmed live against a freshly started `cmd/api`: no-header → 401, bad key → 401; `internal/auth` tests pass |
+| 6 | [AUTH-01] Valid key reaches handler with resolved client identity; job creation records client_id | ✓ VERIFIED (regression check) | `internal/api/handlers.go` unmodified by 01-04; `internal/api` tests pass live |
+| 7 | [D-09] `/healthz` reachable without an API key | ✓ VERIFIED | Re-confirmed live: `GET /healthz` no header → 200 |
+| 8 | [AUTH-03/SC3] Cross-client job lookup → 404, byte-identical to true-not-found, never 403 | ✓ VERIFIED (regression check) | `internal/api/handlers.go` unmodified; `internal/api` test suite (incl. `TestGetJob_CrossClient_NotFound`/`TestGetJob_NotFound`) passes live |
+| 9 | [RATE-01] Per-client limiter keyed on `client_id`, not IP | ✓ VERIFIED (regression check) | `clientKey`/`PerClient` untouched by 01-04 (plan explicitly preserved them); `internal/ratelimit` tests pass live |
+| 10 | [RATE-02/SC5a] Client exceeding per-client rate → 429 + `Retry-After` | ✓ VERIFIED (regression check) | `limitHandler` untouched; `internal/ratelimit` tests pass live |
+| 11 | [RATE-03/SC5b] Coarse pre-auth IP limit throttles flood traffic before auth/DB lookup, and cannot be evaded by spoofed headers | ✓ VERIFIED | **Gap closed.** `middleware.RealIP` fully removed (0 occurrences); `ClientIPFromRemoteAddr` + `ipKey`/`GetClientIP` wired. Re-reproduced live via real `curl` requests over a real TCP connection with distinct spoofed `X-Forwarded-For` per request against `RATE_LIMIT_IP_RPM=2`: 3/5 requests correctly 429'd (previously 0/5). New regression test `TestByIP_NotEvadedByForwardedForSpoofing` passes |
+| 12 | Rate-limit thresholds configurable via env vars, conservative defaults | ✓ VERIFIED (regression check) | `.env.example`/`docker-compose.yml`/`cmd/api/main.go` env parsing unmodified by 01-04 |
 
-**Score:** 10/12 truths verified
+**Score:** 12/12 truths verified
 
 ### Required Artifacts
 
 | Artifact | Expected | Status | Details |
 |----------|----------|--------|---------|
-| `internal/db/migrations/0002_client_api_keys.sql` | dual key-slot columns + partial indexes + trigger | VERIFIED | `ALTER TABLE clients` adds 4 columns + `updated_at`; two `WHERE ... revoked_at IS NULL` partial indexes; `clients_set_updated` trigger reuses existing `set_updated_at()`; applied cleanly live via `go run ./cmd/migrate` |
-| `internal/auth/hash.go` | `GenerateKey` + `HashKey` | VERIFIED | Both exported, pure, crypto/rand + crypto/sha256 only; `hash_test.go` covers determinism/salt-sensitivity/format |
-| `internal/clients/repo.go` | `Repo`, `NewRepo`, `ErrNotFound`, CRUD | VERIFIED | All methods present; live-tested Create/GetByKeyHash round trip; `repo_test.go` integration tests pass against live DB |
-| `cmd/manage-clients/main.go` | operator CLI create/add-key/revoke | VERIFIED | `func main` dispatches on all three subcommands; live-exercised `create` end-to-end |
-| `internal/auth/middleware.go` | chi auth middleware, 401/inject client | VERIFIED | `Middleware` exported; wired into `/v1` group; unit + live tested |
-| `internal/auth/auth.go` | `ClientResolver`, `Resolver`, `ErrInvalidKey` | VERIFIED | All exported symbols present; `ResolveClient` maps `clients.ErrNotFound` → `ErrInvalidKey` |
-| `internal/auth/context.go` | `WithClient`/`ClientFromContext` | VERIFIED | Single unexported `ctxKey{}`, two accessors, only `context.WithValue` use in repo |
-| `internal/ratelimit/ratelimit.go` | `ByIP` + `PerClient`, 429 + Retry-After | ⚠️ PARTIAL | `PerClient` fully sound (verified). `ByIP` exists, is wired in the correct position, compiles/tests green in isolation, but is **functionally ineffective against a real attacker** due to upstream `middleware.RealIP` spoofability (Truth #11) — the artifact exists and is "wired" in the mechanical sense but does not deliver the behavior it's named/documented for |
+| `internal/jobs/repo_test.go` | Integration tests satisfy `jobs_client_id_fkey` via a real client row | ✓ VERIFIED | `createTestClient(t, r)` inserts a minimal `clients` row via the repo's unexported pool; `ClientID: createTestClient(t, r)` used at both `Create` call sites; no `internal/clients` import |
+| `internal/api/routes.go` | Pre-auth IP identity from raw TCP peer, not spoofable headers | ✓ VERIFIED | `r.Use(middleware.ClientIPFromRemoteAddr)` replaces `r.Use(middleware.RealIP)`; doc comment updated to explain the trust boundary |
+| `internal/ratelimit/ratelimit.go` | `ByIP` keys on unforgeable client IP | ✓ VERIFIED (was ⚠️ PARTIAL) | `ByIP` now uses `httprate.WithKeyFuncs(ipKey)`; `ipKey` reads `middleware.GetClientIP`, falls back to `net.SplitHostPort(RemoteAddr)`; `httprate.KeyByIP` no longer referenced as an active key func |
+| `internal/api/routes_test.go` | Regression test proving the /v1 coarse limiter holds under XFF spoofing through the real router | ✓ VERIFIED | New file, `package api`, `TestByIP_NotEvadedByForwardedForSpoofing` exercises `srv.Routes()` end-to-end; PASS |
+| (all artifacts from initial pass, unmodified by 01-04) | — | ✓ VERIFIED (regression check) | `internal/db/migrations/*.sql`, `internal/auth/*.go`, `internal/clients/repo.go`, `cmd/manage-clients/main.go` unchanged since initial pass; full test suite green |
 
 ### Key Link Verification
 
 | From | To | Via | Status | Details |
 |------|-----|-----|--------|---------|
-| `cmd/manage-clients/main.go` | `internal/auth.HashKey` | hash raw key before `repo.Create` | WIRED | `auth.HashKey(salt, raw)` called before `repo.Create`/`AddSecondaryKey`; live-confirmed only digest persisted |
-| `internal/clients/repo.go` | `clients` table | indexed digest lookup | WIRED | `GetByKeyHash` SQL filters on `api_key_hash`/`api_key_hash_secondary` + revoked-at IS NULL, live-tested |
-| `internal/api/routes.go` | `internal/auth.Middleware` | `r.Use` on `/v1` group only | WIRED | Confirmed in source and live: `/healthz` unauthenticated, `/v1/*` requires key |
-| `internal/api/handlers.go` | `auth.ClientFromContext` | client_id threaded into create + ownership check | WIRED | `handleCreateJob` sets `ClientID`; `handleGetJob` ownership guard confirmed live (identical 404) |
-| `internal/jobs/repo.go` | `jobs.client_id` column | insert + select client_id | WIRED (but see Gap 1) | Column bound correctly in production path (always non-nil via auth middleware); the pre-existing `internal/jobs/repo_test.go` tests were not updated for this new FK-enforced column and fail live |
-| `internal/ratelimit/ratelimit.go` | `auth.ClientFromContext` | per-client key func reads resolved client.ID | WIRED | `clientKey` reads `auth.ClientFromContext`; isolation test passes |
-| `internal/api/routes.go` | `ratelimit.ByIP` + `ratelimit.PerClient` | ordering: ByIP → auth → PerClient | WIRED (structurally) but ByIP's protection is defeated (see Gap 2) | Source order confirmed correct; live spoofing test shows the guard doesn't hold under adversarial input |
+| `internal/api/routes.go` | `internal/ratelimit.ByIP` + `internal/ratelimit.PerClient` | ordering: ByIP → auth → PerClient, ByIP keyed on unforgeable peer IP | ✓ WIRED (gap closed) | Source order confirmed; live curl spoofing test now correctly throttles (3/5 429), closing the previously defeated guard |
+| `internal/jobs/repo.go` | `jobs.client_id` column | insert + select client_id | ✓ WIRED (gap closed) | Production path unaffected (always non-nil via auth middleware); test path now also satisfies the FK via `createTestClient` |
+| (all other links from initial pass) | — | — | ✓ WIRED (regression check) | Unmodified files; full suite green, live auth/healthz/cross-client checks re-confirmed |
 
 ### Data-Flow Trace (Level 4)
 
 | Artifact | Data Variable | Source | Produces Real Data | Status |
 |----------|---------------|--------|---------------------|--------|
-| `internal/clients/repo.go` `GetByKeyHash` | `client` | Postgres `clients` table, indexed digest lookup | Yes — live-confirmed row returned matching created client | FLOWING |
-| `internal/api/handlers.go` `handleGetJob` | `job` | Postgres `jobs` table via `s.repo.Get` | Yes — live job created and fetched with correct status/client_id | FLOWING |
-| `internal/ratelimit/ratelimit.go` `ByIP` key | IP identity | `r.RemoteAddr`, mutated by `middleware.RealIP` from attacker-controlled headers | No — attacker fully controls the key value via `X-Forwarded-For`, defeating the limiter's intent | STATIC/SPOOFABLE (effectively DISCONNECTED from real network identity) |
+| `internal/ratelimit/ratelimit.go` `ByIP` key | IP identity | `middleware.GetClientIP(r.Context())`, set by `ClientIPFromRemoteAddr` from the real TCP peer address; header-based fallback removed | Yes — live-confirmed: spoofed `X-Forwarded-For` no longer changes the bucket key; real requests from one peer correctly accumulate in one bucket | FLOWING (was STATIC/SPOOFABLE) |
+| `internal/clients/repo.go` `GetByKeyHash` | `client` | Postgres `clients` table | Yes (regression check, unchanged) | FLOWING |
+| `internal/api/handlers.go` `handleGetJob` | `job` | Postgres `jobs` table | Yes (regression check, unchanged) | FLOWING |
 
 ### Behavioral Spot-Checks
 
@@ -96,64 +94,70 @@ gaps:
 |----------|---------|--------|--------|
 | `go build ./...` | `go build ./...` | exit 0 | PASS |
 | `go vet ./...` | `go vet ./...` | exit 0, no output | PASS |
-| `go test ./...` (no DB) | `go test ./...` | all packages `ok` (integration tests skip) | PASS (misleading — see below) |
-| `go test ./...` (live DB) | `DATABASE_URL=... go test ./...` | `FAIL internal/jobs` — `TestJobLifecycle`, `TestMarkFailed` FK violation | FAIL |
-| Migration applies live | `DATABASE_URL=... go run ./cmd/migrate` | `migrations applied` | PASS |
-| CLI create → digest-only persistence | `manage-clients create ...` + `SELECT api_key_hash ...` | 64-char hex, matches regex `^[0-9a-f]{64}$` | PASS |
-| No-key request to `/v1/jobs/{id}` | `curl /v1/jobs/{id}` (no header) | `401` | PASS |
-| `/healthz` without key | `curl /healthz` | `200` | PASS |
-| Invalid key | `curl -H "Authorization: ApiKey bogus" ...` | `401` | PASS |
-| Valid key, cross-client job | `curl -H "Authorization: ApiKey <other-client>" .../jobs/{id}` | `404 {"error":"job not found"}` (identical to true-not-found) | PASS |
-| ByIP spoofability | Go test: 5 reqs, same RemoteAddr, distinct spoofed `X-Forwarded-For`, limit=2/min | 0/5 requests returned 429 | FAIL (confirms Gap 2) |
+| `go test ./...` (live DB) | `DATABASE_URL=postgres://octo:octo-pass@localhost:5434/octo_db go test ./... -count=1` | all packages `ok`, including `internal/jobs` | PASS (gap closed — was FAIL) |
+| `TestJobLifecycle`/`TestMarkFailed`/`TestGetNotFound` verbose | `go test ./internal/jobs/... -run '...' -v` | all 3 PASS, none skipped | PASS |
+| `TestByIP_NotEvadedByForwardedForSpoofing` | `go test ./internal/api/... -run Spoof -v` | requests 1-2 not 429, 3-5 are 429 | PASS (gap closed) |
+| `TestByIP_OverLimitReturns429` (pre-existing) | `go test ./internal/ratelimit/... -run ByIP -v` | PASS | PASS (no regression) |
+| Live real-process spoofing repro (independent of the plan's own test) | 5x `curl` w/ distinct `X-Forwarded-For`, `RATE_LIMIT_IP_RPM=2`, real `cmd/api` process | 3/5 → 429 (was 0/5 in initial pass) | PASS |
+| No-key request to `/v1/jobs/{id}` | `curl` (no header) against fresh `cmd/api` | 401 | PASS (no regression) |
+| Invalid key | `curl -H "Authorization: ApiKey bogus"` | 401 | PASS (no regression) |
+| `/healthz` without key | `curl /healthz` | 200 | PASS (no regression) |
+| Structural gates | `grep -c 'middleware.RealIP' internal/api/routes.go` → 0; `grep -c 'httprate.KeyByIP' internal/ratelimit/ratelimit.go` (active use) → 0 | as expected | PASS |
 
 ### Probe Execution
 
-No `scripts/*/tests/probe-*.sh` files exist in this repository and none are referenced by the phase's PLAN/SUMMARY files. SKIPPED (no probes defined for this project).
+No `scripts/*/tests/probe-*.sh` files exist in this repository and none are referenced by this phase's plans. SKIPPED (no probes defined for this project).
 
 ### Requirements Coverage
 
 | Requirement | Source Plan | Description | Status | Evidence |
 |-------------|-------------|--------------|--------|----------|
-| BASE-01 | 01-01 | Baseline vertical slice merged, build/tests pass | ✗ BLOCKED | `go test ./...` fails against a live DB (jobs FK violation) — see Gap 1 |
-| AUTH-01 | 01-02 | Client authenticates via API key tied to `clients` | ✓ SATISFIED | Live end-to-end: key hashed, resolved, client_id threaded into job |
-| AUTH-02 | 01-02 | Missing/invalid/revoked key → 401 | ✓ SATISFIED | Live + unit tests |
-| AUTH-03 | 01-02 | Cross-client job → 404, not 403 | ✓ SATISFIED | Live: byte-identical 404 for cross-client vs missing |
-| AUTH-04 | 01-01 | Keys stored only as salted SHA-256 hashes | ✓ SATISFIED | Live DB check confirms 64-hex digest only |
-| AUTH-05 | 01-01 | Two simultaneously active keys per client | ✓ SATISFIED | Schema + repo + CLI + live integration tests |
-| RATE-01 | 01-03 | Per-client token bucket keyed on client_id | ✓ SATISFIED | Code + isolation test |
-| RATE-02 | 01-03 | 429 + Retry-After on exceed | ✓ SATISFIED | Unit test confirms header + status |
-| RATE-03 | 01-03 | Coarse pre-auth IP limit protects against flood before DB | ✗ BLOCKED | Structurally present but bypassable — see Gap 2 / REVIEW CR-01 |
+| BASE-01 | 01-01, 01-04 (gap closure) | Baseline vertical slice merged, build/tests pass | ✓ SATISFIED | `go test ./...` now passes live end-to-end — gap closed |
+| AUTH-01 | 01-02 | Client authenticates via API key tied to `clients` | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| AUTH-02 | 01-02 | Missing/invalid/revoked key → 401 | ✓ SATISFIED | Unchanged since initial pass; re-confirmed live |
+| AUTH-03 | 01-02 | Cross-client job → 404, not 403 | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| AUTH-04 | 01-01 | Keys stored only as salted SHA-256 hashes | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| AUTH-05 | 01-01 | Two simultaneously active keys per client | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| RATE-01 | 01-03 | Per-client token bucket keyed on client_id | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| RATE-02 | 01-03 | 429 + Retry-After on exceed | ✓ SATISFIED | Unchanged since initial pass; regression-checked |
+| RATE-03 | 01-03, 01-04 (gap closure) | Coarse pre-auth IP limit protects against flood before DB | ✓ SATISFIED | Gap closed — spoofing bypass eliminated, re-reproduced live |
 
-No orphaned requirements — all 9 IDs mapped to this phase in REQUIREMENTS.md are claimed by one of the three plans' frontmatter.
+All 9 requirement IDs declared across this phase's plans (`01-01`, `01-02`, `01-03`, `01-04`) are accounted for and SATISFIED. No orphaned requirements.
 
-**Note:** `.planning/REQUIREMENTS.md`'s checkbox/traceability table still shows `AUTH-01..05` as unchecked/"Pending" (only `RATE-01..03` were marked complete by commit `dd47895`). This is a documentation-sync gap, not a functional one — the code evidence above shows AUTH-01..05 are implemented — but the requirements tracker should be updated to reflect actual status (or left for the phase-close step, if that step normally does this update).
+**Note (carried from initial pass, still unresolved — documentation-sync only, non-functional):** `.planning/REQUIREMENTS.md`'s checkbox/traceability table still shows `AUTH-01..05` as unchecked/"Pending" (only `BASE-01` and `RATE-01..03` are marked `[x]`/"Complete"). Plan 01-04 was scoped to gap closure only and did not touch this file, so this is expected to remain until phase close updates it. The code evidence above shows AUTH-01..05 are implemented and passing — this is a tracking-doc gap, not a functional one.
 
 ### Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| `internal/api/routes.go` | 22 | Use of chi's officially `Deprecated`/spoofable `middleware.RealIP` as the basis for a stated security control (pre-auth flood guard) | 🛑 Blocker | Directly causes Gap 2 / RATE-03 failure — the coarse IP limiter does not protect against a motivated caller |
-| `internal/api/handlers.go` | 85, 147 | `client, _ := auth.ClientFromContext(ctx)` discards `ok`, then dereferences `client.ID` | ⚠️ Warning | Latent nil-pointer panic if the auth invariant is ever violated by a future routing change (REVIEW WR-01, not independently re-verified here — carried from 01-REVIEW.md, not yet fixed) |
-| `internal/api/handlers.go` | 79-108 | Uploaded S3 object not cleaned up if `s.repo.Create` fails after upload succeeds | ⚠️ Warning | Orphaned storage objects on DB failure (REVIEW WR-02, not yet fixed) |
-| `internal/api/api.go` | 64-69 | `RATE_LIMIT_*_RPM=0` is silently treated as "unset" and replaced with the default, so operators cannot express "disabled" | ⚠️ Warning | Config footgun (REVIEW WR-03, not yet fixed) |
+| `internal/jobs/repo_test.go` | ~33-41 (`createTestClient`) | No `t.Cleanup` deleting the inserted `clients` row after each test run | ⚠️ Warning | Test-only hygiene issue (01-REVIEW-gap-closure.md WR-01, not independently required to block this phase). Re-confirmed live: `SELECT count(*) FROM clients WHERE name='jobs-test-client'` now returns 16 (was 12 at gap-closure review time, growing with each test run). Does not affect production behavior — recommend fixing before this pattern is reused elsewhere, but does not block phase-goal achievement |
+| `internal/ratelimit/ratelimit.go` | 80-83 (`ipKey` fallback) | `net.SplitHostPort` failure path returns raw `RemoteAddr` verbatim (unreachable in production; real `net/http` always populates `host:port`) | ℹ️ Info | Cosmetic edge case, not exercised by any test; carried from 01-REVIEW-gap-closure.md IN-01, no fix required |
+| `internal/api/handlers.go` | 85, 147 | `client, _ := auth.ClientFromContext(ctx)` discards `ok` | ⚠️ Warning | Carried unchanged from initial pass (01-REVIEW.md WR-01); not touched by 01-04; latent nil-pointer risk only if a future routing change breaks the auth invariant |
+| `internal/api/handlers.go` | 79-108 | Uploaded S3 object not cleaned up if `s.repo.Create` fails after upload | ⚠️ Warning | Carried unchanged from initial pass (01-REVIEW.md WR-02); not in scope for this phase's gap closure |
+| `internal/api/api.go` | 64-69 | `RATE_LIMIT_*_RPM=0` silently treated as "unset"/default | ⚠️ Warning | Carried unchanged from initial pass (01-REVIEW.md WR-03); config footgun, not a functional gap |
 
-No `TODO`/`FIXME`/`XXX`/`TBD`/`PLACEHOLDER` markers found in any file touched by this phase.
+No `TODO`/`FIXME`/`XXX`/`TBD`/`PLACEHOLDER` markers found in any file touched by plan 01-04 (`internal/jobs/repo_test.go`, `internal/api/routes.go`, `internal/ratelimit/ratelimit.go`, `internal/api/routes_test.go`).
+
+None of the above anti-patterns are blockers: none involve unresolved debt markers, and none prevent the phase goal (every request presenting a valid client-scoped key; unauthenticated/invalid/excessive traffic rejected before affecting production) from being true today.
 
 ### Human Verification Required
 
-None. Both gaps found were objectively reproduced with automated tests/live requests; no item in this phase requires subjective/visual human judgment.
+None. Both previously-open gaps were objectively reproduced and closed via live tests and independent live HTTP requests (including a real `cmd/api` process hit with real `curl` traffic, not just the plan's own Go test). No item in this phase requires subjective/visual human judgment.
 
 ### Gaps Summary
 
-Two gaps block phase-goal achievement, both independently confirmed by live reproduction (not just static review):
+No gaps remain. Both truths that FAILED in the initial verification pass are now VERIFIED, confirmed via independent reproduction in this session (not by trusting SUMMARY.md or the code-review report):
 
-1. **BASE-01 / ROADMAP Success Criterion 1 is not actually true**: `go test ./...` fails when run against a real Postgres database because `internal/jobs/repo_test.go`'s two pre-existing integration tests (`TestJobLifecycle`, `TestMarkFailed`) never account for the `client_id` foreign key that Plan 02 wired into `jobs.Create`. Every plan's own "go test ./... passes" acceptance criterion was satisfied only in a DATABASE_URL-unset sandbox, where these tests silently skip rather than actually pass — the claim in all three SUMMARY.md files that tests pass was never validated in the one environment (DB present) where it matters.
+1. **BASE-01 / SC1** — `go test ./...` now passes against a live Postgres. `internal/jobs/repo_test.go`'s `TestJobLifecycle`/`TestMarkFailed` now attribute jobs to a real `clients` row via `createTestClient`, satisfying `jobs_client_id_fkey`.
+2. **RATE-03 / SC5** — The coarse pre-auth IP flood guard is no longer bypassable by spoofed `X-Forwarded-For`. `middleware.RealIP` was fully removed and replaced with `middleware.ClientIPFromRemoteAddr`; `ByIP`'s key func now reads the unforgeable peer IP. Re-verified via a fresh live-process `curl` attack reproduction distinct from the plan's own test, confirming the fix generalizes beyond the specific test harness.
 
-2. **RATE-03 is structurally wired but not functionally true**: the coarse pre-auth IP flood guard sits in the correct position in the middleware chain (before auth), but is built on chi's deprecated, explicitly-spoofable `middleware.RealIP`, making it trivially bypassable by varying `X-Forwarded-For`. This was already caught and classified Critical in `01-REVIEW.md` (CR-01) and remains unfixed. The per-client limiter (RATE-01/RATE-02) is unaffected and independently verified sound.
+No regressions were introduced in the 10 previously-verified truths — the gap-closure plan touched only 4 files (`internal/jobs/repo_test.go`, `internal/api/routes.go`, `internal/ratelimit/ratelimit.go`, new `internal/api/routes_test.go`), and the full test suite plus targeted live HTTP checks (401 on missing/invalid key, 200 on `/healthz`, cross-client 404 collapse) all still hold.
 
-Everything else — API-key issuance/hashing/rotation (AUTH-04/05), request-path enforcement and 401 hard-cutover (AUTH-02), client-scoped identity threading and the cross-client 404 collapse (AUTH-01/AUTH-03), and per-client rate limiting (RATE-01/RATE-02) — was independently verified both via the existing automated test suite and via live requests against a running `cmd/api` instance backed by real Postgres/Redis/MinIO, and is solid.
+Two non-blocking warnings remain open from the gap-closure review (WR-01: test client rows not cleaned up — test hygiene only; IN-01: unreachable fallback edge case) plus three carried-over warnings from the initial review (WR-01/WR-02/WR-03 in 01-REVIEW.md — nil-deref latent risk, S3 orphan cleanup, `RPM=0` footgun). None are blockers; none were in scope for this gap-closure plan. Recommend tracking them for a future hardening pass but they do not block phase completion.
+
+The `.planning/REQUIREMENTS.md` traceability table still shows `AUTH-01..05` as "Pending" (documentation-sync gap only, carried from the initial pass) — recommend updating at phase close since the code evidence confirms all are implemented and passing.
 
 ---
 
-_Verified: 2026-07-03T02:17:30Z_
+_Verified: 2026-07-04T17:40:00Z_
 _Verifier: Claude (gsd-verifier)_
