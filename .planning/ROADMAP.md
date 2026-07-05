@@ -93,11 +93,17 @@ Plans:
   4. A job stuck in `active` past a defined staleness threshold (worker crashed) is recovered without re-processing a job that is merely slow but healthy.
   5. Every reconciler action (job recovered, job terminal-failed) is recorded in `job_events`.
 
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
+**Wave 1**
 
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md — Image-queue retry budget & backoff: fast 2s/5s/15s imageRetrySchedule, queue-aware RetryDelayFunc dispatcher, configurable IMAGE_MAX_RETRY on queue.Client (RELY-02, D-05/D-06/D-07)
+- [ ] 03-02-PLAN.md — Error classification + idempotent retry re-entry: isTerminal transient/terminal classifier, idempotent MarkActive (COALESCE started_at), transition/MarkFailed detail param, sanitized error_message (RELY-01/RELY-02, D-01/D-02/D-03/D-04)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 03-03-PLAN.md — Reconciler sweep + recovery cap + terminal-fail + webhook trigger: RequeueStale/RecoveryCount/FindStale repo methods, internal/reconciler ticker Sweeper, worker graceful-shutdown wiring (RECON-01/RECON-02/RECON-03, D-08..D-15)
 
 ### Phase 4: Content Validation, Storage Lifecycle & Observability
 
@@ -128,5 +134,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
-| 3. Retry-Safety & Reconciler | 0/TBD | Not started | - |
+| 3. Retry-Safety & Reconciler | 0/3 | Not started | - |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
