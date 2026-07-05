@@ -172,6 +172,45 @@ curl -H "Authorization: ApiKey <raw-key>" http://localhost:8090/v1/jobs/<job_id>
 | `WORKER_CONCURRENCY` | число воркеров в процессе        |
 | `ENGINE_TIMEOUT`  | таймаут на один запуск движка       |
 
+
+## Frontend
+
+Минимальный веб-интерфейс находится в `frontend/`: React + Vite + TypeScript. Он позволяет
+ввести API-ключ, выбрать файл и целевой формат, поставить задачу через `POST /v1/jobs`, затем
+опросить `GET /v1/jobs/<job_id>` до готовности и показать ссылку на скачивание результата.
+
+Используются актуальные версии основных библиотек на момент добавления фронтенда:
+
+| Пакет | Версия |
+|-------|--------|
+| React / React DOM | 19.2.7 |
+| Vite | 8.1.3 |
+| TypeScript | 6.0.3 |
+| @vitejs/plugin-react | 6.0.3 |
+
+Локальный запуск:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+По умолчанию Vite dev server слушает `http://localhost:5173` и проксирует `/v1` и `/healthz`
+на `http://localhost:8090`, поэтому CORS для локальной разработки не требуется. Если API
+запущен на другом адресе, задайте `VITE_API_PROXY_TARGET`:
+
+```bash
+VITE_API_PROXY_TARGET=http://localhost:8090 npm run dev
+```
+
+Для production-сборки:
+
+```bash
+cd frontend
+npm run build
+```
+
 ## Остановка
 
 ```bash
