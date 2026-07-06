@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,21 @@ import (
 
 // ErrNotFound is returned when a job does not exist.
 var ErrNotFound = errors.New("job not found")
+
+// detailActionRecovery is the job_events.detail->>'action' tag written by
+// RequeueStale and read back by RecoveryCount. Both MUST reference this
+// single constant (never a literal string) so the tag can never drift out of
+// sync between the writer and the reader — a mismatch would silently break
+// the reconciler's recovery cap (RECON-02, Pitfall 5).
+const detailActionRecovery = "reconciler_recovery"
+
+// StaleJob is a lightweight row returned by FindStale: just enough for the
+// reconciler to decide how to recover the job (id + the status it was found
+// stranded in).
+type StaleJob struct {
+	ID     uuid.UUID
+	Status string
+}
 
 // Repo is the jobs repository backed by a pgx pool.
 type Repo struct {
@@ -114,6 +130,68 @@ func (r *Repo) MarkFailed(ctx context.Context, id uuid.UUID, code, message strin
 			id, code, message)
 		return err
 	})
+}
+
+// RequeueStale requeues a job stranded in queued (lost enqueue) or active
+// (crashed worker / exhausted asynq retry budget) back to queued, via the
+// same guarded, row-locked transition every other status change goes through
+// — NEVER an ad-hoc UPDATE. reason is a short machine-readable tag (e.g.
+// "stale_queued"/"stale_active") recorded in the job_events.detail payload
+// alongside the reconciler_recovery action tag, so the recovery cap
+// (RecoveryCount) and audit trail (RECON-03) stay consistent.
+func (r *Repo) RequeueStale(ctx context.Context, id uuid.UUID, reason string) error {
+	detail := map[string]any{"action": detailActionRecovery, "reason": reason}
+	return r.transition(ctx, id, StatusQueued, []string{StatusQueued, StatusActive}, detail, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE jobs SET status = 'queued' WHERE id = $1`, id)
+		return err
+	})
+}
+
+// RecoveryCount returns how many times the reconciler has already requeued
+// this job (i.e. the number of job_events rows tagged detailActionRecovery),
+// so the sweeper can compare against the recovery cap (RECONCILER_MAX_RECOVERIES).
+func (r *Repo) RecoveryCount(ctx context.Context, id uuid.UUID) (int, error) {
+	var n int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT count(*) FROM job_events WHERE job_id = $1 AND detail->>'action' = $2`,
+		id, detailActionRecovery,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count recoveries for job %s: %w", id, err)
+	}
+	return n, nil
+}
+
+// FindStale returns jobs stranded past their staleness threshold: queued
+// jobs older than queuedStaleAfter (lost enqueue) or active jobs whose
+// started_at is older than activeStaleAfter (crashed worker / exhausted
+// asynq retry budget). Cutoffs are computed in Go and bound as timestamptz
+// parameters so the comparison stays index-friendly against jobs_inflight_idx
+// (created_at) WHERE status IN ('queued','active').
+func (r *Repo) FindStale(ctx context.Context, queuedStaleAfter, activeStaleAfter time.Duration) ([]StaleJob, error) {
+	now := time.Now()
+	queuedCutoff := now.Add(-queuedStaleAfter)
+	activeCutoff := now.Add(-activeStaleAfter)
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, status FROM jobs
+		WHERE (status = 'queued' AND created_at < $1)
+		   OR (status = 'active' AND started_at < $2)`,
+		queuedCutoff, activeCutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query stale jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []StaleJob
+	for rows.Next() {
+		var j StaleJob
+		if err := rows.Scan(&j.ID, &j.Status); err != nil {
+			return nil, fmt.Errorf("scan stale job: %w", err)
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }
 
 // AddOutput inserts a job_outputs row.

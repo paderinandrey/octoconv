@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/google/uuid"
@@ -240,5 +241,187 @@ func TestGetNotFound(t *testing.T) {
 	r := newTestRepo(t)
 	if _, err := r.Get(context.Background(), uuid.New()); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestRequeueStale(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/rq/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+
+	if err := r.RequeueStale(ctx, id, "stale_active"); err != nil {
+		t.Fatalf("RequeueStale (active): %v", err)
+	}
+	got, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusQueued {
+		t.Fatalf("status = %q, want queued", got.Status)
+	}
+
+	var action, reason string
+	if err := r.pool.QueryRow(ctx,
+		`SELECT detail->>'action', detail->>'reason' FROM job_events
+		 WHERE job_id = $1 AND from_status = 'active' AND to_status = 'queued'
+		 ORDER BY id DESC LIMIT 1`, id,
+	).Scan(&action, &reason); err != nil {
+		t.Fatalf("query job_events detail: %v", err)
+	}
+	if action != detailActionRecovery || reason != "stale_active" {
+		t.Fatalf("detail action/reason = %q/%q, want %q/%q", action, reason, detailActionRecovery, "stale_active")
+	}
+
+	// Lost-enqueue case: RequeueStale on an already-queued job also succeeds
+	// (allowedFrom includes queued).
+	if err := r.RequeueStale(ctx, id, "stale_queued"); err != nil {
+		t.Fatalf("RequeueStale (queued): %v", err)
+	}
+
+	// A done/failed job cannot be requeued (illegal transition).
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("MarkActive before MarkDone: %v", err)
+	}
+	if err := r.MarkDone(ctx, id); err != nil {
+		t.Fatalf("MarkDone: %v", err)
+	}
+	if err := r.RequeueStale(ctx, id, "stale_active"); err == nil {
+		t.Fatalf("expected illegal-transition error requeuing a done job, got nil")
+	}
+}
+
+func TestRecoveryCount(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/rc/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	n, err := r.RecoveryCount(ctx, id)
+	if err != nil {
+		t.Fatalf("RecoveryCount (before any recovery): %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RecoveryCount = %d, want 0", n)
+	}
+
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+	if err := r.RequeueStale(ctx, id, "stale_active"); err != nil {
+		t.Fatalf("RequeueStale #1: %v", err)
+	}
+	n, err = r.RecoveryCount(ctx, id)
+	if err != nil {
+		t.Fatalf("RecoveryCount (after 1 recovery): %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("RecoveryCount = %d, want 1", n)
+	}
+
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("MarkActive #2: %v", err)
+	}
+	if err := r.RequeueStale(ctx, id, "stale_active"); err != nil {
+		t.Fatalf("RequeueStale #2: %v", err)
+	}
+	n, err = r.RecoveryCount(ctx, id)
+	if err != nil {
+		t.Fatalf("RecoveryCount (after 2 recoveries): %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("RecoveryCount = %d, want 2", n)
+	}
+}
+
+func TestFindStale(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+	clientID := createTestClient(t, r)
+
+	oldQueued, err := r.Create(ctx, CreateParams{
+		ClientID:  clientID,
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/fs1/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create oldQueued: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = $1`, oldQueued); err != nil {
+		t.Fatalf("backdate oldQueued created_at: %v", err)
+	}
+
+	freshQueued, err := r.Create(ctx, CreateParams{
+		ClientID:  clientID,
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/fs2/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create freshQueued: %v", err)
+	}
+
+	oldActive, err := r.Create(ctx, CreateParams{
+		ClientID:  clientID,
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/fs3/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create oldActive: %v", err)
+	}
+	if err := r.MarkActive(ctx, oldActive); err != nil {
+		t.Fatalf("MarkActive oldActive: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET started_at = now() - interval '1 hour' WHERE id = $1`, oldActive); err != nil {
+		t.Fatalf("backdate oldActive started_at: %v", err)
+	}
+
+	freshActive, err := r.Create(ctx, CreateParams{
+		ClientID:  clientID,
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/fs4/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create freshActive: %v", err)
+	}
+	if err := r.MarkActive(ctx, freshActive); err != nil {
+		t.Fatalf("MarkActive freshActive: %v", err)
+	}
+
+	stale, err := r.FindStale(ctx, 90*time.Second, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("FindStale: %v", err)
+	}
+	got := map[uuid.UUID]string{}
+	for _, j := range stale {
+		got[j.ID] = j.Status
+	}
+	if got[oldQueued] != StatusQueued {
+		t.Fatalf("expected oldQueued in stale results as %q, got %+v", StatusQueued, stale)
+	}
+	if got[oldActive] != StatusActive {
+		t.Fatalf("expected oldActive in stale results as %q, got %+v", StatusActive, stale)
+	}
+	if _, ok := got[freshQueued]; ok {
+		t.Fatalf("freshQueued should not be stale: %+v", stale)
+	}
+	if _, ok := got[freshActive]; ok {
+		t.Fatalf("freshActive should not be stale: %+v", stale)
 	}
 }
