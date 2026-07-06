@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 
@@ -74,9 +75,10 @@ func TestJobLifecycle(t *testing.T) {
 	if err := r.MarkActive(ctx, id); err != nil {
 		t.Fatalf("MarkActive: %v", err)
 	}
-	// Re-activating a non-queued job must fail (guard).
-	if err := r.MarkActive(ctx, id); err == nil {
-		t.Fatal("expected illegal transition on second MarkActive")
+	// Re-activating an already-active job must succeed idempotently (asynq's
+	// internal same-task retry re-enters the handler at MarkActive).
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("expected idempotent re-entry on second MarkActive, got: %v", err)
 	}
 
 	if err := r.AddOutput(ctx, id, Output{
@@ -129,7 +131,8 @@ func TestMarkFailed(t *testing.T) {
 	if err := r.MarkActive(ctx, id); err != nil {
 		t.Fatalf("MarkActive: %v", err)
 	}
-	if err := r.MarkFailed(ctx, id, "engine_error", "boom"); err != nil {
+	detail := map[string]any{"engine_stderr": "boom: /tmp/octoconv-x/in.png is not a known file format"}
+	if err := r.MarkFailed(ctx, id, "engine_error", "boom", detail); err != nil {
 		t.Fatalf("MarkFailed: %v", err)
 	}
 	got, err := r.Get(ctx, id)
@@ -138,6 +141,98 @@ func TestMarkFailed(t *testing.T) {
 	}
 	if got.Status != StatusFailed || got.ErrorCode != "engine_error" || got.ErrorMessage != "boom" {
 		t.Fatalf("unexpected failed job: %+v", got)
+	}
+
+	// The detail payload must round-trip via job_events.detail (jsonb).
+	var detailJSON []byte
+	if err := r.pool.QueryRow(ctx,
+		`SELECT detail FROM job_events WHERE job_id = $1 AND to_status = 'failed' ORDER BY id DESC LIMIT 1`, id,
+	).Scan(&detailJSON); err != nil {
+		t.Fatalf("query job_events detail: %v", err)
+	}
+	var got2 map[string]any
+	if err := json.Unmarshal(detailJSON, &got2); err != nil {
+		t.Fatalf("unmarshal detail: %v", err)
+	}
+	if got2["engine_stderr"] != detail["engine_stderr"] {
+		t.Fatalf("detail = %+v, want %+v", got2, detail)
+	}
+}
+
+func TestMarkFailedNilDetail(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/z/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+	if err := r.MarkFailed(ctx, id, "engine_error", "boom", nil); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+
+	var detailJSON *string
+	if err := r.pool.QueryRow(ctx,
+		`SELECT detail FROM job_events WHERE job_id = $1 AND to_status = 'failed' ORDER BY id DESC LIMIT 1`, id,
+	).Scan(&detailJSON); err != nil {
+		t.Fatalf("query job_events detail: %v", err)
+	}
+	if detailJSON != nil {
+		t.Fatalf("expected NULL detail, got %q", *detailJSON)
+	}
+}
+
+func TestMarkActiveIdempotentReentry(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "image", SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/w/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("first MarkActive: %v", err)
+	}
+	first, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after first MarkActive: %v", err)
+	}
+	if first.Status != StatusActive || first.StartedAt == nil {
+		t.Fatalf("unexpected job after first MarkActive: %+v", first)
+	}
+
+	if err := r.MarkActive(ctx, id); err != nil {
+		t.Fatalf("second MarkActive (idempotent re-entry): %v", err)
+	}
+	second, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get after second MarkActive: %v", err)
+	}
+	if second.Status != StatusActive {
+		t.Fatalf("status after second MarkActive = %q, want active", second.Status)
+	}
+	if second.StartedAt == nil || !second.StartedAt.Equal(*first.StartedAt) {
+		t.Fatalf("started_at changed across re-entry: first=%v second=%v", first.StartedAt, second.StartedAt)
+	}
+
+	var attempts int
+	if err := r.pool.QueryRow(ctx, `SELECT attempts FROM jobs WHERE id = $1`, id).Scan(&attempts); err != nil {
+		t.Fatalf("query attempts: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 
