@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (gap closure in progress — verification found 2 gaps) (completed 2026-07-04)
 - [x] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling. (completed 2026-07-04)
-- [ ] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered.
+- [x] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered. (completed 2026-07-06)
 - [ ] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health.
 
 ## Phase Details
@@ -103,7 +103,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 03-03-PLAN.md — Reconciler sweep + recovery cap + terminal-fail + webhook trigger: RequeueStale/RecoveryCount/FindStale repo methods, internal/reconciler ticker Sweeper, worker graceful-shutdown wiring (RECON-01/RECON-02/RECON-03, D-08..D-15)
+- [x] 03-03-PLAN.md — Reconciler sweep + recovery cap + terminal-fail + webhook trigger: RequeueStale/RecoveryCount/FindStale repo methods, internal/reconciler ticker Sweeper, worker graceful-shutdown wiring (RECON-01/RECON-02/RECON-03, D-08..D-15)
 
 ### Phase 4: Content Validation, Storage Lifecycle & Observability
 
@@ -134,5 +134,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
-| 3. Retry-Safety & Reconciler | 2/3 | In Progress|  |
+| 3. Retry-Safety & Reconciler | 3/3 | Complete   | 2026-07-06 |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
