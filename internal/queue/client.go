@@ -3,6 +3,9 @@ package queue
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -11,15 +14,33 @@ import (
 // Client enqueues conversion tasks. Wraps an asynq.Client.
 type Client struct {
 	c *asynq.Client
+
+	// imageMaxRetry is the per-task MaxRetry budget for image conversion
+	// tasks (IMAGE_MAX_RETRY, default 4 — D-05, small compared to
+	// webhook's 6).
+	imageMaxRetry int
+	// imageUniqueTTL is the per-job asynq.Unique lock TTL for image
+	// conversion tasks, derived once at construction from imageMaxRetry
+	// and ENGINE_TIMEOUT via ImageUniqueTTL — see its doc comment for the
+	// worst-case-lifetime derivation this TTL must always exceed.
+	imageUniqueTTL time.Duration
 }
 
-// NewClient builds a queue client from REDIS_ADDR.
+// NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
+// 4), and ENGINE_TIMEOUT (default 120s — same env var the worker reads to
+// bound a conversion attempt).
 func NewClient() (*Client, error) {
 	opt, err := RedisOpt()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{c: asynq.NewClient(opt)}, nil
+	imageMaxRetry := envInt("IMAGE_MAX_RETRY", 4)
+	engineTimeout := envDuration("ENGINE_TIMEOUT", 120*time.Second)
+	return &Client{
+		c:              asynq.NewClient(opt),
+		imageMaxRetry:  imageMaxRetry,
+		imageUniqueTTL: ImageUniqueTTL(imageMaxRetry, engineTimeout),
+	}, nil
 }
 
 // Close releases the underlying Redis connections.
@@ -27,7 +48,7 @@ func (c *Client) Close() error { return c.c.Close() }
 
 // EnqueueImageConvert puts an image conversion job onto the image queue.
 func (c *Client) EnqueueImageConvert(ctx context.Context, jobID uuid.UUID) error {
-	task, err := NewImageConvertTask(jobID)
+	task, err := NewImageConvertTask(jobID, c.imageMaxRetry, c.imageUniqueTTL)
 	if err != nil {
 		return err
 	}
@@ -47,4 +68,41 @@ func (c *Client) EnqueueWebhookDeliver(ctx context.Context, jobID uuid.UUID) err
 		return fmt.Errorf("enqueue webhook deliver %s: %w", jobID, err)
 	}
 	return nil
+}
+
+// envInt reads an integer environment variable, tolerating a trailing
+// inline `# comment` (see firstField), falling back to def if unset or
+// unparseable. Mirrors the convention in cmd/worker/main.go.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(firstField(v)); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// envDuration reads a time.Duration environment variable, tolerating a
+// trailing inline `# comment` (see firstField), falling back to def if
+// unset or unparseable. Mirrors the convention in cmd/worker/main.go.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(firstField(v)); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// firstField strips a trailing whitespace-delimited inline comment from an
+// env value, e.g. "120s   # comment" -> "120s". Duplicated from
+// cmd/worker/main.go's helper of the same name (unexported, per-package
+// convention — see cmd/api/main.go for the sibling copy).
+func firstField(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' {
+			return s[:i]
+		}
+	}
+	return s
 }
