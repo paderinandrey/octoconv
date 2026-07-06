@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -79,18 +80,22 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
 }
 
 // MarkActive transitions a job to active and stamps started_at, appending an
-// event. The transition is guarded so only queued jobs move to active.
+// event. The transition allows queued->active AND active->active so asynq's
+// internal same-task retry re-entering the handler does not trip the illegal-
+// transition guard; started_at uses COALESCE so it stays pinned to the FIRST
+// activation, not the most recent retry, which the reconciler's active-
+// staleness check depends on for true elapsed running time.
 func (r *Repo) MarkActive(ctx context.Context, id uuid.UUID) error {
-	return r.transition(ctx, id, StatusActive, []string{StatusQueued}, func(ctx context.Context, tx pgx.Tx) error {
+	return r.transition(ctx, id, StatusActive, []string{StatusQueued, StatusActive}, nil, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`UPDATE jobs SET status = 'active', started_at = now(), attempts = attempts + 1 WHERE id = $1`, id)
+			`UPDATE jobs SET status = 'active', started_at = COALESCE(started_at, now()), attempts = attempts + 1 WHERE id = $1`, id)
 		return err
 	})
 }
 
 // MarkDone transitions an active job to done and stamps finished_at.
 func (r *Repo) MarkDone(ctx context.Context, id uuid.UUID) error {
-	return r.transition(ctx, id, StatusDone, []string{StatusActive}, func(ctx context.Context, tx pgx.Tx) error {
+	return r.transition(ctx, id, StatusDone, []string{StatusActive}, nil, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE jobs SET status = 'done', finished_at = now() WHERE id = $1`, id)
 		return err
@@ -98,8 +103,12 @@ func (r *Repo) MarkDone(ctx context.Context, id uuid.UUID) error {
 }
 
 // MarkFailed transitions a job to failed, recording the error and finished_at.
-func (r *Repo) MarkFailed(ctx context.Context, id uuid.UUID, code, message string) error {
-	return r.transition(ctx, id, StatusFailed, []string{StatusQueued, StatusActive}, func(ctx context.Context, tx pgx.Tx) error {
+// detail is an optional structured payload (e.g. raw engine stderr) attached
+// to the job_events row for internal diagnostics only — error_message/code
+// stay short and sanitized since they are exposed via GET /jobs/{id} and
+// webhook payloads.
+func (r *Repo) MarkFailed(ctx context.Context, id uuid.UUID, code, message string, detail map[string]any) error {
+	return r.transition(ctx, id, StatusFailed, []string{StatusQueued, StatusActive}, detail, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE jobs SET status = 'failed', finished_at = now(), error_code = $2, error_message = $3 WHERE id = $1`,
 			id, code, message)
@@ -206,14 +215,24 @@ func (r *Repo) Outputs(ctx context.Context, jobID uuid.UUID) ([]Output, error) {
 
 // transition performs a guarded status change plus an append to job_events in a
 // single transaction. It errors if the job is not in one of the allowed source
-// statuses (concurrency/idempotency guard).
+// statuses (concurrency/idempotency guard). detail, when non-nil, is marshaled
+// into the job_events.detail jsonb column; when nil, the column stays NULL.
 func (r *Repo) transition(
 	ctx context.Context,
 	id uuid.UUID,
 	to string,
 	allowedFrom []string,
+	detail map[string]any,
 	apply func(ctx context.Context, tx pgx.Tx) error,
 ) error {
+	var detailJSON []byte
+	if detail != nil {
+		var err error
+		detailJSON, err = json.Marshal(detail)
+		if err != nil {
+			return fmt.Errorf("marshal transition detail: %w", err)
+		}
+	}
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var from string
 		if err := tx.QueryRow(ctx,
@@ -234,8 +253,8 @@ func (r *Repo) transition(
 		}
 
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO job_events (job_id, from_status, to_status) VALUES ($1, $2, $3)`,
-			id, from, to,
+			`INSERT INTO job_events (job_id, from_status, to_status, detail) VALUES ($1, $2, $3, $4)`,
+			id, from, to, detailJSON,
 		); err != nil {
 			return fmt.Errorf("insert job_event: %w", err)
 		}
