@@ -21,8 +21,8 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Reliability
 
-- [ ] **RELY-01**: Воркер различает transient-ошибки (сетевые/таймауты) и terminal-ошибки (невалидный вход, неподдерживаемый формат) при сбое конвертации
-- [ ] **RELY-02**: При transient-ошибке job не помечается terminal-failed — retry средствами asynq реально происходит (сейчас каждая задача получает ровно одну попытку независимо от конфигурации retry)
+- [x] **RELY-01**: Воркер различает transient-ошибки (сетевые/таймауты) и terminal-ошибки (невалидный вход, неподдерживаемый формат) при сбое конвертации
+- [x] **RELY-02**: При transient-ошибке job не помечается terminal-failed — retry средствами asynq реально происходит (сейчас каждая задача получает ровно одну попытку независимо от конфигурации retry)
 
 ### Rate Limiting
 
@@ -32,9 +32,9 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Reconciler
 
-- [ ] **RECON-01**: Периодический reconciler находит задачи, зависшие в `queued` без соответствующей задачи в очереди, и переставляет их в очередь (идемпотентно, без дублей)
-- [ ] **RECON-02**: Reconciler находит задачи, зависшие в `active` дольше порога (воркер упал), и не дублирует обработку легитимно медленной задачи — только реально зависшие
-- [ ] **RECON-03**: Действия reconciler'а (восстановленные, terminal-failed задачи) фиксируются в `job_events`
+- [x] **RECON-01**: Периодический reconciler находит задачи, зависшие в `queued` без соответствующей задачи в очереди, и переставляет их в очередь (идемпотентно, без дублей)
+- [x] **RECON-02**: Reconciler находит задачи, зависшие в `active` дольше порога (воркер упал), и не дублирует обработку легитимно медленной задачи — только реально зависшие
+- [x] **RECON-03**: Действия reconciler'а (восстановленные, terminal-failed задачи) фиксируются в `job_events`
 
 ### Webhooks
 
@@ -116,11 +116,11 @@ Requirements for этого этапа (production-hardening image-среза). 
 | WEBHOOK-03 | Phase 2 | Pending |
 | WEBHOOK-04 | Phase 2 | Pending |
 | WEBHOOK-05 | Phase 2 | Pending |
-| RELY-01 | Phase 3 | Pending |
-| RELY-02 | Phase 3 | Pending |
-| RECON-01 | Phase 3 | Pending |
-| RECON-02 | Phase 3 | Pending |
-| RECON-03 | Phase 3 | Pending |
+| RELY-01 | Phase 3 | Done |
+| RELY-02 | Phase 3 | Done |
+| RECON-01 | Phase 3 | Done |
+| RECON-02 | Phase 3 | Done |
+| RECON-03 | Phase 3 | Done |
 | VALID-01 | Phase 4 | Pending |
 | VALID-02 | Phase 4 | Pending |
 | STOR-01 | Phase 4 | Pending |
