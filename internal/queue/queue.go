@@ -40,14 +40,24 @@ type WebhookPayload struct {
 	JobID uuid.UUID `json:"job_id"`
 }
 
-// NewImageConvertTask builds an asynq task for an image conversion job, routed
-// to the image queue.
-func NewImageConvertTask(jobID uuid.UUID) (*asynq.Task, error) {
+// NewImageConvertTask builds an asynq task for an image conversion job,
+// routed to the image queue, bounded to maxRetry (D-05, IMAGE_MAX_RETRY —
+// small compared to webhook's 6, since image conversion failures should
+// retry a few times fast, not linger), and carrying a per-job asynq.Unique
+// lock (uniqueTTL, see ImageUniqueTTL) so a second enqueue for the same
+// jobID while the first task/lock is still live collides on the same
+// uniqueness key and returns asynq.ErrDuplicateTask instead of creating a
+// second concurrent task — the mechanism the Plan 03 reconciler relies on.
+func NewImageConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) (*asynq.Task, error) {
 	b, err := json.Marshal(ConvertPayload{JobID: jobID})
 	if err != nil {
 		return nil, fmt.Errorf("marshal convert payload: %w", err)
 	}
-	return asynq.NewTask(TypeImageConvert, b, asynq.Queue(QueueImage)), nil
+	return asynq.NewTask(TypeImageConvert, b,
+		asynq.Queue(QueueImage),
+		asynq.MaxRetry(maxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
 }
 
 // ParseConvertPayload decodes a ConvertPayload from a task body.
@@ -116,6 +126,105 @@ func WebhookRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 		delay = 0
 	}
 	return delay
+}
+
+// imageRetrySchedule is the fast backoff schedule for image conversion
+// retries (D-06): 2s, 5s, 15s — deliberately a seconds-scale schedule,
+// distinct from webhookRetrySchedule's minutes-scale 30s->15m window, since
+// a transient image conversion failure (engine timeout, storage hiccup)
+// should be retried quickly a few times, not ground through slowly.
+var imageRetrySchedule = []time.Duration{
+	2 * time.Second,
+	5 * time.Second,
+	15 * time.Second,
+}
+
+// ImageRetryDelay is an asynq RetryDelayFunc for the image queue. Mirrors
+// WebhookRetryDelay's clamp-index-to-schedule-length shape but WITHOUT
+// jitter — D-06 does not require jitter for image retries, since the
+// schedule is already short and image tasks are not competing to avoid a
+// thundering herd on a shared external endpoint the way webhook deliveries
+// are.
+func ImageRetryDelay(n int, e error, t *asynq.Task) time.Duration {
+	idx := n
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(imageRetrySchedule) {
+		idx = len(imageRetrySchedule) - 1
+	}
+	return imageRetrySchedule[idx]
+}
+
+// RetryDelayFunc dispatches to a per-queue retry delay function based on the
+// task type. It fixes the confirmed defect where every queue silently
+// inherited WebhookRetryDelay via a single server-wide
+// asynq.Config.RetryDelayFunc: image tasks now retry on their own fast
+// schedule, webhook tasks keep their existing schedule, and any future task
+// type falls back to asynq's own default rather than accidentally reusing
+// the webhook schedule.
+func RetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
+	switch t.Type() {
+	case TypeImageConvert:
+		return ImageRetryDelay(n, e, t)
+	case TypeWebhookDeliver:
+		return WebhookRetryDelay(n, e, t)
+	default:
+		return asynq.DefaultRetryDelayFunc(n, e, t)
+	}
+}
+
+// uniqueTTLSafetyMargin is fixed headroom added on top of the computed
+// worst-case image-retry lifetime, covering the case where every attempt
+// hangs for the full ENGINE_TIMEOUT.
+const uniqueTTLSafetyMargin = 2 * time.Minute
+
+// imageBackoffSum sums ImageRetryDelay(i) for i in [0, maxRetry) — the total
+// backoff time asynq spends waiting before each of maxRetry retries,
+// clamped to the last schedule entry once i reaches len(imageRetrySchedule).
+func imageBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		sum += ImageRetryDelay(i, nil, nil)
+	}
+	return sum
+}
+
+// ImageUniqueTTL derives the per-job asynq.Unique lock TTL for image
+// conversion tasks from the actual retry budget (maxRetry, normally
+// IMAGE_MAX_RETRY) and the per-attempt bound (engineTimeout, normally
+// ENGINE_TIMEOUT), so the lock can never silently drift under asynq's true
+// worst-case retry lifetime if either env var changes later.
+//
+// Worst-case formula: (maxRetry+1) * engineTimeout + imageBackoffSum(maxRetry) + margin.
+// asynq's archive condition is `msg.Retried >= msg.Retry`, checked AFTER
+// each failed attempt, so a task with MaxRetry=maxRetry gets maxRetry+1
+// total engine executions (1 initial attempt + maxRetry retries) before
+// archival — NOT maxRetry. For the defaults (IMAGE_MAX_RETRY=4,
+// ENGINE_TIMEOUT=120s) this is 5*120s + (2+5+15+15)s + 120s = 757s,
+// comfortably above asynq's 637s worst-case retry lifetime
+// (5*120s + 37s).
+//
+// The lock must outlive that lifetime for two reasons: (a) while asynq is
+// still legitimately retrying, a reconciler re-enqueue for the same job
+// collides on the still-live lock and is a safe no-op; (b) asynq does NOT
+// release the unique lock on archive (only on success or TTL expiry), so
+// once the retry budget is exhausted the lock lapses within a bounded
+// window and the reconciler can genuinely re-enqueue.
+//
+// The TTL is DERIVED rather than a hardcoded constant deliberately: if
+// IMAGE_MAX_RETRY or ENGINE_TIMEOUT are later changed via env, the margin
+// scales with them automatically and cannot fall behind the real retry
+// lifetime.
+//
+// SOUNDNESS DEPENDENCY: this "each attempt <= engineTimeout" worst-case
+// bound is sound only because Plan 02 (03-02 T-03-11) bounds the ENTIRE
+// conversion attempt — download + convert + upload + record, not just
+// conv.Convert() — with a single context.WithTimeout(ctx, ENGINE_TIMEOUT)
+// in process(); a stalled S3 transfer on an unbounded ctx would otherwise
+// let one attempt exceed engineTimeout and silently outlive this lock.
+func ImageUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*engineTimeout + imageBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
 // RedisOpt builds the asynq Redis connection options from REDIS_ADDR.
