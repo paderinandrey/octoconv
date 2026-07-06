@@ -98,8 +98,8 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Image-queue retry budget & backoff: fast 2s/5s/15s imageRetrySchedule, queue-aware RetryDelayFunc dispatcher, configurable IMAGE_MAX_RETRY on queue.Client (RELY-02, D-05/D-06/D-07)
-- [ ] 03-02-PLAN.md — Error classification + idempotent retry re-entry: isTerminal transient/terminal classifier, idempotent MarkActive (COALESCE started_at), transition/MarkFailed detail param, sanitized error_message (RELY-01/RELY-02, D-01/D-02/D-03/D-04)
+- [x] 03-01-PLAN.md — Image-queue retry budget & backoff: fast 2s/5s/15s imageRetrySchedule, queue-aware RetryDelayFunc dispatcher, configurable IMAGE_MAX_RETRY on queue.Client (RELY-02, D-05/D-06/D-07)
+- [x] 03-02-PLAN.md — Error classification + idempotent retry re-entry: isTerminal transient/terminal classifier, idempotent MarkActive (COALESCE started_at), transition/MarkFailed detail param, sanitized error_message (RELY-01/RELY-02, D-01/D-02/D-03/D-04)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -134,5 +134,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
-| 3. Retry-Safety & Reconciler | 0/3 | Not started | - |
+| 3. Retry-Safety & Reconciler | 2/3 | In Progress|  |
 | 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
