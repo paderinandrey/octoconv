@@ -4,14 +4,17 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/minio/minio-go/v7"
 
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
@@ -19,6 +22,47 @@ import (
 	"github.com/apaderin/octoconv/internal/storage"
 	"github.com/apaderin/octoconv/internal/webhook"
 )
+
+// terminalVipsSignatures are stderr substrings (lowercased) that vips emits
+// for genuinely corrupted/unknown input formats. Verified live-tested
+// (debian:bookworm-slim + libvips-tools, vips-8.14.1): exit code is 1 for
+// EVERY failure mode (transient or terminal), so classification must be on
+// stderr content, not exit code.
+var terminalVipsSignatures = []string{
+	"is not a known file format",
+	"premature end of jpeg file",
+	"jpeg datastream contains no image",
+}
+
+// isTerminal classifies a process() error as terminal (no retry can help:
+// bad input, unsupported pair, missing storage object) vs. transient
+// (network/S3/engine-timeout/Postgres blip — broad-retry default, D-01).
+func isTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	// internal/storage wraps every minio error via fmt.Errorf("...: %w", err),
+	// and minio.ToErrorResponse itself is a bare type switch (no unwrapping) —
+	// so errors.As must walk the %w chain first to surface the underlying
+	// minio.ErrorResponse before classifying its Code.
+	var mErr minio.ErrorResponse
+	if errors.As(err, &mErr) && minio.ToErrorResponse(mErr).Code == minio.NoSuchKey {
+		// D-02: storage input genuinely missing.
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no converter for") {
+		// D-01: registry.Lookup miss — no engine supports this format pair.
+		return true
+	}
+	for _, sig := range terminalVipsSignatures {
+		if strings.Contains(msg, sig) {
+			// D-01: engine reports a corrupted/unknown input format.
+			return true
+		}
+	}
+	return false
+}
 
 // Handler processes image conversion tasks end to end.
 type Handler struct {
@@ -58,7 +102,11 @@ func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Regist
 
 // HandleImageConvert runs one image conversion: load job -> mark active ->
 // download input -> run engine -> upload output -> record output -> mark done.
-// Errors mark the job failed and are returned so asynq applies its retry policy.
+// A terminal error (bad input, unsupported pair, missing storage object) marks
+// the job failed immediately and skips asynq's retry (D-01/D-02); a transient
+// error (network, S3/engine timeout, Postgres write blip) is returned
+// unwrapped so the job stays active and asynq retries the same task
+// (D-01/D-03/D-04) — mirroring HandleWebhookDeliver's classification pattern.
 func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 	payload, err := queue.ParseConvertPayload(t.Payload())
 	if err != nil {
@@ -78,12 +126,21 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 	}
 
 	if err := h.process(ctx, job); err != nil {
-		_ = h.repo.MarkFailed(ctx, jobID, "engine_error", err.Error())
-		// Postgres-first: the failed status is already committed above, so a
-		// failed enqueue must not fail the conversion — best-effort only.
-		if job.CallbackURL != "" {
-			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		if isTerminal(err) {
+			// Sanitized message only in error_message (exposed via GET
+			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
+			// (which contains local temp paths) is kept in job_events.detail
+			// for internal diagnostics only.
+			_ = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			// Postgres-first: the failed status is already committed above, so a
+			// failed enqueue must not fail the conversion — best-effort only.
+			if job.CallbackURL != "" {
+				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+			}
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
 		}
+		// Transient: do NOT mark failed — the job stays active so asynq's own
+		// retry/backoff (ImageRetryDelay/IMAGE_MAX_RETRY, Plan 01) applies.
 		return err
 	}
 	// Postgres-first: MarkDone already committed inside process(), so a
@@ -179,7 +236,21 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 }
 
 func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
-	inputs, err := h.inputKey(ctx, job.ID)
+	// The ENTIRE attempt (input lookup, download, convert, upload, record) is
+	// bounded by a single whole-attempt deadline, not just conv.Convert(): the
+	// minio client sets no transport read-deadline, so a stalled (hung, not
+	// refused) S3 transfer would otherwise have NO upper bound. Plan 01's
+	// derived ImageUniqueTTL assumes every attempt is <= ENGINE_TIMEOUT and
+	// asynq never refreshes the per-job unique lock on internal same-task
+	// retries — a single attempt that outlives that TTL would let the lock
+	// lapse in Redis while this handler is still running, letting the
+	// reconciler's next EnqueueImageConvert create a second concurrent task
+	// for the same job (the T-03-10 double-processing race). Threading one
+	// attemptCtx through every step closes that gap (T-03-11).
+	attemptCtx, cancel := context.WithTimeout(ctx, h.engineTimout)
+	defer cancel()
+
+	inputs, err := h.inputKey(attemptCtx, job.ID)
 	if err != nil {
 		return err
 	}
@@ -199,24 +270,21 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 	outName := "out." + job.TargetFormat
 	outPath := filepath.Join(workDir, outName)
 
-	if err := h.downloadTo(ctx, inputs.ObjectKey, inPath); err != nil {
+	if err := h.downloadTo(attemptCtx, inputs.ObjectKey, inPath); err != nil {
 		return err
 	}
 
-	// Bound the engine run with the configured timeout.
-	engineCtx, cancel := context.WithTimeout(ctx, h.engineTimout)
-	defer cancel()
-	if err := conv.Convert(engineCtx, inPath, outPath, nil); err != nil {
+	if err := conv.Convert(attemptCtx, inPath, outPath, nil); err != nil {
 		return fmt.Errorf("convert: %w", err)
 	}
 
 	outKey := storage.OutputKey(job.ID, 0, outName)
-	size, err := h.uploadFrom(ctx, outKey, outPath, contentTypeFor(job.TargetFormat))
+	size, err := h.uploadFrom(attemptCtx, outKey, outPath, contentTypeFor(job.TargetFormat))
 	if err != nil {
 		return err
 	}
 
-	if err := h.repo.AddOutput(ctx, job.ID, jobs.Output{
+	if err := h.repo.AddOutput(attemptCtx, job.ID, jobs.Output{
 		Ordinal:     0,
 		ObjectKey:   outKey,
 		Filename:    outName,
@@ -227,7 +295,7 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 
-	return h.repo.MarkDone(ctx, job.ID)
+	return h.repo.MarkDone(attemptCtx, job.ID)
 }
 
 func (h *Handler) inputKey(ctx context.Context, jobID uuid.UUID) (jobs.Input, error) {
