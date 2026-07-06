@@ -6,7 +6,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -15,13 +17,15 @@ import (
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/queue"
+	"github.com/apaderin/octoconv/internal/reconciler"
 	"github.com/apaderin/octoconv/internal/storage"
 	"github.com/apaderin/octoconv/internal/webhook"
 	"github.com/apaderin/octoconv/internal/worker"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	pool, err := db.Connect(ctx)
 	if err != nil {
@@ -50,8 +54,10 @@ func main() {
 	}
 	defer qc.Close()
 
+	repo := jobs.NewRepo(pool)
+
 	h := worker.NewHandler(
-		jobs.NewRepo(pool),
+		repo,
 		store,
 		convert.Default,
 		envDuration("ENGINE_TIMEOUT", 120*time.Second),
@@ -61,6 +67,13 @@ func main() {
 		signingSecret,
 		envDuration("WEBHOOK_PRESIGN_TTL", 6*time.Hour),
 	)
+
+	sweeper := reconciler.NewSweeper(repo, qc, reconciler.Config{
+		QueuedStaleAfter: envDuration("RECONCILER_QUEUED_STALE_AFTER", 90*time.Second),
+		ActiveStaleAfter: envDuration("RECONCILER_ACTIVE_STALE_AFTER", 5*time.Minute),
+		SweepInterval:    envDuration("RECONCILER_SWEEP_INTERVAL", 1*time.Minute),
+		MaxRecoveries:    envInt("RECONCILER_MAX_RECOVERIES", 3),
+	})
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeImageConvert, h.HandleImageConvert)
@@ -73,10 +86,14 @@ func main() {
 	})
 
 	log.Printf("🐙 worker starting (queues=%s,%s)", queue.QueueImage, queue.QueueWebhook)
-	// Run blocks until SIGINT/SIGTERM and shuts down gracefully.
-	if err := srv.Run(mux); err != nil {
+	if err := srv.Start(mux); err != nil {
 		log.Fatalf("worker: %v", err)
 	}
+	go sweeper.Run(ctx)
+
+	<-ctx.Done()
+	log.Println("🛑 shutting down worker...")
+	srv.Shutdown()
 	log.Println("bye 👋")
 }
 
