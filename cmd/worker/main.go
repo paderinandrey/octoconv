@@ -69,7 +69,7 @@ func main() {
 	srv := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency:    envInt("WORKER_CONCURRENCY", 4),
 		Queues:         map[string]int{queue.QueueImage: 2, queue.QueueWebhook: 1},
-		RetryDelayFunc: queue.WebhookRetryDelay,
+		RetryDelayFunc: queue.RetryDelayFunc,
 	})
 
 	log.Printf("🐙 worker starting (queues=%s,%s)", queue.QueueImage, queue.QueueWebhook)
