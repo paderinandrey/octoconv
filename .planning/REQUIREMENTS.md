@@ -38,11 +38,11 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Webhooks
 
-- [ ] **WEBHOOK-01**: При завершении задачи (`done`/`failed`) с непустым `callback_url` сервис доставляет вебхук вместо необходимости поллинга
-- [ ] **WEBHOOK-02**: Payload вебхука подписан HMAC-SHA256 с меткой времени для защиты от replay-атак
-- [ ] **WEBHOOK-03**: Недоставленные вебхуки повторяются с exponential backoff + jitter, с ограниченным числом попыток
-- [ ] **WEBHOOK-04**: Каждая попытка доставки фиксируется в `webhook_deliveries` (статус, номер попытки, HTTP-код ответа)
-- [ ] **WEBHOOK-05**: После исчерпания попыток доставка помечается terminal (dead-letter), не удаляется молча — доступна для ручного расследования
+- [x] **WEBHOOK-01**: При завершении задачи (`done`/`failed`) с непустым `callback_url` сервис доставляет вебхук вместо необходимости поллинга
+- [x] **WEBHOOK-02**: Payload вебхука подписан HMAC-SHA256 с меткой времени для защиты от replay-атак
+- [x] **WEBHOOK-03**: Недоставленные вебхуки повторяются с exponential backoff + jitter, с ограниченным числом попыток
+- [x] **WEBHOOK-04**: Каждая попытка доставки фиксируется в `webhook_deliveries` (статус, номер попытки, HTTP-код ответа)
+- [x] **WEBHOOK-05**: После исчерпания попыток доставка помечается terminal (dead-letter), не удаляется молча — доступна для ручного расследования
 
 ### Content Validation
 
@@ -111,11 +111,11 @@ Requirements for этого этапа (production-hardening image-среза). 
 | RATE-01 | Phase 1 | Complete |
 | RATE-02 | Phase 1 | Complete |
 | RATE-03 | Phase 1 | Complete |
-| WEBHOOK-01 | Phase 2 | Pending |
-| WEBHOOK-02 | Phase 2 | Pending |
-| WEBHOOK-03 | Phase 2 | Pending |
-| WEBHOOK-04 | Phase 2 | Pending |
-| WEBHOOK-05 | Phase 2 | Pending |
+| WEBHOOK-01 | Phase 2 | Done |
+| WEBHOOK-02 | Phase 2 | Done |
+| WEBHOOK-03 | Phase 2 | Done |
+| WEBHOOK-04 | Phase 2 | Done |
+| WEBHOOK-05 | Phase 2 | Done |
 | RELY-01 | Phase 3 | Done |
 | RELY-02 | Phase 3 | Done |
 | RECON-01 | Phase 3 | Done |
