@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Merge, Auth & Rate Limiting** - The existing slice lands on `main`, and every request is authenticated per client and rate-limited against abuse. (gap closure in progress — verification found 2 gaps) (completed 2026-07-04)
 - [x] **Phase 2: Webhook Delivery** - Clients receive signed job-completion callbacks instead of relying on polling. (completed 2026-07-04)
 - [x] **Phase 3: Retry-Safety & Reconciler** - The worker correctly retries transient failures, and stranded jobs are automatically and safely recovered. (completed 2026-07-06)
-- [ ] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health.
+- [x] **Phase 4: Content Validation, Storage Lifecycle & Observability** - Uploads are verified by real content, storage doesn't grow unbounded, and operators can see true system health. (completed 2026-07-07)
 
 ## Phase Details
 
@@ -134,7 +134,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 04-05-PLAN.md — Metrics exposure (localhost-only /metrics on api+worker) + asynqmon dashboard (OBS-01 exposure, OBS-03)
+- [x] 04-05-PLAN.md — Metrics exposure (localhost-only /metrics on api+worker) + asynqmon dashboard (OBS-01 exposure, OBS-03)
 
 ## Progress
 
@@ -146,4 +146,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | 3/3 | Complete   | 2026-07-06 |
-| 4. Content Validation, Storage Lifecycle & Observability | 4/5 | In Progress|  |
+| 4. Content Validation, Storage Lifecycle & Observability | 5/5 | Complete   | 2026-07-07 |
