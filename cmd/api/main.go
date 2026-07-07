@@ -39,6 +39,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("storage: %v", err)
 	}
+	// The API is the single owner of the bucket lifecycle rule (Pitfall 4);
+	// SetBucketLifecycle is an idempotent full-document PUT, so calling it
+	// on every startup is safe (D-12).
+	if err := store.EnsureLifecycle(ctx, envDuration("STORAGE_TTL", 168*time.Hour)); err != nil {
+		log.Fatalf("storage lifecycle: %v", err)
+	}
 
 	qc, err := queue.NewClient()
 	if err != nil {
@@ -104,4 +110,13 @@ func firstField(s string) string {
 		}
 	}
 	return s
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(firstField(v)); err == nil {
+			return d
+		}
+	}
+	return def
 }

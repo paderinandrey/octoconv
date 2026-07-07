@@ -87,6 +87,7 @@ services:
       API_KEY_SALT: "dev-only-change-me-in-real-deploys"
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
+      STORAGE_TTL: "168h"
     ports:
       - "8090:8090"
 
