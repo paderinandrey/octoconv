@@ -40,6 +40,7 @@ Uploaded files are verified by their actual content (magic bytes) rather than tr
 
 ### Observability — asynqmon dashboard (OBS-03)
 - **D-18:** Deploy `hibiken/asynqmon` as a separate service in `docker-compose.yml`. Bind its port to `127.0.0.1` only (not `0.0.0.0`) — no additional auth layer needed since it's not reachable outside the host. Matches the project's "internal services only" trust model without adding new credential/secret management.
+- **D-19 (added post-research):** The `/metrics` Prometheus endpoint is served on its own listener (e.g. `METRICS_ADDR=127.0.0.1:9090`), separate from the public `API_ADDR`, and bound to localhost only — same trust-model reasoning as D-18 (asynqmon). Raised by `gsd-phase-researcher` as a gap not covered during discuss-phase: job/queue metrics are operational data that should not be reachable by arbitrary internal API callers just because they can reach `API_ADDR`.
 
 ### Claude's Discretion
 - Exact Go signature bytes/offsets for each of the currently-registered formats (jpg/png/webp/gif/tiff/bmp or whichever subset `convert.Default` actually has registered by the time this phase is planned) — implementation detail, verify against `internal/convert/converters.go`.
