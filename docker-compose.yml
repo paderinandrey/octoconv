@@ -122,6 +122,23 @@ services:
           cpus: "2.0"
           memory: 1g
 
+  # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
+  # only, never 0.0.0.0 — no auth layer needed since it's unreachable outside
+  # the host, matching the internal-only trust model (D-18/T-04-14). Image
+  # pinned to a specific published tag (not :latest) per supply-chain hygiene
+  # (T-04-15) — verified against Docker Hub's tag list at plan time.
+  asynqmon:
+    image: hibiken/asynqmon:0.7.2
+    container_name: octoconv-asynqmon
+    restart: always
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_ADDR: redis:6379
+    ports:
+      - "127.0.0.1:8980:8080"
+
 volumes:
   postgres_data:
     driver: local
