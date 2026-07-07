@@ -129,6 +129,7 @@ services:
   # (T-04-15) — verified against Docker Hub's tag list at plan time.
   asynqmon:
     image: hibiken/asynqmon:0.7.2
+    platform: linux/amd64
     container_name: octoconv-asynqmon
     restart: always
     depends_on:
