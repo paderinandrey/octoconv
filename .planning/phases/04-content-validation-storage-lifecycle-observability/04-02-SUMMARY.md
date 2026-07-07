@@ -103,3 +103,7 @@ None - no external service configuration required. `STORAGE_TTL` has a working d
 ---
 *Phase: 04-content-validation-storage-lifecycle-observability*
 *Completed: 2026-07-07*
+
+## Self-Check: PASSED
+
+All created/modified files found on disk; all task and metadata commit hashes (`169ef74`, `417dc58`, `04a475d`) found in git log.
