@@ -12,6 +12,7 @@ import (
 	"github.com/hibiken/asynq"
 
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/metrics"
 )
 
 // Config tunes the sweep: how stale a queued/active job must be before it is
@@ -98,6 +99,7 @@ func (s *Sweeper) sweep(ctx context.Context) {
 			// enqueue must not undo it).
 			job, _ := s.store.Get(ctx, j.ID)
 			_ = s.store.MarkFailed(ctx, j.ID, "reconciler_exhausted", "recovery attempts exhausted", map[string]any{"action": "reconciler_exhausted"})
+			metrics.RecordReconcilerAction("exhausted")
 			if job != nil && job.CallbackURL != "" {
 				_ = s.enq.EnqueueWebhookDeliver(ctx, j.ID)
 			}
@@ -173,5 +175,11 @@ func (s *Sweeper) sweep(ctx context.Context) {
 				continue
 			}
 		}
+
+		// Reached only after a genuinely successful RequeueStale (first
+		// attempt or the single bounded retry) — never on the
+		// asynq.ErrDuplicateTask continue above, which is a backlogged
+		// no-op, not a recovery.
+		metrics.RecordReconcilerAction("recovered")
 	}
 }
