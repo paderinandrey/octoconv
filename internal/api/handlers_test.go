@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,13 +52,15 @@ func (f *fakeRepo) Outputs(_ context.Context, _ uuid.UUID) ([]jobs.Output, error
 }
 
 type fakeStorage struct {
-	uploaded  bool
-	presigned string
+	uploaded    bool
+	contentType string
+	presigned   string
 }
 
-func (f *fakeStorage) Upload(_ context.Context, _ string, r io.Reader, _ int64, _ string) error {
+func (f *fakeStorage) Upload(_ context.Context, _ string, r io.Reader, _ int64, contentType string) error {
 	_, _ = io.Copy(io.Discard, r)
 	f.uploaded = true
+	f.contentType = contentType
 	return nil
 }
 func (f *fakeStorage) PresignGet(_ context.Context, _ string, _ time.Duration) (string, error) {
@@ -89,6 +92,18 @@ func (f *fakeResolver) ResolveClient(_ context.Context, rawKey string) (*clients
 }
 
 // --- helpers ---
+
+// pngBytesFixture returns the minimal magic-byte prefix that convert.Sniff
+// detects as "png" (plus a few trailing bytes so it's a plausible file).
+func pngBytesFixture() []byte {
+	return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52}
+}
+
+// jpegBytesFixture returns the minimal magic-byte prefix that convert.Sniff
+// detects as "jpg".
+func jpegBytesFixture() []byte {
+	return []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01}
+}
 
 func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.Buffer, string) {
 	t.Helper()
@@ -130,7 +145,7 @@ func TestCreateJob_OK(t *testing.T) {
 	q := &fakeQueue{}
 	srv, resolver := newTestServer(repo, store, q)
 
-	body, ct := multipartBody(t, "in.png", "webp", []byte("fakepng"))
+	body, ct := multipartBody(t, "in.png", "webp", pngBytesFixture())
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
 	rec := httptest.NewRecorder()
@@ -143,6 +158,9 @@ func TestCreateJob_OK(t *testing.T) {
 	if !store.uploaded {
 		t.Error("expected upload to storage")
 	}
+	if store.contentType != "image/png" {
+		t.Errorf("contentType = %q, want image/png (detected format, not client header, D-06)", store.contentType)
+	}
 	if repo.created == nil || repo.created.SourceFormat != "png" || repo.created.TargetFormat != "webp" {
 		t.Errorf("unexpected create params: %+v", repo.created)
 	}
@@ -151,6 +169,63 @@ func TestCreateJob_OK(t *testing.T) {
 	}
 	if q.enqueued != repo.createdID {
 		t.Errorf("enqueued %s, want %s", q.enqueued, repo.createdID)
+	}
+}
+
+// TestCreateJob_ContentMismatch verifies D-01/D-04/D-05: a filename claiming
+// one format but carrying magic bytes of a different (also-supported) format
+// is rejected 422 with a detailed message naming both formats, before any
+// storage write or job creation.
+func TestCreateJob_ContentMismatch(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.jpg", "webp", pngBytesFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "jpg") || !strings.Contains(resp["error"], "png") {
+		t.Errorf("error = %q, want a message naming both declared (jpg) and detected (png)", resp["error"])
+	}
+	if store.uploaded {
+		t.Error("must not upload before content validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for mismatched content")
+	}
+}
+
+// TestCreateJob_UnrecognizedContent verifies D-02: content matching no known
+// signature is rejected 422 before storage/create, regardless of extension.
+func TestCreateJob_UnrecognizedContent(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.png", "webp", []byte("notanimage"))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload unrecognized content")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for unrecognized content")
 	}
 }
 
@@ -179,7 +254,7 @@ func TestCreateJob_UnsupportedPair(t *testing.T) {
 	store := &fakeStorage{}
 	srv, _ := newTestServer(repo, store, &fakeQueue{})
 
-	body, ct := multipartBody(t, "in.png", "mp3", []byte("fakepng"))
+	body, ct := multipartBody(t, "in.png", "mp3", pngBytesFixture())
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
 	rec := httptest.NewRecorder()
