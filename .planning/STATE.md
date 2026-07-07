@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-07-07T10:08:38.866Z"
-last_activity: 2026-07-07 -- Phase 04 execution started
+status: milestone_complete
+stopped_at: Phase 4 complete, verified — milestone v1.0 fully executed
+last_updated: "2026-07-07T19:00:00.000Z"
+last_activity: 2026-07-07 -- Phase 04 execution + verification complete
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 15
-  completed_plans: 10
-  percent: 67
+  completed_plans: 15
+  percent: 100
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-02)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 04 — content-validation-storage-lifecycle-observability
+**Current focus:** Milestone v1.0 complete — all 4 phases done and verified; ready for /gsd:complete-milestone
 
 ## Current Position
 
-Phase: 04 (content-validation-storage-lifecycle-observability) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 04
-Last activity: 2026-07-07 -- Phase 04 execution started
+Phase: 4 (content-validation-storage-lifecycle-observability) — COMPLETE, verified (04-VERIFICATION.md, 5/5 criteria PASS)
+Plan: 5 of 5
+Status: All phases complete — milestone v1.0 ready to close
+Last activity: 2026-07-07 -- Phase 04 execution + verification complete
 
-Progress: [███████░░░] 75%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -47,6 +47,7 @@ Progress: [███████░░░] 75%
 | 1 | 4 | - | - |
 | 02 | 3 | - | - |
 | 03 | 3 | - | - |
+| 04 | 5 | - | - |
 
 **Recent Trend:**
 
@@ -73,8 +74,8 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 4 (STOR-01): MinIO lifecycle-rule semantics vs. AWS S3 docs need verification against the actual MinIO server version in docker-compose.
 - Phase 3 follow-up (non-blocking): 03-03-SUMMARY.md notes the reconciler's multi-minute live staleness scenarios weren't manually run end-to-end in wall-clock time; 03-VERIFICATION.md closed this gap with throwaway integration tests against live Postgres/Redis instead — consider a manual soak test before production rollout.
+- Phase 4 follow-up (non-blocking, pre-existing, unrelated to Phase 4 decisions): docker-compose.yml's `worker` service was missing `WEBHOOK_SIGNING_SECRET` since Phase 2 — discovered and fixed (commit `36b559b`) during Phase 4's live verification when images were rebuilt for the first time in months. Worth a quick audit of docker-compose.yml against .env.example for other silently-stale gaps.
 
 ## Deferred Items
 
@@ -86,6 +87,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-07T09:07:07.359Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-content-validation-storage-lifecycle-observability/04-CONTEXT.md
+Last session: 2026-07-07T19:00:00.000Z
+Stopped at: Phase 4 complete, verified — milestone v1.0 fully executed
+Resume file: .planning/phases/04-content-validation-storage-lifecycle-observability/04-VERIFICATION.md

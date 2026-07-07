@@ -46,18 +46,18 @@ Requirements for этого этапа (production-hardening image-среза). 
 
 ### Content Validation
 
-- [ ] **VALID-01**: API проверяет содержимое загруженного файла по magic bytes перед сохранением/обработкой
-- [ ] **VALID-02**: При несовпадении определённого по содержимому формата с заявленным (расширение/Content-Type) API отклоняет запрос (422) до записи в S3
+- [x] **VALID-01**: API проверяет содержимое загруженного файла по magic bytes перед сохранением/обработкой
+- [x] **VALID-02**: При несовпадении определённого по содержимому формата с заявленным (расширение/Content-Type) API отклоняет запрос (422) до записи в S3
 
 ### Storage Lifecycle
 
-- [ ] **STOR-01**: Загруженные файлы и результаты в S3/MinIO автоматически удаляются по истечении срока хранения (lifecycle TTL на `uploads/` и `results/`)
+- [x] **STOR-01**: Загруженные файлы и результаты в S3/MinIO автоматически удаляются по истечении срока хранения (lifecycle TTL на `uploads/` и `results/`)
 
 ### Observability
 
-- [ ] **OBS-01**: Сервис экспортирует Prometheus-метрики (глубина очереди, исходы задач, успешность доставки вебхуков)
-- [ ] **OBS-02**: Health-эндпоинт реально проверяет доступность Postgres, Redis и S3/MinIO, а не возвращает статичный `{"status":"ok"}`
-- [ ] **OBS-03**: Разворачивается asynqmon-дашборд для визуальной инспекции очереди
+- [x] **OBS-01**: Сервис экспортирует Prometheus-метрики (глубина очереди, исходы задач, успешность доставки вебхуков)
+- [x] **OBS-02**: Health-эндпоинт реально проверяет доступность Postgres, Redis и S3/MinIO, а не возвращает статичный `{"status":"ok"}`
+- [x] **OBS-03**: Разворачивается asynqmon-дашборд для визуальной инспекции очереди
 
 ## v2 Requirements
 
@@ -121,12 +121,12 @@ Requirements for этого этапа (production-hardening image-среза). 
 | RECON-01 | Phase 3 | Done |
 | RECON-02 | Phase 3 | Done |
 | RECON-03 | Phase 3 | Done |
-| VALID-01 | Phase 4 | Pending |
-| VALID-02 | Phase 4 | Pending |
-| STOR-01 | Phase 4 | Pending |
-| OBS-01 | Phase 4 | Pending |
-| OBS-02 | Phase 4 | Pending |
-| OBS-03 | Phase 4 | Pending |
+| VALID-01 | Phase 4 | Done |
+| VALID-02 | Phase 4 | Done |
+| STOR-01 | Phase 4 | Done |
+| OBS-01 | Phase 4 | Done |
+| OBS-02 | Phase 4 | Done |
+| OBS-03 | Phase 4 | Done |
 
 **Coverage:**
 - v1 requirements: 25 total (corrected count — original summary undercounted by 1; 9 categories × items = 1+5+2+3+3+5+2+1+3 = 25)
