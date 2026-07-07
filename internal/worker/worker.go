@@ -279,7 +279,7 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 	}
 
 	outKey := storage.OutputKey(job.ID, 0, outName)
-	size, err := h.uploadFrom(attemptCtx, outKey, outPath, contentTypeFor(job.TargetFormat))
+	size, err := h.uploadFrom(attemptCtx, outKey, outPath, convert.MIMEType(job.TargetFormat))
 	if err != nil {
 		return err
 	}
@@ -290,7 +290,7 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 		Filename:    outName,
 		Format:      job.TargetFormat,
 		SizeBytes:   size,
-		ContentType: contentTypeFor(job.TargetFormat),
+		ContentType: convert.MIMEType(job.TargetFormat),
 	}); err != nil {
 		return err
 	}
@@ -343,21 +343,4 @@ func (h *Handler) uploadFrom(ctx context.Context, key, path, contentType string)
 		return 0, err
 	}
 	return fi.Size(), nil
-}
-
-func contentTypeFor(format string) string {
-	switch convert.NormalizeFormat(format) {
-	case "png":
-		return "image/png"
-	case "jpg":
-		return "image/jpeg"
-	case "webp":
-		return "image/webp"
-	case "heic":
-		return "image/heic"
-	case "tiff":
-		return "image/tiff"
-	default:
-		return "application/octet-stream"
-	}
 }

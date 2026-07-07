@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"path"
 	"strings"
@@ -60,16 +61,53 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	filename := path.Base(header.Filename)
+	// Declared source, from the (attacker-controllable) filename extension.
+	// Still needed below for the D-01 honesty comparison against the
+	// magic-byte-detected format — it is no longer trusted on its own.
 	source := convert.NormalizeFormat(strings.TrimPrefix(path.Ext(filename), "."))
 	if source == "" {
 		writeError(w, http.StatusBadRequest, "cannot determine source format from filename")
 		return
 	}
 
-	// Validate the conversion pair BEFORE writing anything to storage.
-	if !convert.Default.Supports(source, target) {
+	// Middleware guarantees a resolved client is present before this handler
+	// runs. Resolved BEFORE content detection because a mismatch/unrecognized
+	// rejection below must log the client id (D-08).
+	client, _ := auth.ClientFromContext(ctx)
+
+	// Detect the actual content format by magic bytes BEFORE anything else
+	// touches storage or Postgres (D-01/D-02/D-05). rest re-stitches the
+	// peeked prefix onto the remaining stream so the full file still reaches
+	// s3.Upload below.
+	detected, rest, err := convert.Sniff(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+	if detected == "" {
+		// D-02: no known signature matches — reject rather than let the
+		// (untrustworthy) extension win. D-08: scoped internal/* logging
+		// exception for this rejection, tagged with the resolved client.
+		log.Printf("content validation rejected: client_id=%s filename=%q reason=unrecognized_content", client.ID, filename)
 		writeError(w, http.StatusUnprocessableEntity,
-			"unsupported conversion: "+source+" -> "+target)
+			"unrecognized file content for "+filename)
+		return
+	}
+	if detected != source {
+		// D-01/D-04: declared extension must be honest about the actual
+		// content; no auto-correction to the detected format.
+		log.Printf("content validation rejected: client_id=%s filename=%q reason=mismatch declared=%s detected=%s", client.ID, filename, source, detected)
+		writeError(w, http.StatusUnprocessableEntity,
+			"declared format "+source+" does not match detected content "+detected)
+		return
+	}
+
+	// Validate the conversion pair BEFORE writing anything to storage. The
+	// DETECTED format (not the extension-derived one) is the source of truth
+	// fed into the pair-check (D-05).
+	if !convert.Default.Supports(detected, target) {
+		writeError(w, http.StatusUnprocessableEntity,
+			"unsupported conversion: "+detected+" -> "+target)
 		return
 	}
 
@@ -86,15 +124,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	jobID := uuid.New()
 	key := storage.InputKey(jobID, 0, filename)
-	contentType := header.Header.Get("Content-Type")
+	// Stored Content-Type is the canonical MIME of the detected format, never
+	// the client-supplied multipart header (D-06).
+	contentType := convert.MIMEType(detected)
 
-	if err := s.storage.Upload(ctx, key, file, header.Size, contentType); err != nil {
+	if err := s.storage.Upload(ctx, key, rest, header.Size, contentType); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store upload")
 		return
 	}
-
-	// Middleware guarantees a resolved client is present before this handler runs.
-	client, _ := auth.ClientFromContext(ctx)
 
 	// Postgres-first double write: record the job, then enqueue. The job id is
 	// the one already embedded in the storage key above so they stay aligned.
@@ -103,14 +140,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		ClientID:     client.ID,
 		Operation:    operationConv,
 		Engine:       engineImage,
-		SourceFormat: source,
+		SourceFormat: detected,
 		TargetFormat: target,
 		CallbackURL:  callbackURL,
 		Input: jobs.Input{
 			Ordinal:     0,
 			ObjectKey:   key,
 			Filename:    filename,
-			Format:      source,
+			Format:      detected,
 			SizeBytes:   header.Size,
 			ContentType: contentType,
 		},
