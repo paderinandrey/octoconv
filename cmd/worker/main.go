@@ -4,7 +4,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,10 +14,13 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/reconciler"
 	"github.com/apaderin/octoconv/internal/storage"
@@ -85,15 +90,45 @@ func main() {
 		RetryDelayFunc: queue.RetryDelayFunc,
 	})
 
+	// Register the queue-depth collector so /metrics reports per-queue task
+	// counts by state (OBS-01); read-only, pull-based on scrape.
+	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt), queue.QueueImage, queue.QueueWebhook))
+
 	log.Printf("🐙 worker starting (queues=%s,%s)", queue.QueueImage, queue.QueueWebhook)
 	if err := srv.Start(mux); err != nil {
 		log.Fatalf("worker: %v", err)
 	}
 	go sweeper.Run(ctx)
 
+	// Prometheus /metrics is served on its own localhost-only listener,
+	// separate from the public API_ADDR (D-19/T-04-13) — same trust-model
+	// reasoning as the API process.
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = "127.0.0.1:9090"
+	}
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           promhttp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		log.Printf("📊 metrics listening on %s", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("metrics listen: %v", err)
+		}
+	}()
+
 	<-ctx.Done()
 	log.Println("🛑 shutting down worker...")
 	srv.Shutdown()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics graceful shutdown failed: %v", err)
+	}
 	log.Println("bye 👋")
 }
 

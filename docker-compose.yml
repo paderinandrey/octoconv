@@ -88,6 +88,7 @@ services:
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
       STORAGE_TTL: "168h"
+      METRICS_ADDR: "127.0.0.1:9090"
     ports:
       - "8090:8090"
 
@@ -114,6 +115,7 @@ services:
       S3_USE_SSL: "false"
       WORKER_CONCURRENCY: "4"
       ENGINE_TIMEOUT: "120s"
+      METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
         limits:
