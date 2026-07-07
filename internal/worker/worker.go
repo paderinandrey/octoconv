@@ -18,6 +18,7 @@ import (
 
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
 	"github.com/apaderin/octoconv/internal/webhook"
@@ -125,6 +126,7 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
 	}
 
+	start := time.Now()
 	if err := h.process(ctx, job); err != nil {
 		if isTerminal(err) {
 			// Sanitized message only in error_message (exposed via GET
@@ -132,6 +134,7 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 			// (which contains local temp paths) is kept in job_events.detail
 			// for internal diagnostics only.
 			_ = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			metrics.RecordJobOutcome(queue.QueueImage, jobs.StatusFailed, time.Since(start))
 			// Postgres-first: the failed status is already committed above, so a
 			// failed enqueue must not fail the conversion — best-effort only.
 			if job.CallbackURL != "" {
@@ -141,8 +144,11 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 		}
 		// Transient: do NOT mark failed — the job stays active so asynq's own
 		// retry/backoff (ImageRetryDelay/IMAGE_MAX_RETRY, Plan 01) applies.
+		// Not a terminal outcome, so it is NOT recorded in the job-outcome
+		// metric (Pitfall 6 — one asynq retry must not double-count).
 		return err
 	}
+	metrics.RecordJobOutcome(queue.QueueImage, jobs.StatusDone, time.Since(start))
 	// Postgres-first: MarkDone already committed inside process(), so a
 	// failed enqueue must not fail the conversion — best-effort only.
 	if job.CallbackURL != "" {
@@ -217,6 +223,7 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 	attempt := retryCount + 1
 
 	code, derr := h.deliverer.Deliver(ctx, job.CallbackURL, bodyBytes, ts, sig)
+	metrics.RecordWebhookDelivery(derr == nil)
 
 	var statusCodePtr *int
 	if code > 0 {
