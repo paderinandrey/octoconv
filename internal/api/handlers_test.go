@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -74,6 +75,16 @@ func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// fakePinger implements api.Pinger: returns err (nil = healthy) from Ping.
+type fakePinger struct{ err error }
+
+func (f fakePinger) Ping(_ context.Context) error { return f.err }
+
+// healthyDeps is a HealthDeps with all three dependencies reachable.
+func healthyDeps() HealthDeps {
+	return HealthDeps{Postgres: fakePinger{}, Redis: fakePinger{}, S3: fakePinger{}}
+}
+
 // fakeResolver implements auth.ClientResolver: it resolves testClientKey to a
 // fixed test client and rejects everything else with auth.ErrInvalidKey.
 type fakeResolver struct {
@@ -128,7 +139,7 @@ func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.B
 // fixed client id.
 func newTestServer(repo Repo, store Storage, q Enqueuer) (*Server, *fakeResolver) {
 	resolver := newFakeResolver()
-	return NewServer(repo, store, q, resolver, Config{MaxUploadBytes: 1 << 20}), resolver
+	return NewServer(repo, store, q, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20}), resolver
 }
 
 // authed sets the Authorization header requests need to pass auth.Middleware.
@@ -298,6 +309,64 @@ func TestHealthz_NoAuthRequired(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (D-09: /healthz must stay reachable without a key)", rec.Code)
 	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["status"] != "ok" || resp["postgres"] != "ok" || resp["redis"] != "ok" || resp["s3"] != "ok" {
+		t.Fatalf("unexpected healthy body: %v", resp)
+	}
+}
+
+// TestHealthz_Degraded verifies OBS-02/D-16/D-17: a failing dependency ping
+// causes a 503 with per-dependency detail, while the other two dependencies
+// still report "ok".
+func TestHealthz_Degraded(t *testing.T) {
+	cases := []struct {
+		name   string
+		health HealthDeps
+		failed string
+	}{
+		{
+			name:   "s3 unreachable",
+			health: HealthDeps{Postgres: fakePinger{}, Redis: fakePinger{}, S3: fakePinger{err: errors.New("boom")}},
+			failed: "s3",
+		},
+		{
+			name:   "redis unreachable",
+			health: HealthDeps{Postgres: fakePinger{}, Redis: fakePinger{err: errors.New("boom")}, S3: fakePinger{}},
+			failed: "redis",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolver := newFakeResolver()
+			srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, resolver, tc.health, Config{MaxUploadBytes: 1 << 20})
+
+			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			rec := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]string
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			if resp["status"] != "degraded" {
+				t.Errorf("status field = %q, want degraded", resp["status"])
+			}
+			if resp[tc.failed] == "ok" {
+				t.Errorf("%s = %q, want non-ok", tc.failed, resp[tc.failed])
+			}
+			for _, dep := range []string{"postgres", "redis", "s3"} {
+				if dep == tc.failed {
+					continue
+				}
+				if resp[dep] != "ok" {
+					t.Errorf("%s = %q, want ok", dep, resp[dep])
+				}
+			}
+		})
+	}
 }
 
 func TestGetJob_DonePresigned(t *testing.T) {
@@ -308,7 +377,7 @@ func TestGetJob_DonePresigned(t *testing.T) {
 		outputs: []jobs.Output{{Ordinal: 0, ObjectKey: "results/x/0-out.webp"}},
 	}
 	store := &fakeStorage{presigned: "https://example/download"}
-	srv := NewServer(repo, store, &fakeQueue{}, resolver, Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -361,7 +430,7 @@ func TestGetJob_SameClient_OK(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
 	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
