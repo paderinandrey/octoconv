@@ -129,8 +129,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 04-03-PLAN.md — Metrics package + instrumentation: job/webhook/reconciler counters, duration histogram, queue collector; gated prometheus install (OBS-01)
-- [ ] 04-04-PLAN.md — Health endpoint: real Postgres/Redis/S3 pings, 503 + per-dependency JSON (OBS-02)
+- [x] 04-03-PLAN.md — Metrics package + instrumentation: job/webhook/reconciler counters, duration histogram, queue collector; gated prometheus install (OBS-01)
+- [x] 04-04-PLAN.md — Health endpoint: real Postgres/Redis/S3 pings, 503 + per-dependency JSON (OBS-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -146,4 +146,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | 3/3 | Complete   | 2026-07-06 |
-| 4. Content Validation, Storage Lifecycle & Observability | 2/5 | In Progress|  |
+| 4. Content Validation, Storage Lifecycle & Observability | 4/5 | In Progress|  |
