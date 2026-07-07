@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/apaderin/octoconv/internal/api"
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
@@ -21,6 +23,17 @@ import (
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
 )
+
+// redisPinger adapts a *redis.Client to api.Pinger. asynq's own Client
+// exposes no public Ping method (RESEARCH.md Open Question 2), so the API
+// process opens a small, dedicated Redis connection purely for /healthz.
+type redisPinger struct {
+	client *redis.Client
+}
+
+func (p redisPinger) Ping(ctx context.Context) error {
+	return p.client.Ping(ctx).Err()
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -52,6 +65,16 @@ func main() {
 	}
 	defer qc.Close()
 
+	// Dedicated Redis connection for /healthz only (D-16) — asynq's Client
+	// exposes no public Ping, so the API opens its own lightweight ping
+	// client against the same REDIS_ADDR the queue already uses.
+	redisOpt, err := queue.RedisOpt()
+	if err != nil {
+		log.Fatalf("redis: %v", err)
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: redisOpt.Addr})
+	defer rdb.Close()
+
 	salt := []byte(os.Getenv("API_KEY_SALT"))
 	if len(salt) == 0 {
 		log.Fatalf("API_KEY_SALT must be set")
@@ -59,7 +82,12 @@ func main() {
 	clientRepo := clients.NewRepo(pool)
 	resolver := auth.NewResolver(clientRepo, salt)
 
-	srv := api.NewServer(jobs.NewRepo(pool), store, qc, resolver, api.Config{
+	health := api.HealthDeps{
+		Postgres: pool,
+		Redis:    redisPinger{client: rdb},
+		S3:       store,
+	}
+	srv := api.NewServer(jobs.NewRepo(pool), store, qc, resolver, health, api.Config{
 		MaxUploadBytes:     envInt64("MAX_UPLOAD_BYTES", 100<<20),
 		IPRateLimitRPM:     int(envInt64("RATE_LIMIT_IP_RPM", 60)),
 		ClientRateLimitRPM: int(envInt64("RATE_LIMIT_CLIENT_RPM", 120)),
