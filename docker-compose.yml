@@ -114,6 +114,7 @@ services:
       S3_USE_SSL: "false"
       WORKER_CONCURRENCY: "4"
       ENGINE_TIMEOUT: "120s"
+      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
     deploy:
       resources:
         limits:
