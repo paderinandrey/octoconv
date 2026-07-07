@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/apaderin/octoconv/internal/api"
@@ -110,6 +111,26 @@ func main() {
 		}
 	}()
 
+	// Prometheus /metrics is served on its own localhost-only listener,
+	// separate from the public API_ADDR (D-19/T-04-13) — operational job/
+	// queue data must not be reachable by arbitrary internal API callers.
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = "127.0.0.1:9090"
+	}
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           promhttp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		log.Printf("📊 metrics listening on %s", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("metrics listen: %v", err)
+		}
+	}()
+
 	<-ctx.Done()
 	log.Println("🛑 shutting down API...")
 
@@ -117,6 +138,9 @@ func main() {
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("graceful shutdown failed: %v", err)
+	}
+	if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics graceful shutdown failed: %v", err)
 	}
 	log.Println("bye 👋")
 }
