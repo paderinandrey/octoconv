@@ -124,8 +124,8 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — Content validation: magic-byte sniff table + detect-then-validate handleCreateJob (VALID-01/02)
-- [ ] 04-02-PLAN.md — Storage lifecycle: MinIO ILM TTL rule on uploads/ + results/ at API startup + read-only storage Ping (STOR-01)
+- [x] 04-01-PLAN.md — Content validation: magic-byte sniff table + detect-then-validate handleCreateJob (VALID-01/02)
+- [x] 04-02-PLAN.md — Storage lifecycle: MinIO ILM TTL rule on uploads/ + results/ at API startup + read-only storage Ping (STOR-01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -146,4 +146,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | 3/3 | Complete   | 2026-07-06 |
-| 4. Content Validation, Storage Lifecycle & Observability | 0/5 | Not started | - |
+| 4. Content Validation, Storage Lifecycle & Observability | 2/5 | In Progress|  |
