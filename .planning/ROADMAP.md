@@ -119,11 +119,22 @@ Plans:
   4. The health endpoint reflects real dependency status (Postgres, Redis, S3/MinIO reachability), not a static `{"status":"ok"}`.
   5. An operator can visually inspect the asynq queue via the asynqmon dashboard.
 
-**Plans**: TBD
+**Plans**: 5 plans in 3 waves
 
 Plans:
+**Wave 1**
 
-- [ ] 04-01: TBD
+- [ ] 04-01-PLAN.md — Content validation: magic-byte sniff table + detect-then-validate handleCreateJob (VALID-01/02)
+- [ ] 04-02-PLAN.md — Storage lifecycle: MinIO ILM TTL rule on uploads/ + results/ at API startup + read-only storage Ping (STOR-01)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 04-03-PLAN.md — Metrics package + instrumentation: job/webhook/reconciler counters, duration histogram, queue collector; gated prometheus install (OBS-01)
+- [ ] 04-04-PLAN.md — Health endpoint: real Postgres/Redis/S3 pings, 503 + per-dependency JSON (OBS-02)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 04-05-PLAN.md — Metrics exposure (localhost-only /metrics on api+worker) + asynqmon dashboard (OBS-01 exposure, OBS-03)
 
 ## Progress
 
@@ -135,4 +146,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Merge, Auth & Rate Limiting | 4/4 | Complete    | 2026-07-04 |
 | 2. Webhook Delivery | 3/3 | Complete   | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | 3/3 | Complete   | 2026-07-06 |
-| 4. Content Validation, Storage Lifecycle & Observability | 0/TBD | Not started | - |
+| 4. Content Validation, Storage Lifecycle & Observability | 0/5 | Not started | - |
