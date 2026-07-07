@@ -11,6 +11,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
 
 // Client is a thin wrapper over the MinIO SDK bound to a single bucket.
@@ -85,4 +86,52 @@ func (c *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) 
 		return "", fmt.Errorf("presign %q: %w", key, err)
 	}
 	return u.String(), nil
+}
+
+// lifecycleConfig builds the bucket lifecycle rules that expire objects under
+// the uploads/ and results/ prefixes (see keys.go) after ttl. MinIO's
+// Expiration.Days field only has whole-day granularity, so ttl is rounded
+// down to a day count and clamped up to a minimum of 1 day — a 0-day rule
+// can never be emitted (STOR-01, D-10/D-11).
+func lifecycleConfig(ttl time.Duration) *lifecycle.Configuration {
+	days := int(ttl.Hours() / 24)
+	if days < 1 {
+		days = 1
+	}
+	cfg := lifecycle.NewConfiguration()
+	cfg.Rules = []lifecycle.Rule{
+		{
+			ID:         "octoconv-uploads-ttl",
+			Status:     "Enabled",
+			RuleFilter: lifecycle.Filter{Prefix: "uploads/"},
+			Expiration: lifecycle.Expiration{Days: lifecycle.ExpirationDays(days)},
+		},
+		{
+			ID:         "octoconv-results-ttl",
+			Status:     "Enabled",
+			RuleFilter: lifecycle.Filter{Prefix: "results/"},
+			Expiration: lifecycle.Expiration{Days: lifecycle.ExpirationDays(days)},
+		},
+	}
+	return cfg
+}
+
+// EnsureLifecycle applies a bucket lifecycle rule that expires objects under
+// uploads/ and results/ after ttl. SetBucketLifecycle is a full-document PUT
+// on the server side, so this is idempotent and safe to call on every
+// process startup (D-12).
+func (c *Client) EnsureLifecycle(ctx context.Context, ttl time.Duration) error {
+	if err := c.mc.SetBucketLifecycle(ctx, c.bucket, lifecycleConfig(ttl)); err != nil {
+		return fmt.Errorf("set bucket lifecycle: %w", err)
+	}
+	return nil
+}
+
+// Ping is a lightweight, read-only probe of the configured bucket for the
+// health endpoint (D-16). It never writes or reads object data.
+func (c *Client) Ping(ctx context.Context) error {
+	if _, err := c.mc.BucketExists(ctx, c.bucket); err != nil {
+		return fmt.Errorf("ping bucket %q: %w", c.bucket, err)
+	}
+	return nil
 }
