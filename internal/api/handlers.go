@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -25,8 +27,44 @@ const (
 	operationConv        = "convert"
 )
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+// handleHealth probes Postgres, Redis, and S3/MinIO reachability under a
+// shared short timeout and reports per-dependency status (OBS-02, D-16/D-17).
+// It is read-only: it only pings, never writes.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	result := map[string]string{}
+	healthy := true
+
+	if err := s.health.Postgres.Ping(ctx); err != nil {
+		result["postgres"] = "unreachable"
+		healthy = false
+	} else {
+		result["postgres"] = "ok"
+	}
+
+	if err := s.health.Redis.Ping(ctx); err != nil {
+		result["redis"] = "unreachable"
+		healthy = false
+	} else {
+		result["redis"] = "ok"
+	}
+
+	if err := s.health.S3.Ping(ctx); err != nil {
+		result["s3"] = "unreachable"
+		healthy = false
+	} else {
+		result["s3"] = "ok"
+	}
+
+	status := http.StatusOK
+	result["status"] = "ok"
+	if !healthy {
+		status = http.StatusServiceUnavailable
+		result["status"] = "degraded"
+	}
+	writeJSON(w, status, result)
 }
 
 // handleCreateJob accepts a multipart upload (fields: file, target), validates

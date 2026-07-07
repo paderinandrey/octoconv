@@ -31,12 +31,28 @@ type Enqueuer interface {
 	EnqueueImageConvert(ctx context.Context, jobID uuid.UUID) error
 }
 
+// Pinger is a narrow, read-only reachability probe for a single dependency,
+// bounded by ctx's deadline (D-16). It must never write/mutate dependency
+// state.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
+// HealthDeps holds the three dependency pingers /healthz probes (OBS-02,
+// D-16/D-17).
+type HealthDeps struct {
+	Postgres Pinger
+	Redis    Pinger
+	S3       Pinger
+}
+
 // Server holds the API dependencies and configuration.
 type Server struct {
 	repo          Repo
 	storage       Storage
 	queue         Enqueuer
 	resolver      auth.ClientResolver
+	health        HealthDeps
 	maxUploadByte int64
 	presignTTL    time.Duration
 	ipRateRPM     int
@@ -53,8 +69,9 @@ type Config struct {
 
 // NewServer builds an API server. resolver authenticates every /v1 request
 // (see routes.go); it is a narrow interface, keeping interfaces positional
-// and Config reserved for tunables only.
-func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientResolver, cfg Config) *Server {
+// and Config reserved for tunables only. health carries the three
+// dependency pingers /healthz probes (OBS-02).
+func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientResolver, health HealthDeps, cfg Config) *Server {
 	if cfg.PresignTTL == 0 {
 		cfg.PresignTTL = 15 * time.Minute
 	}
@@ -72,6 +89,7 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 		storage:       storage,
 		queue:         queue,
 		resolver:      resolver,
+		health:        health,
 		maxUploadByte: cfg.MaxUploadBytes,
 		presignTTL:    cfg.PresignTTL,
 		ipRateRPM:     cfg.IPRateLimitRPM,

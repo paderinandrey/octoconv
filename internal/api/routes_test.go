@@ -19,7 +19,7 @@ import (
 // rejected with 429 by ratelimit.ByIP. If all 5 pass, the coarse pre-auth
 // flood guard is being evaded by header variation.
 func TestByIP_NotEvadedByForwardedForSpoofing(t *testing.T) {
-	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, newFakeResolver(), Config{IPRateLimitRPM: 2, MaxUploadBytes: 1 << 20})
+	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, newFakeResolver(), healthyDeps(), Config{IPRateLimitRPM: 2, MaxUploadBytes: 1 << 20})
 	h := srv.Routes()
 
 	for i := 0; i < 5; i++ {
