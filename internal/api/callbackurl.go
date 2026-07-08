@@ -67,12 +67,17 @@ func validateCallbackURL(raw string) error {
 }
 
 // isBlockedIP reports whether addr falls in a range this service refuses to
-// deliver webhooks to: loopback, RFC1918 private space, link-local (which
-// covers the 169.254.0.0/16 cloud metadata endpoint, e.g. 169.254.169.254),
-// or unspecified.
+// deliver webhooks to: loopback, link-local (which covers the 169.254.0.0/16
+// cloud metadata endpoint, e.g. 169.254.169.254), or unspecified — these stay
+// hard-blocked unconditionally, no configuration can unblock them (D-01).
+// RFC1918 private space is blocked by default too, but operators whose
+// internal clients live on private addressing can opt in to allowing it via
+// WEBHOOK_ALLOW_PRIVATE_IPS=true (D-02/D-03); this narrowly relaxes only the
+// private-IP range check, nothing else.
 func isBlockedIP(addr netip.Addr) bool {
+	allowPrivate := os.Getenv("WEBHOOK_ALLOW_PRIVATE_IPS") == "true"
 	return addr.IsLoopback() ||
-		addr.IsPrivate() ||
+		(!allowPrivate && addr.IsPrivate()) ||
 		addr.IsLinkLocalUnicast() ||
 		addr.IsLinkLocalMulticast() ||
 		addr.IsUnspecified()
