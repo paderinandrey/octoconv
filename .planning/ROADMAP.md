@@ -38,7 +38,8 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   2. With `WEBHOOK_ALLOW_PRIVATE_IPS=true`, job creation with a `callback_url` pointing at an RFC1918/loopback address succeeds, and the webhook is actually delivered to that address.
   3. Even with the flag enabled, non-https schemes and syntactically invalid URLs are still rejected — the opt-out only relaxes the IP-range check, nothing else in validation.
   4. The new environment variable and its default (disabled) are documented in `.env.example` so operators discover it without reading source.
-**Plans**: TBD
+**Plans**: 1 plan
+- [ ] 05-01-PLAN.md — WEBHOOK_ALLOW_PRIVATE_IPS opt-out: conditional isBlockedIP RFC1918 relaxation, startup warning, .env.example docs
 
 ### Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test
 **Goal**: Operators can trust the reconciler to recover both jobs stranded in `queued`/`active` and jobs whose completion webhook silently never fired, and that staleness recovery has been proven under real wall-clock conditions rather than only mocked-clock integration tests.
