@@ -97,3 +97,13 @@ None - no external service configuration required.
 ---
 *Phase: 06-reconciler-webhook-gap-sweep-staleness-soak-test*
 *Completed: 2026-07-08*
+
+## Self-Check: PASSED
+
+- FOUND: internal/reconciler/reconciler.go
+- FOUND: internal/reconciler/reconciler_test.go
+- FOUND: internal/metrics/metrics.go
+- FOUND: .planning/phases/06-reconciler-webhook-gap-sweep-staleness-soak-test/06-03-SUMMARY.md
+- FOUND: 05c2bfd (Task 1: feat commit)
+- FOUND: b3525db (Task 2: test commit)
+- FOUND: 9de7c51 (docs: summary commit)
