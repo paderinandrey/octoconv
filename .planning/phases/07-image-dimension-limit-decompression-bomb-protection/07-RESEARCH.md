@@ -641,17 +641,19 @@ MAX_IMAGE_PIXELS=100000000   # decompression-bomb guard: max declared width*heig
 | A2 | 64 KiB is a sufficient bounded peek window for all 5 formats in the overwhelming majority of real-world files | Summary, Pattern 1, Pitfalls 2/3 | Based on one real-world HEIC sample (ispe reachable at ~1.4KB, ~45x margin) plus spec-derived reasoning for the other 4 formats (all need far less than 64KB in the typical case); NOT exhaustively tested against burst-mode/multi-item HEIC, TIFFs with end-of-file IFDs, or JPEGs with unusually large multi-segment ICC profiles. If wrong in practice, the failure mode is a false-positive 422 rejection (fail-closed), not a security gap — but could surface as unexpected rejections for a class of legitimate files the planner should be aware of and consider surfacing in error messages/logs for diagnosis. |
 | A3 | TIFF's "value left-justified in the 4-byte field regardless of byte order" rule (used for SHORT-typed tags 256/257) is correctly interpreted from the spec-derived web summary rather than the primary TIFF 6.0 PDF text itself | Pattern 5 | If misinterpreted, SHORT-typed width/height tags on big-endian TIFFs specifically could be misread; low risk since the interpretation was cross-checked against a second independent source (fileformat.info/docs.fileformat.com) and is consistent with widely-implemented TIFF readers, but the planner/implementer should validate against at least one real big-endian ("MM") SHORT-typed TIFF sample during implementation testing. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Exact check ordering relative to `callback_url` validation.**
+1. **Exact check ordering relative to `callback_url` validation. (RESOLVED)**
    - What we know: CONTEXT.md's canonical_refs say the dimension check "lands between the pair-check and `callback_url` validation (or immediately after Sniff's mismatch checks — planner to decide exact ordering...), MUST be before `s3.Upload`."
    - What's unclear: Whether there's any operational reason to prefer one order over another (there isn't a functional difference — both are 422/400 rejections before upload).
    - Recommendation: Place it exactly where this research's Code Examples section shows (right after the `Supports` pair-check, right before `callback_url` validation) — keeps all "is this file/format acceptable" checks grouped together before the more independent callback-URL check.
+   - Resolution: Orchestrator accepted the recommendation directly. Plan 07-02 implements this exact ordering (verified by gsd-plan-checker).
 
-2. **Should `dimPeekLen` (64 KiB) be operator-configurable, or a fixed internal constant?**
+2. **Should `dimPeekLen` (64 KiB) be operator-configurable, or a fixed internal constant? (RESOLVED)**
    - What we know: CONTEXT.md's Claude's-Discretion note only calls out the *pixel-count limit* (`MAX_IMAGE_PIXELS`) as needing an env var; the bounded-read window size is described as an implementation detail.
    - What's unclear: Whether a future operator might need to tune the peek window (e.g., if a legitimate but unusual TIFF/JPEG workflow starts getting rejected).
    - Recommendation: Keep `dimPeekLen` as an internal, non-configurable constant (`const dimPeekLen = 64 * 1024` in `dimensions.go`) for this phase — matches `sniffLen`'s existing precedent (also a hardcoded constant, not env-configurable) and keeps scope tight; revisit only if real operational rejections at this boundary occur.
+   - Resolution: Orchestrator accepted the recommendation directly. Plan 07-01 implements `dimPeekLen` as a fixed constant (verified by gsd-plan-checker).
 
 ## Environment Availability
 
