@@ -8,6 +8,16 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
 
+## Current Milestone: v1.1 Tech Debt Cleanup
+
+**Goal:** Close the tech debt surfaced by the v1.0 milestone audit — no new capabilities, purely hardening the hardening.
+
+**Target features:**
+- SSRF `callback_url` validation gets an explicit opt-out (`WEBHOOK_ALLOW_PRIVATE_IPS`) so internal-network deployments on private IPs can actually receive webhooks
+- Reconciler sweep extended to catch `done`/`failed` jobs with a non-empty `callback_url` and no `webhook_deliveries` row (closes the Redis-blip webhook-loss race)
+- Decompression-bomb protection: reject uploads whose declared image dimensions exceed a configured limit, as part of content validation
+- Reconciler staleness soak test: real wall-clock validation of the `queued`/`active` staleness recovery paths, not just integration tests against a live DB
+
 ## Requirements
 
 ### Validated
@@ -32,11 +42,12 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Milestone v1.0 (hardening) shipped 2026-07-08 — все требования этапа закрыты. Следующий milestone ещё не определён; запустить /gsd:new-milestone. Ниже — кандидаты, всплывшие в v1.0-MILESTONE-AUDIT.md как незакрытый tech debt, для рассмотрения при формировании следующего milestone. -->
+<!-- Milestone v1.1 Tech Debt Cleanup — все 4 пункта происходят из v1.0-MILESTONE-AUDIT.md. Чисто закрывающий релиз, без новых возможностей. -->
 
-- [ ] (кандидат) Пересмотреть SSRF-валидацию `callback_url`: сейчас блокирует весь RFC1918/loopback/link-local диапазон без исключений — при реальном деплое на внутренней сети компании (частные IP) это может сделать вебхуки недоставляемыми в принципе
-- [ ] (кандидат) Reconciler: досвип для `done`/`failed` задач с непустым `callback_url`, но без записи в `webhook_deliveries` — закрывает узкую гонку потери вебхука при сбое Redis в момент завершения задачи (рекомендовано в Phase 2, не подхвачено Phase 3)
-- [ ] (кандидат) Защита от decompression bomb — лимит заявленных размеров изображения при валидации содержимого (явно отложено как D-09 в Phase 4)
+- [ ] SSRF-валидация `callback_url` получает явный флаг отключения (`WEBHOOK_ALLOW_PRIVATE_IPS`) для деплоев на внутренних приватных сетях
+- [ ] Reconciler: sweep для `done`/`failed` задач с непустым `callback_url` и отсутствующей записью в `webhook_deliveries` — закрывает гонку потери вебхука при сбое Redis
+- [ ] Защита от decompression bomb — лимит заявленных размеров изображения при валидации содержимого
+- [ ] Соак-тест reconciler'а на реальных wall-clock staleness-сценариях
 
 ### Out of Scope
 
@@ -98,4 +109,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-08 after v1.0 (Hardening MVP) milestone complete*
+*Last updated: 2026-07-08 after starting v1.1 (Tech Debt Cleanup) milestone*
