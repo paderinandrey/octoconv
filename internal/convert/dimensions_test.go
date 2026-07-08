@@ -2,6 +2,7 @@ package convert
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
@@ -11,7 +12,7 @@ import (
 // height.
 func pngFixture(width, height uint32) []byte {
 	data := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A} // signature
-	data = append(data, 0x00, 0x00, 0x00, 0x0D)                   // chunk length = 13
+	data = append(data, 0x00, 0x00, 0x00, 0x0D)                    // chunk length = 13
 	data = append(data, []byte("IHDR")...)
 	data = append(data, byte(width>>24), byte(width>>16), byte(width>>8), byte(width))
 	data = append(data, byte(height>>24), byte(height>>16), byte(height>>8), byte(height))
@@ -226,5 +227,221 @@ func TestDimensionsUnregisteredFormat(t *testing.T) {
 	_, _, _, err := Dimensions("bmp", bytes.NewReader([]byte("whatever")))
 	if !errors.Is(err, ErrDimensionsUnknown) {
 		t.Fatalf("err = %v, want ErrDimensionsUnknown for unregistered format", err)
+	}
+}
+
+// tiffFixture builds a minimal TIFF file: 8-byte header + a single IFD with
+// ImageWidth (tag 256) and ImageLength (tag 257) entries of the given type
+// (3=SHORT, 4=LONG), followed by an entry-count terminator (next IFD offset
+// = 0).
+func tiffFixture(bo binary.ByteOrder, width, height uint32, typ uint16) []byte {
+	b := make([]byte, 8)
+	if bo == binary.LittleEndian {
+		b[0], b[1] = 0x49, 0x49
+	} else {
+		b[0], b[1] = 0x4D, 0x4D
+	}
+	bo.PutUint16(b[2:4], 42)
+	bo.PutUint32(b[4:8], 8) // first IFD starts right after the header
+
+	entry := func(tag uint16, typ uint16, val uint32) []byte {
+		e := make([]byte, 12)
+		bo.PutUint16(e[0:2], tag)
+		bo.PutUint16(e[2:4], typ)
+		bo.PutUint32(e[4:8], 1) // count
+		switch typ {
+		case 3: // SHORT — left-justified in first 2 bytes
+			bo.PutUint16(e[8:10], uint16(val))
+		case 4: // LONG
+			bo.PutUint32(e[8:12], val)
+		}
+		return e
+	}
+
+	ifd := make([]byte, 2)
+	bo.PutUint16(ifd, 2) // 2 entries
+	ifd = append(ifd, entry(256, typ, width)...)
+	ifd = append(ifd, entry(257, typ, height)...)
+	nextOffset := make([]byte, 4)
+	bo.PutUint32(nextOffset, 0)
+	ifd = append(ifd, nextOffset...)
+
+	return append(b, ifd...)
+}
+
+func TestDimensionsTIFF_LittleEndian(t *testing.T) {
+	data := tiffFixture(binary.LittleEndian, 640, 480, 3)
+	w, h, _, err := Dimensions("tiff", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 640 || h != 480 {
+		t.Fatalf("got (%d,%d), want (640,480)", w, h)
+	}
+}
+
+func TestDimensionsTIFF_BigEndian(t *testing.T) {
+	data := tiffFixture(binary.BigEndian, 640, 480, 3)
+	w, h, _, err := Dimensions("tiff", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 640 || h != 480 {
+		t.Fatalf("got (%d,%d), want (640,480)", w, h)
+	}
+}
+
+func TestDimensionsTIFF_Long(t *testing.T) {
+	data := tiffFixture(binary.LittleEndian, 70000, 50000, 4)
+	w, h, _, err := Dimensions("tiff", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 70000 || h != 50000 {
+		t.Fatalf("got (%d,%d), want (70000,50000)", w, h)
+	}
+}
+
+func TestDimensionsTIFF_IFDBeyondWindowFailsClosed(t *testing.T) {
+	b := make([]byte, 8)
+	b[0], b[1] = 0x49, 0x49
+	binary.LittleEndian.PutUint16(b[2:4], 42)
+	binary.LittleEndian.PutUint32(b[4:8], 0xFFFFFFFF) // IFD offset way past the buffer
+	_, _, _, err := Dimensions("tiff", bytes.NewReader(b))
+	if !errors.Is(err, ErrDimensionsUnknown) {
+		t.Fatalf("err = %v, want ErrDimensionsUnknown for IFD offset beyond window", err)
+	}
+}
+
+// heicBox builds a single ISOBMFF box (8-byte size+type header + payload).
+func heicBox(boxType string, payload []byte) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint32(b[0:4], uint32(8+len(payload)))
+	copy(b[4:8], boxType)
+	return append(b, payload...)
+}
+
+func ispeBox(width, height uint32) []byte {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[4:8], width)
+	binary.BigEndian.PutUint32(payload[8:12], height)
+	return heicBox("ispe", payload)
+}
+
+func heicFixture(ispeBoxes ...[]byte) []byte {
+	var ipcoPayload []byte
+	for _, box := range ispeBoxes {
+		ipcoPayload = append(ipcoPayload, box...)
+	}
+	ipco := heicBox("ipco", ipcoPayload)
+	iprp := heicBox("iprp", ipco)
+
+	metaPayload := append([]byte{0x00, 0x00, 0x00, 0x00}, iprp...) // version/flags + children
+	meta := heicBox("meta", metaPayload)
+
+	ftyp := heicBox("ftyp", []byte("heic\x00\x00\x00\x00heicmif1"))
+	return append(ftyp, meta...)
+}
+
+func TestDimensionsHEIC_Single(t *testing.T) {
+	data := heicFixture(ispeBox(4032, 3024))
+	w, h, _, err := Dimensions("heic", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 4032 || h != 3024 {
+		t.Fatalf("got (%d,%d), want (4032,3024)", w, h)
+	}
+}
+
+func TestDimensionsHEIC_MultipleTakesMax(t *testing.T) {
+	data := heicFixture(ispeBox(320, 240), ispeBox(4032, 3024), ispeBox(160, 120))
+	w, h, _, err := Dimensions("heic", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 4032 || h != 3024 {
+		t.Fatalf("got (%d,%d), want max ispe (4032,3024)", w, h)
+	}
+}
+
+func TestDimensionsHEICTruncatedFailsClosed(t *testing.T) {
+	data := heicFixture(ispeBox(4032, 3024))
+	truncated := data[:len(data)-20] // cut off mid-ispe
+	_, _, _, err := Dimensions("heic", bytes.NewReader(truncated))
+	if !errors.Is(err, ErrDimensionsUnknown) {
+		t.Fatalf("err = %v, want ErrDimensionsUnknown for truncated HEIC", err)
+	}
+}
+
+func TestDimensionsHEICMalformedNoPanic(t *testing.T) {
+	// A ftyp box with a bogus size followed by garbage — must not panic.
+	data := []byte{0xFF, 0xFF, 0xFF, 0xFF, 'f', 't', 'y', 'p', 0x01, 0x02}
+	_, _, _, err := Dimensions("heic", bytes.NewReader(data))
+	if !errors.Is(err, ErrDimensionsUnknown) {
+		t.Fatalf("err = %v, want ErrDimensionsUnknown for malformed HEIC", err)
+	}
+}
+
+func TestDimensionsOverflow(t *testing.T) {
+	data := pngFixture(0xFFFFFFFF, 0xFFFFFFFF)
+	w, h, _, err := Dimensions("png", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Dimensions error: %v", err)
+	}
+	if w != 0xFFFFFFFF || h != 0xFFFFFFFF {
+		t.Fatalf("got (%d,%d), want (0xFFFFFFFF,0xFFFFFFFF)", w, h)
+	}
+	product := uint64(w) * uint64(h)
+	const want uint64 = 18446744065119617025
+	if product != want {
+		t.Fatalf("uint64(w)*uint64(h) = %d, want %d (no overflow/wraparound)", product, want)
+	}
+}
+
+func TestDimensionsWalkBoxes_ExtendedSize(t *testing.T) {
+	// A box with size==1 uses a 16-byte header with a 64-bit extended size.
+	payload := []byte("hello world")
+	box := make([]byte, 16)
+	binary.BigEndian.PutUint32(box[0:4], 1) // size == 1 marker
+	copy(box[4:8], "test")
+	binary.BigEndian.PutUint64(box[8:16], uint64(16+len(payload)))
+	box = append(box, payload...)
+
+	var gotType string
+	var gotPayload []byte
+	walkBoxes(box, func(boxType string, p []byte) bool {
+		gotType = boxType
+		gotPayload = p
+		return true
+	})
+	if gotType != "test" {
+		t.Fatalf("boxType = %q, want %q", gotType, "test")
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("payload = %q, want %q", gotPayload, payload)
+	}
+}
+
+func TestDimensionsFullSuiteReturnsErrDimensionsUnknownForFailClosedFixtures(t *testing.T) {
+	cases := map[string][]byte{
+		"tiff-ifd-beyond-window": func() []byte {
+			b := make([]byte, 8)
+			b[0], b[1] = 0x49, 0x49
+			binary.LittleEndian.PutUint16(b[2:4], 42)
+			binary.LittleEndian.PutUint32(b[4:8], 0xFFFFFFFF)
+			return b
+		}(),
+		"heic-truncated": heicFixture(ispeBox(100, 100))[:10],
+	}
+	formats := map[string]string{
+		"tiff-ifd-beyond-window": "tiff",
+		"heic-truncated":         "heic",
+	}
+	for name, data := range cases {
+		_, _, _, err := Dimensions(formats[name], bytes.NewReader(data))
+		if !errors.Is(err, ErrDimensionsUnknown) {
+			t.Errorf("%s: err = %v, want ErrDimensionsUnknown", name, err)
+		}
 	}
 }

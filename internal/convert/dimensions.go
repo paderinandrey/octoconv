@@ -33,12 +33,13 @@ type dimensionParser func(buf []byte) (width, height uint32, ok bool)
 
 // dimensionParsers is the hardcoded, closed dispatch table (mirrors
 // sniff.go's signatures table) scoped to exactly the formats registered in
-// convert.Default: png, jpg, webp, heic, tiff. heic/tiff entries are added
-// once tiffDimensions/heicDimensions are implemented below.
+// convert.Default: png, jpg, webp, heic, tiff.
 var dimensionParsers = map[string]dimensionParser{
 	"png":  pngDimensions,
 	"jpg":  jpegDimensions,
 	"webp": webpDimensions,
+	"heic": heicDimensions,
+	"tiff": tiffDimensions,
 }
 
 // Dimensions peeks up to dimPeekLen bytes from r (the `rest` reader Sniff
@@ -167,4 +168,144 @@ func jpegDimensions(b []byte) (uint32, uint32, bool) {
 		i += 2 + segLen
 	}
 	return 0, 0, false
+}
+
+// tiffDimensions reads the first IFD's ImageWidth (tag 256) and ImageLength
+// (tag 257) entries. Because the entire dimPeekLen-byte prefix is already
+// captured into b, indexing into it at the IFD offset is safe random
+// access — but if the offset (or any entry) points past the captured
+// buffer, the parser fails closed rather than seeking or growing the
+// buffer (D-07/Pitfall 2).
+// Source: TIFF 6.0 spec / RFC 2301 (IFD structure, tag value left-
+// justification rule)
+func tiffDimensions(b []byte) (uint32, uint32, bool) {
+	if len(b) < 8 {
+		return 0, 0, false
+	}
+	var bo binary.ByteOrder
+	switch {
+	case bytes.Equal(b[0:2], []byte{0x49, 0x49}):
+		bo = binary.LittleEndian
+	case bytes.Equal(b[0:2], []byte{0x4D, 0x4D}):
+		bo = binary.BigEndian
+	default:
+		return 0, 0, false
+	}
+	ifdOffset := bo.Uint32(b[4:8])
+	if uint64(ifdOffset)+2 > uint64(len(b)) {
+		return 0, 0, false // IFD beyond bounded window: fail closed (D-07)
+	}
+	count := bo.Uint16(b[ifdOffset : ifdOffset+2])
+	entriesStart := ifdOffset + 2
+	var width, height uint32
+	var foundW, foundH bool
+	for i := uint32(0); i < uint32(count); i++ {
+		off := entriesStart + i*12
+		if uint64(off)+12 > uint64(len(b)) {
+			return 0, 0, false
+		}
+		tag := bo.Uint16(b[off : off+2])
+		if tag != 256 && tag != 257 {
+			continue
+		}
+		typ := bo.Uint16(b[off+2 : off+4])
+		var val uint32
+		switch typ {
+		case 3: // SHORT — left-justified in first 2 bytes of the value field
+			val = uint32(bo.Uint16(b[off+8 : off+10]))
+		case 4: // LONG
+			val = bo.Uint32(b[off+8 : off+12])
+		default:
+			continue
+		}
+		if tag == 256 {
+			width, foundW = val, true
+		} else {
+			height, foundH = val, true
+		}
+		if foundW && foundH {
+			return width, height, true
+		}
+	}
+	return 0, 0, false
+}
+
+// heicDimensions walks the ftyp -> meta -> iprp -> ipco box chain and reads
+// every ispe box's declared width/height, returning the maximum width*height
+// across them. Rationale (Assumptions Log A1): resolving the *primary*
+// item's ispe would require also parsing the primary-item and
+// item-property-association boxes (version-dependent item-id/association
+// encodings); taking the max is a documented, security-conservative
+// simplification — it can only reject more, never less, than full
+// primary-item resolution. Deliberately does NOT parse those boxes.
+// Source: ISO/IEC 14496-12 box structure; box hierarchy cross-verified
+// against jdeng/goheif's heif/bmff.go box-walk and a real HEIC hex dump
+// (cheeky4n6monkey.blogspot.com/2017/10/monkey-takes-heic.html)
+func heicDimensions(b []byte) (uint32, uint32, bool) {
+	var maxW, maxH uint32
+	found := false
+	walkBoxes(b, func(boxType string, payload []byte) bool {
+		if boxType != "meta" || len(payload) < 4 {
+			return true // keep scanning top-level boxes
+		}
+		walkBoxes(payload[4:], func(t string, p []byte) bool { // skip meta's version/flags
+			if t != "iprp" {
+				return true
+			}
+			walkBoxes(p, func(t2 string, p2 []byte) bool {
+				if t2 != "ipco" {
+					return true
+				}
+				walkBoxes(p2, func(t3 string, p3 []byte) bool {
+					if t3 == "ispe" && len(p3) >= 12 {
+						w := binary.BigEndian.Uint32(p3[4:8])
+						h := binary.BigEndian.Uint32(p3[8:12])
+						if uint64(w)*uint64(h) > uint64(maxW)*uint64(maxH) {
+							maxW, maxH = w, h
+						}
+						found = true
+					}
+					return true
+				})
+				return false
+			})
+			return false
+		})
+		return false // stop scanning top-level boxes after meta
+	})
+	return maxW, maxH, found
+}
+
+// walkBoxes iterates top-level ISOBMFF boxes in buf, calling fn(type,
+// payload) for each; fn returns false to stop early. Truncated/malformed
+// boxes at the tail of the bounded buffer are silently treated as "nothing
+// more to see" — the caller's found==false + ErrDimensionsUnknown handles
+// the fail-closed behavior.
+func walkBoxes(buf []byte, fn func(boxType string, payload []byte) bool) {
+	i := 0
+	for i+8 <= len(buf) {
+		size := int(binary.BigEndian.Uint32(buf[i : i+4]))
+		boxType := string(buf[i+4 : i+8])
+		headerLen := 8
+		if size == 1 {
+			if i+16 > len(buf) {
+				return
+			}
+			size64 := binary.BigEndian.Uint64(buf[i+8 : i+16])
+			if size64 > uint64(len(buf)) {
+				return
+			}
+			size = int(size64)
+			headerLen = 16
+		} else if size == 0 {
+			return // "extends to EOF" — not expected here, bail conservatively
+		}
+		if size < headerLen || i+size > len(buf) {
+			return // truncated within bounded window
+		}
+		if !fn(boxType, buf[i+headerLen:i+size]) {
+			return
+		}
+		i += size
+	}
 }
