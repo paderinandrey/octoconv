@@ -149,6 +149,26 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// VALID-03: reject a decompression-bomb-shaped upload (declared pixel
+	// dimensions exceeding the configured limit) before any storage write.
+	// convert.Dimensions re-stitches its own bounded peek onto rest, so the
+	// full original stream still reaches s.storage.Upload below unmodified.
+	width, height, dimRest, err := convert.Dimensions(detected, rest)
+	if err != nil {
+		log.Printf("content validation rejected: client_id=%s filename=%q reason=dimensions_unknown", client.ID, filename)
+		writeError(w, http.StatusUnprocessableEntity,
+			"cannot determine declared image dimensions for "+filename)
+		return
+	}
+	rest = dimRest
+	totalPixels := uint64(width) * uint64(height)
+	if totalPixels > s.maxImagePixels {
+		log.Printf("content validation rejected: client_id=%s filename=%q reason=dimension_limit width=%d height=%d limit=%d", client.ID, filename, width, height, s.maxImagePixels)
+		writeError(w, http.StatusUnprocessableEntity,
+			"declared image dimensions exceed configured limit")
+		return
+	}
+
 	// callback_url is optional (per-job, D-02); an empty value leaves the
 	// existing polling path unchanged. When present it is SSRF-validated
 	// BEFORE writing anything to storage, same discipline as the format pair.

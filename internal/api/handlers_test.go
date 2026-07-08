@@ -104,10 +104,44 @@ func (f *fakeResolver) ResolveClient(_ context.Context, rawKey string) (*clients
 
 // --- helpers ---
 
-// pngBytesFixture returns the minimal magic-byte prefix that convert.Sniff
-// detects as "png" (plus a few trailing bytes so it's a plausible file).
+// pngBytesFixture returns a full 24-byte PNG signature+IHDR chunk (declaring
+// a small, well-within-the-default-limit 100x100 image) so both convert.Sniff
+// AND convert.Dimensions succeed on it — Dimensions needs the full IHDR
+// (signature[8] + length[4] + type[4] + width[4] + height[4]), unlike a bare
+// 16-byte Sniff-only prefix which stops mid-chunk.
 func pngBytesFixture() []byte {
-	return []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52}
+	return []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+		0x00, 0x00, 0x00, 0x0D, // chunk length = 13
+		0x49, 0x48, 0x44, 0x52, // "IHDR"
+		0x00, 0x00, 0x00, 0x64, // width = 100
+		0x00, 0x00, 0x00, 0x64, // height = 100
+	}
+}
+
+// oversizedPNGFixture returns a full PNG signature+IHDR chunk declaring
+// width=height=20000 (400 megapixels), over the 100-megapixel default limit.
+func oversizedPNGFixture() []byte {
+	return []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+		0x00, 0x00, 0x00, 0x0D, // chunk length = 13
+		0x49, 0x48, 0x44, 0x52, // "IHDR"
+		0x00, 0x00, 0x4E, 0x20, // width = 20000
+		0x00, 0x00, 0x4E, 0x20, // height = 20000
+	}
+}
+
+// truncatedIHDRPNGFixture is a valid PNG signature (Sniff-passing) followed
+// by a chunk whose type is NOT "IHDR" — convert.Dimensions cannot locate the
+// declared dimensions and must fail closed (D-07).
+func truncatedIHDRPNGFixture() []byte {
+	return []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+		0x00, 0x00, 0x00, 0x0D, // chunk length = 13
+		0x00, 0x00, 0x00, 0x00, // NOT "IHDR"
+		0x00, 0x00, 0x00, 0x64,
+		0x00, 0x00, 0x00, 0x64,
+	}
 }
 
 // jpegBytesFixture returns the minimal magic-byte prefix that convert.Sniff
@@ -280,6 +314,64 @@ func TestCreateJob_UnsupportedPair(t *testing.T) {
 	}
 	if repo.created != nil {
 		t.Error("must not create job for unsupported pair")
+	}
+}
+
+// TestCreateJob_DimensionLimitExceeded verifies VALID-03/D-04/D-06: an upload
+// whose declared pixel dimensions exceed the configured MAX_IMAGE_PIXELS
+// limit is rejected 422 before any storage write or job creation.
+func TestCreateJob_DimensionLimitExceeded(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1_000_000})
+
+	body, ct := multipartBody(t, "in.png", "webp", oversizedPNGFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload a decompression-bomb-shaped upload before the dimension check")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an oversized declared-dimension upload")
+	}
+}
+
+// TestCreateJob_DimensionsUnknown verifies D-07: a Sniff-passing upload whose
+// declared dimensions cannot be located within the bounded window fails
+// closed with 422, not a fallback accept.
+func TestCreateJob_DimensionsUnknown(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.png", "webp", truncatedIHDRPNGFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "cannot determine declared image dimensions") {
+		t.Errorf("error = %q, want a message about undeterminable declared dimensions", resp["error"])
+	}
+	if store.uploaded {
+		t.Error("must not upload when declared dimensions cannot be determined")
+	}
+	if repo.created != nil {
+		t.Error("must not create job when declared dimensions cannot be determined")
 	}
 }
 
