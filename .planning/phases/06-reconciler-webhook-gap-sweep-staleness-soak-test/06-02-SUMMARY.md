@@ -100,3 +100,13 @@ None - no external service configuration required.
 ---
 *Phase: 06-reconciler-webhook-gap-sweep-staleness-soak-test*
 *Completed: 2026-07-08*
+
+## Self-Check: PASSED
+
+- FOUND: internal/db/migrations/0004_webhook_deliveries_job_idx.sql
+- FOUND: FindWebhookGaps in internal/jobs/repo.go
+- FOUND: RecordWebhookGapRecovered in internal/jobs/repo.go
+- FOUND: commit 5fdc0b6 (Task 1: migration)
+- FOUND: commit c080892 (Task 2 RED: failing test)
+- FOUND: commit d76c960 (Task 2 GREEN: implementation)
+- FOUND: commit 162856f (docs: summary)
