@@ -83,6 +83,14 @@ func main() {
 	clientRepo := clients.NewRepo(pool)
 	resolver := auth.NewResolver(clientRepo, salt)
 
+	// D-04: surface a startup-visible warning when the webhook SSRF guard's
+	// RFC1918 private-IP block is relaxed, so a relaxed safety posture is
+	// obvious from logs without reading .env or source (loopback/link-local/
+	// unspecified remain hard-blocked regardless — see internal/api/callbackurl.go).
+	if os.Getenv("WEBHOOK_ALLOW_PRIVATE_IPS") == "true" {
+		log.Printf("⚠️  WEBHOOK_ALLOW_PRIVATE_IPS=true: webhook SSRF guard allows RFC1918 private-IP callback_url targets")
+	}
+
 	health := api.HealthDeps{
 		Postgres: pool,
 		Redis:    redisPinger{client: rdb},
