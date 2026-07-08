@@ -227,6 +227,84 @@ func ImageUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + imageBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
+// webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter
+// bound. webhookBackoffSum uses this to compute a genuine worst-case backoff
+// sum rather than a random sample.
+const webhookJitterCeiling = 1.25
+
+// webhookMaxRetry mirrors the literal 6 passed to asynq.MaxRetry in
+// NewWebhookDeliverTask. Unlike imageMaxRetry (IMAGE_MAX_RETRY), this is NOT
+// env-configurable — Phase 2's D-05 fixed MaxRetry=6 as a constant; kept here
+// as a named const (not a magic number) so NewWebhookDeliverTask and
+// WebhookUniqueTTL can never silently drift apart. Revisit only if a future
+// phase (D-05 in that phase's own numbering) makes it configurable.
+const webhookMaxRetry = 6
+
+// webhookPerAttemptTimeout MUST match internal/webhook/deliver.go's
+// NewDeliverer HTTP client Timeout field. There is no shared exported
+// constant between the two packages (internal/webhook does not export one,
+// and internal/queue does not currently import internal/webhook) — this is a
+// manually-maintained invariant, same discipline as detailActionRecovery's
+// single-source-of-truth comment in internal/jobs/repo.go. If deliver.go's
+// timeout ever changes, this constant must change with it.
+const webhookPerAttemptTimeout = 10 * time.Second
+
+// webhookBackoffSum sums the WORST-CASE (jitter-inflated) backoff for i in
+// [0, maxRetry), using the raw webhookRetrySchedule directly rather than
+// calling the jittered WebhookRetryDelay. Calling WebhookRetryDelay here
+// would bake in a random sample each time, silently violating the "always
+// exceeds worst case" contract this TTL must satisfy (see ImageUniqueTTL's
+// doc comment for the same contract on the image side, where it holds
+// trivially because ImageRetryDelay has no jitter). This is the single most
+// important deviation from imageBackoffSum's shape — do NOT port it
+// verbatim.
+func webhookBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		idx := i
+		if idx >= len(webhookRetrySchedule) {
+			idx = len(webhookRetrySchedule) - 1
+		}
+		sum += time.Duration(float64(webhookRetrySchedule[idx]) * webhookJitterCeiling)
+	}
+	return sum
+}
+
+// WebhookUniqueTTL derives the per-job asynq.Unique lock TTL for webhook
+// delivery tasks, mirroring ImageUniqueTTL's derivation exactly: (maxRetry+1)
+// total attempts (asynq's archive check runs AFTER each failed attempt, same
+// as the image queue) times the per-attempt bound, plus the worst-case
+// (jitter-inflated) backoff sum, plus the shared safety margin. REUSES
+// uniqueTTLSafetyMargin verbatim (RESEARCH.md A1) rather than a
+// webhook-specific margin constant.
+//
+// Worst-case formula: (maxRetry+1) * perAttemptTimeout + webhookBackoffSum(maxRetry) + margin.
+// For the fixed webhook constants (maxRetry=6, perAttemptTimeout=10s):
+//
+//	7*10s + (37.5+75+150+300+600+1125)s + 120s = 70s + 2287.5s + 120s = 2477.5s (~41m17.5s)
+//
+// — meaningfully longer than the "~30 minute" backoff-window figure quoted in
+// Phase 2's context, because that figure did not account for jitter, the
+// "+1 attempt" correction, or the safety margin.
+//
+// The TTL is DERIVED rather than a hardcoded constant deliberately: if
+// webhookMaxRetry or webhookPerAttemptTimeout are later changed, the margin
+// scales with them automatically and cannot fall behind the real retry
+// lifetime.
+//
+// SOUNDNESS CAVEAT (weaker than ImageUniqueTTL's): ImageUniqueTTL's
+// correctness depends on Plan 02 (03-02) wrapping the ENTIRE image-conversion
+// attempt in a single context.WithTimeout(ctx, ENGINE_TIMEOUT). No equivalent
+// wrapping exists for HandleWebhookDeliver (internal/worker/worker.go) — only
+// the outbound HTTP POST itself is bounded, at 10s, via webhook.Deliverer's
+// http.Client.Timeout. The Postgres reads (Get, Outputs) and presign-URL
+// generation that happen before the POST are NOT wrapped in any per-attempt
+// deadline. This is an accepted, pre-existing residual risk (out of this
+// phase's scope), documented here rather than silently assumed.
+func WebhookUniqueTTL(maxRetry int, perAttemptTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*perAttemptTimeout + webhookBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
 // RedisOpt builds the asynq Redis connection options from REDIS_ADDR.
 func RedisOpt() (asynq.RedisClientOpt, error) {
 	addr := os.Getenv("REDIS_ADDR")

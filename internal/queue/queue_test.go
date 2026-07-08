@@ -153,6 +153,47 @@ func TestImageUniqueTTL(t *testing.T) {
 	}
 }
 
+// TestWebhookUniqueTTL asserts WebhookUniqueTTL derives its result from a
+// jitter-inflated worst-case backoff sum (NOT from calling the jittered
+// WebhookRetryDelay), evaluates to exactly 2477.5s for (6, 10s), and always
+// strictly exceeds the worst-case retry lifetime, is monotonic, and is
+// deterministic across repeated calls.
+func TestWebhookUniqueTTL(t *testing.T) {
+	maxRetry := 6
+	perAttemptTimeout := 10 * time.Second
+	// Jitter-inflated (x1.25) values computed directly from the raw
+	// webhookRetrySchedule (30s,1m,2m,4m,8m,15m) — NOT via WebhookRetryDelay,
+	// which would introduce non-determinism into this test.
+	backoffSum := 37500*time.Millisecond + 75*time.Second + 150*time.Second + 300*time.Second + 600*time.Second + 1125*time.Second
+
+	want := time.Duration(maxRetry+1)*perAttemptTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := WebhookUniqueTTL(maxRetry, perAttemptTimeout)
+	if got != want {
+		t.Errorf("WebhookUniqueTTL(%d, %v) = %v, want %v", maxRetry, perAttemptTimeout, got, want)
+	}
+	if want != 2477500*time.Millisecond {
+		t.Errorf("expected worked example want = 2477.5s, got %v", want)
+	}
+
+	worstCaseRetryLifetime := time.Duration(maxRetry+1)*perAttemptTimeout + backoffSum
+	if got <= worstCaseRetryLifetime {
+		t.Errorf("WebhookUniqueTTL(%d, %v) = %v, want strictly greater than worst-case retry lifetime %v", maxRetry, perAttemptTimeout, got, worstCaseRetryLifetime)
+	}
+
+	// Monotonicity: raising either argument must never shrink the TTL.
+	if WebhookUniqueTTL(maxRetry+1, perAttemptTimeout) <= WebhookUniqueTTL(maxRetry, perAttemptTimeout) {
+		t.Errorf("WebhookUniqueTTL must grow monotonically with maxRetry")
+	}
+	if WebhookUniqueTTL(maxRetry, perAttemptTimeout+time.Second) <= WebhookUniqueTTL(maxRetry, perAttemptTimeout) {
+		t.Errorf("WebhookUniqueTTL must grow monotonically with perAttemptTimeout")
+	}
+
+	// Determinism: no jittered call leaked into the derivation.
+	if got2 := WebhookUniqueTTL(maxRetry, perAttemptTimeout); got2 != got {
+		t.Errorf("WebhookUniqueTTL is not deterministic: %v != %v", got2, got)
+	}
+}
+
 // TestEnqueueImageConvert enqueues a task and confirms it lands in the image
 // queue. Requires a live Redis (REDIS_ADDR); skipped otherwise.
 func TestEnqueueImageConvert(t *testing.T) {
