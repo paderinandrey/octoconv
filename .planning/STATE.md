@@ -4,8 +4,8 @@ milestone: v1.1
 milestone_name: Tech Debt Cleanup
 status: executing
 stopped_at: Phase 7 context gathered
-last_updated: "2026-07-08T21:53:23.720Z"
-last_activity: 2026-07-08 -- Phase 07 planning complete
+last_updated: "2026-07-08T21:55:52.300Z"
+last_activity: 2026-07-08 -- Phase 07 execution started
 progress:
   total_phases: 3
   completed_phases: 2
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-08 after v1.0 milestone complete)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 06 — reconciler-webhook-gap-sweep-staleness-soak-test
+**Current focus:** Phase 07 — image-dimension-limit-decompression-bomb-protection
 
 ## Current Position
 
-Phase: 06 (reconciler-webhook-gap-sweep-staleness-soak-test) — EXECUTING
-Plan: 1 of 4
-Status: Ready to execute
-Last activity: 2026-07-08 -- Phase 07 planning complete
+Phase: 07 (image-dimension-limit-decompression-bomb-protection) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 07
+Last activity: 2026-07-08 -- Phase 07 execution started
 
 Progress: [░░░░░░░░░░] 0% (v1.1 phases not yet planned/executed)
 
