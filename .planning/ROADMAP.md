@@ -25,7 +25,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 - [x] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918 `callback_url` targets via explicit opt-in (loopback/link-local stay blocked) (completed 2026-07-08)
 - [x] **Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test** - Reconciler also recovers done/failed jobs whose webhook silently never fired, and queued/active staleness recovery is proven under real wall-clock conditions (completed 2026-07-08)
-- [ ] **Phase 7: Image Dimension Limit (Decompression-Bomb Protection)** - API rejects uploads whose declared pixel dimensions exceed a configured limit, before conversion or storage
+- [x] **Phase 7: Image Dimension Limit (Decompression-Bomb Protection)** - API rejects uploads whose declared pixel dimensions exceed a configured limit, before conversion or storage (completed 2026-07-08)
 
 ## Phase Details
 
@@ -67,7 +67,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   4. The check parses actual pixel dimensions from file headers across all currently-supported formats (png/jpg/webp/heic/tiff), rather than trusting magic-byte format detection alone.
 **Plans**: 2 plans (2 waves)
 - [x] 07-01-PLAN.md — Zero-dependency dimension parser (png/jpg/webp/heic/tiff) with 64KiB bounded peek + fail-closed edge cases (VALID-03, D-01/D-03/D-07)
-- [ ] 07-02-PLAN.md — MAX_IMAGE_PIXELS config/env wiring + handleCreateJob 422 dimension gate before storage/enqueue (VALID-03, D-04/D-05/D-06)
+- [x] 07-02-PLAN.md — MAX_IMAGE_PIXELS config/env wiring + handleCreateJob 422 dimension gate before storage/enqueue (VALID-03, D-04/D-05/D-06)
 
 ## Progress
 
@@ -82,4 +82,4 @@ Phases execute in numeric order: 5 → 6 → 7
 | 4. Content Validation, Storage Lifecycle & Observability | v1.0 | 5/5 | Complete | 2026-07-07 |
 | 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete   | 2026-07-08 |
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete   | 2026-07-08 |
-| 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 1/2 | In Progress|  |
+| 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 2/2 | Complete   | 2026-07-08 |
