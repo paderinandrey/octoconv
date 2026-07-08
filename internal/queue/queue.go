@@ -71,13 +71,22 @@ func ParseConvertPayload(b []byte) (ConvertPayload, error) {
 
 // NewWebhookDeliverTask builds an asynq task for a single webhook delivery
 // job, routed to the webhook queue and bounded to MaxRetry=6 (D-05) — retry
-// count is a property of the task, set once at creation.
-func NewWebhookDeliverTask(jobID uuid.UUID) (*asynq.Task, error) {
+// count is a property of the task, set once at creation. Carries a per-job
+// asynq.Unique lock (uniqueTTL, see WebhookUniqueTTL) so a second enqueue for
+// the same jobID while the first task/lock is still live collides on the
+// same uniqueness key and returns asynq.ErrDuplicateTask instead of creating
+// a second concurrent task — the mechanism RECON-04's gap sweep relies on,
+// mirroring NewImageConvertTask's asynq.Unique shape exactly.
+func NewWebhookDeliverTask(jobID uuid.UUID, uniqueTTL time.Duration) (*asynq.Task, error) {
 	b, err := json.Marshal(WebhookPayload{JobID: jobID})
 	if err != nil {
 		return nil, fmt.Errorf("marshal webhook payload: %w", err)
 	}
-	return asynq.NewTask(TypeWebhookDeliver, b, asynq.Queue(QueueWebhook), asynq.MaxRetry(6)), nil
+	return asynq.NewTask(TypeWebhookDeliver, b,
+		asynq.Queue(QueueWebhook),
+		asynq.MaxRetry(webhookMaxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
 }
 
 // ParseWebhookPayload decodes a WebhookPayload from a task body.

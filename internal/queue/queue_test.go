@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -235,5 +236,47 @@ func TestEnqueueImageConvert(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("enqueued task for job %s not found in queue %q", id, QueueImage)
+	}
+}
+
+// TestEnqueueWebhookDeliverDuplicate asserts that a second
+// EnqueueWebhookDeliver for the same job id, while the first task/lock is
+// still live, returns asynq.ErrDuplicateTask instead of creating a second
+// concurrent webhook task (D-01). Requires a live Redis (REDIS_ADDR);
+// skipped otherwise.
+func TestEnqueueWebhookDeliverDuplicate(t *testing.T) {
+	if os.Getenv("REDIS_ADDR") == "" {
+		t.Skip("REDIS_ADDR not set; skipping integration test")
+	}
+
+	cl, err := NewClient()
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer cl.Close()
+
+	id := uuid.New()
+	if err := cl.EnqueueWebhookDeliver(context.Background(), id); err != nil {
+		t.Fatalf("first EnqueueWebhookDeliver: %v", err)
+	}
+	err = cl.EnqueueWebhookDeliver(context.Background(), id)
+	if !errors.Is(err, asynq.ErrDuplicateTask) {
+		t.Fatalf("second EnqueueWebhookDeliver = %v, want asynq.ErrDuplicateTask", err)
+	}
+
+	opt, _ := RedisOpt()
+	insp := asynq.NewInspector(opt)
+	defer insp.Close()
+
+	infos, err := insp.ListPendingTasks(QueueWebhook)
+	if err != nil {
+		t.Fatalf("ListPendingTasks: %v", err)
+	}
+	for _, ti := range infos {
+		p, perr := ParseWebhookPayload(ti.Payload)
+		if perr == nil && p.JobID == id {
+			_ = insp.DeleteTask(QueueWebhook, ti.ID)
+			break
+		}
 	}
 }
