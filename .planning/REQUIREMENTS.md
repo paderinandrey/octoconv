@@ -35,16 +35,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| WEBHOOK-06 | TBD | Pending |
-| RECON-04 | TBD | Pending |
-| RECON-05 | TBD | Pending |
-| VALID-03 | TBD | Pending |
+| WEBHOOK-06 | Phase 5 | Pending |
+| RECON-04 | Phase 6 | Pending |
+| RECON-05 | Phase 6 | Pending |
+| VALID-03 | Phase 7 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 4 total
-- Mapped to phases: 0 (roadmap not yet created)
-- Unmapped: 4 ⚠️
+- Mapped to phases: 4 (Phase 5: Webhook SSRF Private-IP Opt-Out; Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test; Phase 7: Image Dimension Limit)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-08*
-*Last updated: 2026-07-08 after initial v1.1 definition*
+*Last updated: 2026-07-08 after v1.1 roadmap creation*
