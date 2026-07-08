@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Document Engine Class
 status: planning
-last_updated: "2026-07-08T23:00:54.094Z"
-last_activity: 2026-07-08
+last_updated: "2026-07-09T00:00:00.000Z"
+last_activity: 2026-07-09
 progress:
-  total_phases: 0
+  total_phases: 4
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,23 +17,25 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-08 after v1.0 milestone complete)
+See: .planning/PROJECT.md (updated 2026-07-09 after v1.2 roadmap created)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 07 — image-dimension-limit-decompression-bomb-protection
+**Current focus:** Phase 08 — document-content-safety-and-format-detection
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-07-08 — Milestone v1.2 started
+Phase: 8 of 11 (Document Content Safety & Format Detection)
+Plan: — (not yet planned)
+Status: Ready to plan
+Last activity: 2026-07-09 — ROADMAP.md created for v1.2 (Phases 8-11), 10/10 requirements mapped
+
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 15 (all v1.0)
+- Total plans completed: 22 (all v1.0 + v1.1)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -45,9 +47,13 @@ Last activity: 2026-07-08 — Milestone v1.2 started
 | 02 | 3 | - | - |
 | 03 | 3 | - | - |
 | 04 | 5 | - | - |
-| 05 | TBD | - | - |
-| 06 | TBD | - | - |
-| 07 | TBD | - | - |
+| 05 | 1 | - | - |
+| 06 | 4 | - | - |
+| 07 | 2 | - | - |
+| 08 | TBD | - | - |
+| 09 | TBD | - | - |
+| 10 | TBD | - | - |
+| 11 | TBD | - | - |
 
 **Recent Trend:**
 
@@ -63,9 +69,11 @@ Last activity: 2026-07-08 — Milestone v1.2 started
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- Roadmap (v1.1): Phase numbering continues from v1.0 (starts at Phase 5) — this is a closing/cleanup milestone with no new capabilities, not a fresh v1.
-- Roadmap (v1.1): RECON-04 (webhook-gap sweep) and RECON-05 (staleness soak test) combined into one phase (Phase 6) — both touch `internal/reconciler/reconciler.go` and RECON-05 naturally validates the reconciler behavior RECON-04 extends.
-- Roadmap (v1.1): WEBHOOK-06 (Phase 5) and VALID-03 (Phase 7) kept as separate single-requirement phases — each is small and isolated to a different subsystem (`internal/api/callbackurl.go` vs `internal/convert/sniff.go`+`handlers.go`) with no shared code or sequencing dependency.
+- Roadmap (v1.2): Phase numbering continues from v1.1 (starts at Phase 8) — same continuous-numbering convention as v1.1.
+- Roadmap (v1.2): 4-phase structure taken directly from research's suggested phase structure (content safety → converter engine → worker/reconciler integration → API routing/e2e), each phase mapping to a natural dependency boundary.
+- Roadmap (v1.2): Phase 10 planned around a fully separate `cmd/document-worker` binary + its own Dockerfile/compose service (user decision made after research was written), not the in-process second-`asynq.Server` approach research originally suggested — avoids LibreOffice's heavy footprint touching the image-worker container.
+- Roadmap (v1.2): Resource-exhaustion-via-crafted-document (DOC-V2-05) is accepted residual risk for v1.2, mitigated only by `DOCUMENT_ENGINE_TIMEOUT` + the document worker's own concurrency ceiling — intentionally no active complexity-limiting requirement in any phase.
+- Roadmap (v1.2): LibreOffice engine extends the existing `convert.Converter`/`Registry` pattern (new `LibreOfficeConverter`) — no Handler/Capability/Input/Output core-contract refactor.
 
 ### Pending Todos
 
@@ -73,26 +81,28 @@ None yet.
 
 ### Blockers/Concerns
 
-None currently open.
+- Research flags Phase 9 (LibreOffice Converter Engine) as highest uncertainty: process topology (`soffice` wrapper vs. forking launcher) unverified, cold-start latency under per-job-fresh-profile only MEDIUM-confidence, `DOCUMENT_ENGINE_TIMEOUT` default (300s) is a reasoned starting point pending empirical validation — plan explicit verification/benchmark tasks, not just implementation, into that phase.
+- Research flags Phase 10 as needing a quick empirical check on concurrent `soffice` memory footprint before locking the document worker's concurrency ceiling and container resource limits.
 
 ## Deferred Items
 
-Items acknowledged and carried forward from v1.0 milestone close (see `.planning/milestones/v1.0-MILESTONE-AUDIT.md` for full detail):
+Items acknowledged and carried forward from v1.0/v1.1 milestone close (see `.planning/milestones/v1.0-MILESTONE-AUDIT.md` and `.planning/milestones/v1.1-MILESTONE-AUDIT.md` for full detail):
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| tech_debt | SSRF `callback_url` validation blocks all RFC1918/loopback — may make webhooks undeliverable on a real internal network | Now Phase 5 (v1.1) | v1.0 close (2026-07-08) |
-| tech_debt | Reconciler doesn't sweep done/failed jobs with a dropped webhook enqueue (narrow Redis-blip race) | Now Phase 6 (v1.1) | v1.0 close (2026-07-08) |
-| tech_debt | Reconciler staleness soak test not run in real wall-clock time | Now Phase 6 (v1.1) | v1.0 close (2026-07-08) |
-| tech_debt | Decompression-bomb / image-dimension limit explicitly deferred (D-09) | Now Phase 7 (v1.1) | v1.0 close (2026-07-08) |
-| tech_debt | docker-compose.yml audit for other stale gaps vs .env.example (one found+fixed: missing WEBHOOK_SIGNING_SECRET) | Open — not in v1.1 scope | v1.0 close (2026-07-08) |
+| tech_debt | docker-compose.yml audit for other stale gaps vs .env.example | Open — not in v1.2 scope | v1.0 close (2026-07-08) |
+| v2_scope | Cross-format conversion within document class (docx↔odt etc.) | Deferred to v2 (DOC-V2-01) | v1.2 requirements definition (2026-07-09) |
+| v2_scope | Pre-flight OLE-CFB (password-protected legacy doc) detection | Deferred to v2 (DOC-V2-02) | v1.2 requirements definition (2026-07-09) |
+| v2_scope | `opts`-driven PDF/A export | Deferred to v2 (DOC-V2-03) | v1.2 requirements definition (2026-07-09) |
+| v2_scope | HTML → PDF via chromium-based engine | Deferred to v2 (DOC-V2-04) | v1.2 requirements definition (2026-07-09) |
+| accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk for v1.2 (DOC-V2-05) | v1.2 requirements definition (2026-07-09) |
 
 ## Session Continuity
 
-Last session: 2026-07-08T21:25:20.675Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-image-dimension-limit-decompression-bomb-protection/07-CONTEXT.md
+Last session: 2026-07-09T00:00:00.000Z
+Stopped at: ROADMAP.md, STATE.md, REQUIREMENTS.md traceability written for v1.2 (Phases 8-11)
+Resume file: None
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run `/gsd:plan-phase 8` to plan Document Content Safety & Format Detection.

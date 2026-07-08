@@ -60,22 +60,22 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DOC-01 | TBD | Pending |
-| DOC-02 | TBD | Pending |
-| DOC-03 | TBD | Pending |
-| DOC-04 | TBD | Pending |
-| DOC-05 | TBD | Pending |
-| DOC-06 | TBD | Pending |
-| DOC-07 | TBD | Pending |
-| DOC-08 | TBD | Pending |
-| DOC-09 | TBD | Pending |
-| DOC-10 | TBD | Pending |
+| DOC-01 | Phase 8 | Pending |
+| DOC-02 | Phase 8 | Pending |
+| DOC-03 | Phase 8 | Pending |
+| DOC-04 | Phase 9 | Pending |
+| DOC-05 | Phase 9 | Pending |
+| DOC-06 | Phase 9 | Pending |
+| DOC-07 | Phase 10 | Pending |
+| DOC-08 | Phase 10 | Pending |
+| DOC-09 | Phase 10 | Pending |
+| DOC-10 | Phase 11 | Pending |
 
 **Coverage:**
 - v1 requirements: 10 total
-- Mapped to phases: 0 (roadmap not yet created)
-- Unmapped: 10 ⚠️
+- Mapped to phases: 10 (Phase 8: DOC-01..03, Phase 9: DOC-04..06, Phase 10: DOC-07..09, Phase 11: DOC-10)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-09*
-*Last updated: 2026-07-09 after initial definition*
+*Last updated: 2026-07-09 after roadmap creation (ROADMAP.md, Phases 8-11)*
