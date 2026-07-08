@@ -8,6 +8,22 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
 
+## Current Milestone: v1.2 Document Engine Class
+
+**Goal:** Внутренние сервисы могут конвертировать офисные документы (docx/xlsx/pptx/odt/ods/odp) в PDF через новый класс движков на LibreOffice, поверх уже готовой production-инфраструктуры (auth, rate limiting, webhook-доставка, reconciler, observability).
+
+**Target features:**
+- Новый класс движков `document` (LibreOffice, `soffice --headless`), отдельная asynq-очередь по уже существующему паттерну engine-class routing (`internal/queue/queue.go`)
+- Входные форматы: docx, xlsx, pptx, odt, ods, odp → выход только pdf в v1 (кросс-конвертация docx↔odt и т.п. — вне скопа, кандидат на v2)
+- Отдельный `DOCUMENT_ENGINE_TIMEOUT` (больше общего `ENGINE_TIMEOUT`, т.к. LibreOffice конвертирует заметно дольше изображений, особенно крупные xlsx/pptx)
+- LibreOffice-реализация регистрируется как ещё один `convert.Converter` в существующем `Registry` — без рефакторинга к Handler/Capability/Input/Output контракту
+
+**Explicitly out of scope this milestone:**
+- HTML → PDF — LibreOffice плохо рендерит современный CSS/JS; нужен отдельный chromium-based движок, отдельный будущий разговор
+- Полный контракт ядра (Handler/Capability/Input/Output/Progress) — решено расширять существующий `Converter`/`Registry`, не переделывать
+
+**Key context:** Есть конкретный внутренний сервис/команда, которой этот кейс нужен уже сейчас — не абстрактное расширение впрок.
+
 ## Requirements
 
 ### Validated
@@ -36,15 +52,19 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Milestone v1.1 (Tech Debt Cleanup) shipped 2026-07-08 — все требования этапа закрыты, tech debt из v1.0-аудита полностью погашен. Следующий milestone ещё не определён; запустить /gsd:new-milestone. -->
+<!-- Milestone v1.2 (Document Engine Class) — новый класс движков поверх готовой hardening-инфраструктуры v1.0/v1.1. -->
 
-(нет активных пунктов — оба milestone закрыты без переносов)
+- [ ] Класс движков `document` через LibreOffice: docx/xlsx/pptx/odt/ods/odp → pdf
+- [ ] Отдельная `document` asynq-очередь по паттерну engine-class routing
+- [ ] `DOCUMENT_ENGINE_TIMEOUT` — отдельный от `ENGINE_TIMEOUT`, учитывающий более долгие LibreOffice-конвертации
 
 ### Out of Scope
 
 - CAD-движок — открытый вопрос в спеке (нативные форматы: OSS vs коммерческий SDK vs cloud API), не решён — отложен
-- Другие классы движков (document/LibreOffice, av/ffmpeg, archive, probe) — следующий этап развития, не этот
-- Контракт ядра (Handler/Capability/Input/Output/Progress) — рефакторинг откладывается до момента добавления новых движков, чтобы не переделывать дважды
+- HTML → PDF конвертация — LibreOffice не подходит (слабый CSS/JS-рендеринг); нужен отдельный chromium-based движок — future
+- Кросс-конвертация внутри document-класса (docx↔odt, xlsx↔ods и т.п.) — только → pdf в v1.2, кандидат на v2
+- Другие классы движков (av/ffmpeg, archive, probe) — следующий этап развития, не этот
+- Полный контракт ядра (Handler/Capability/Input/Output/Progress) — решено расширять существующий `Converter`/`Registry` вместо рефакторинга (v1.2 — второй движок укладывается в текущую абстракцию)
 - KEDA-автоскейл / полноценная Kubernetes-оркестрация — инфраструктурная задача вне фокуса кодовых фаз
 - Публичный релиз и проверка имени (npm/PyPI/Docker Hub/домен) — сервис внутренний, не актуально
 
@@ -83,7 +103,8 @@ OctoConv — внутренний асинхронный сервис конве
 | Reconciler webhook-gap sweep: `asynq.Unique` на webhook-очереди с TTL, деривированным из реального retry-бюджета (зеркалит `ImageUniqueTTL`) | Защита от двойной доставки при гонке sweep-тиков; TTL должен учитывать jitter `WebhookRetryDelay`, иначе получится average-case, а не worst-case | ✓ Good — Phase 6, TTL=2477.5с подтверждён тестами, live-verified без дублей |
 | Decompression-bomb защита: свои zero-dependency парсеры размеров вместо golang.org/x/image или shell-out в vipsheader | Согласуется с философией zero-new-deps из Phase 4; избегает нового process-exec surface в API | ✓ Good — Phase 7, все 5 форматов (включая HEIC) защищены одинаково, 0 новых зависимостей |
 | CAD и остальные классы движков — вне скопа этого этапа | Открытый вопрос по CAD SDK не решён; остальные движки — следующий этап роста, не текущий hardening | — Pending |
-| Контракт ядра (Handler/Capability/Input/Output) отложен | Рефакторинг делать при добавлении новых движков, а не сейчас — иначе придётся переделывать дважды | — Pending |
+| document-движок расширяет существующий `Converter`/`Registry`, а не вводит Handler/Capability/Input/Output контракт | Второй движок (LibreOffice) укладывается в текущую абстракцию без изменений; полноценный контракт остаётся отложен до появления реальной потребности (напр. progress-репортинга) | — Pending (v1.2) |
+| HTML→PDF исключён из v1.2 | LibreOffice слабо рендерит современный CSS/JS; нужен отдельный chromium-based движок — самостоятельное решение, не расширение LibreOffice-движка | — Pending |
 
 ## Evolution
 
@@ -103,4 +124,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-08 after v1.1 (Tech Debt Cleanup) milestone complete*
+*Last updated: 2026-07-09 after starting v1.2 (Document Engine Class) milestone*
