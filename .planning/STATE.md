@@ -4,8 +4,8 @@ milestone: v1.1
 milestone_name: Tech Debt Cleanup
 status: executing
 stopped_at: Phase 5 context gathered
-last_updated: "2026-07-08T02:15:47.017Z"
-last_activity: 2026-07-08 -- Phase 05 planning complete
+last_updated: "2026-07-08T02:24:09.688Z"
+last_activity: 2026-07-08 -- Phase 05 execution started
 progress:
   total_phases: 3
   completed_phases: 0
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-08 after v1.0 milestone complete)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 5 — Webhook SSRF Private-IP Opt-Out
+**Current focus:** Phase 05 — webhook-ssrf-private-ip-opt-out
 
 ## Current Position
 
-Phase: 5 of 7 (Webhook SSRF Private-IP Opt-Out)
-Plan: — (not yet planned)
-Status: Ready to execute
-Last activity: 2026-07-08 -- Phase 05 planning complete
+Phase: 05 (webhook-ssrf-private-ip-opt-out) — EXECUTING
+Plan: 1 of 1
+Status: Executing Phase 05
+Last activity: 2026-07-08 -- Phase 05 execution started
 
 Progress: [░░░░░░░░░░] 0% (v1.1 phases not yet planned/executed)
 

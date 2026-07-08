@@ -23,7 +23,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 **Milestone Goal:** Close the tech debt surfaced by the v1.0 milestone audit — no new capabilities, purely hardening the hardening.
 
-- [ ] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918 `callback_url` targets via explicit opt-in (loopback/link-local stay blocked)
+- [x] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918 `callback_url` targets via explicit opt-in (loopback/link-local stay blocked) (completed 2026-07-08)
 - [ ] **Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test** - Reconciler also recovers done/failed jobs whose webhook silently never fired, and queued/active staleness recovery is proven under real wall-clock conditions
 - [ ] **Phase 7: Image Dimension Limit (Decompression-Bomb Protection)** - API rejects uploads whose declared pixel dimensions exceed a configured limit, before conversion or storage
 
@@ -39,7 +39,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   3. Even with the flag enabled, non-https schemes and syntactically invalid URLs are still rejected — the opt-out only relaxes the IP-range check, nothing else in validation.
   4. The new environment variable and its default (disabled) are documented in `.env.example` so operators discover it without reading source.
 **Plans**: 1 plan
-- [ ] 05-01-PLAN.md — WEBHOOK_ALLOW_PRIVATE_IPS opt-out: conditional isBlockedIP RFC1918 relaxation, startup warning, .env.example docs
+- [x] 05-01-PLAN.md — WEBHOOK_ALLOW_PRIVATE_IPS opt-out: conditional isBlockedIP RFC1918 relaxation, startup warning, .env.example docs
 
 ### Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test
 **Goal**: Operators can trust the reconciler to recover both jobs stranded in `queued`/`active` and jobs whose completion webhook silently never fired, and that staleness recovery has been proven under real wall-clock conditions rather than only mocked-clock integration tests.
@@ -74,7 +74,7 @@ Phases execute in numeric order: 5 → 6 → 7
 | 2. Webhook Delivery | v1.0 | 3/3 | Complete | 2026-07-04 |
 | 3. Retry-Safety & Reconciler | v1.0 | 3/3 | Complete | 2026-07-06 |
 | 4. Content Validation, Storage Lifecycle & Observability | v1.0 | 5/5 | Complete | 2026-07-07 |
-| 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 0/? | Not started | - |
+| 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete   | 2026-07-08 |
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 0/? | Not started | - |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 0/? | Not started | - |
 </content>
