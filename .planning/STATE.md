@@ -18,10 +18,10 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-02)
+See: .planning/PROJECT.md (updated 2026-07-08 after v1.0 milestone complete)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Milestone v1.0 complete — all 4 phases done and verified; ready for /gsd:complete-milestone
+**Current focus:** Planning next milestone — run /gsd:new-milestone
 
 ## Current Position
 
@@ -42,7 +42,7 @@ Last activity: 2026-07-08 — Milestone v1.0 completed and archived
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1 | 4 | - | - |
+| 01 | 4 | - | - |
 | 02 | 3 | - | - |
 | 03 | 3 | - | - |
 | 04 | 5 | - | - |
@@ -72,16 +72,19 @@ None yet.
 
 ### Blockers/Concerns
 
-- Phase 3 follow-up (non-blocking): 03-03-SUMMARY.md notes the reconciler's multi-minute live staleness scenarios weren't manually run end-to-end in wall-clock time; 03-VERIFICATION.md closed this gap with throwaway integration tests against live Postgres/Redis instead — consider a manual soak test before production rollout.
-- Phase 4 follow-up (non-blocking, pre-existing, unrelated to Phase 4 decisions): docker-compose.yml's `worker` service was missing `WEBHOOK_SIGNING_SECRET` since Phase 2 — discovered and fixed (commit `36b559b`) during Phase 4's live verification when images were rebuilt for the first time in months. Worth a quick audit of docker-compose.yml against .env.example for other silently-stale gaps.
+None currently open — v1.0's tech debt items are tracked in `.planning/milestones/v1.0-MILESTONE-AUDIT.md` and surfaced as Active candidates in PROJECT.md for the next milestone to consider.
 
 ## Deferred Items
 
-Items acknowledged and carried forward from previous milestone close:
+Items acknowledged and carried forward from v1.0 milestone close (see `.planning/milestones/v1.0-MILESTONE-AUDIT.md` for full detail):
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| *(none)* | | | |
+| tech_debt | SSRF `callback_url` validation blocks all RFC1918/loopback — may make webhooks undeliverable on a real internal network | Open | v1.0 close (2026-07-08) |
+| tech_debt | Reconciler doesn't sweep done/failed jobs with a dropped webhook enqueue (narrow Redis-blip race) | Open | v1.0 close (2026-07-08) |
+| tech_debt | Reconciler staleness soak test not run in real wall-clock time | Open | v1.0 close (2026-07-08) |
+| tech_debt | Decompression-bomb / image-dimension limit explicitly deferred (D-09) | Open | v1.0 close (2026-07-08) |
+| tech_debt | docker-compose.yml audit for other stale gaps vs .env.example (one found+fixed: missing WEBHOOK_SIGNING_SECRET) | Open | v1.0 close (2026-07-08) |
 
 ## Session Continuity
 
