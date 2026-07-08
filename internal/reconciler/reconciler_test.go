@@ -27,6 +27,10 @@ type fakeStore struct {
 	requeueStaleErrs []error
 
 	markFailedCalls []uuid.UUID
+
+	webhookGaps              []jobs.WebhookGapJob
+	findWebhookGapsErr       error
+	webhookGapRecoveredCalls []uuid.UUID
 }
 
 func (f *fakeStore) FindStale(ctx context.Context, queuedStaleAfter, activeStaleAfter time.Duration) ([]jobs.StaleJob, error) {
@@ -62,11 +66,24 @@ func (f *fakeStore) Get(ctx context.Context, id uuid.UUID) (*jobs.Job, error) {
 	return &jobs.Job{ID: id}, nil
 }
 
+func (f *fakeStore) FindWebhookGaps(ctx context.Context, activeStaleAfter time.Duration) ([]jobs.WebhookGapJob, error) {
+	if f.findWebhookGapsErr != nil {
+		return nil, f.findWebhookGapsErr
+	}
+	return f.webhookGaps, nil
+}
+
+func (f *fakeStore) RecordWebhookGapRecovered(ctx context.Context, id uuid.UUID, status string) error {
+	f.webhookGapRecoveredCalls = append(f.webhookGapRecoveredCalls, id)
+	return nil
+}
+
 // fakeEnqueuer is an in-memory enqueuer implementation for unit tests.
 type fakeEnqueuer struct {
-	enqueueImageErr error
-	imageCalls      []uuid.UUID
-	webhookCalls    []uuid.UUID
+	enqueueImageErr   error
+	imageCalls        []uuid.UUID
+	webhookCalls      []uuid.UUID
+	enqueueWebhookErr error
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
@@ -76,7 +93,7 @@ func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) er
 
 func (f *fakeEnqueuer) EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) error {
 	f.webhookCalls = append(f.webhookCalls, id)
-	return nil
+	return f.enqueueWebhookErr
 }
 
 func testConfig() Config {
@@ -227,6 +244,62 @@ func TestSweepExhaustNoCallbackNoWebhook(t *testing.T) {
 	}
 	if len(enq.webhookCalls) != 0 {
 		t.Fatalf("EnqueueWebhookDeliver should not be called without callback_url, got %d calls", len(enq.webhookCalls))
+	}
+}
+
+func TestSweepRecoversWebhookGap(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		recoveryCount: map[uuid.UUID]int{},
+		webhookGaps:   []jobs.WebhookGapJob{{ID: id, Status: jobs.StatusDone}},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.webhookCalls) != 1 || enq.webhookCalls[0] != id {
+		t.Fatalf("EnqueueWebhookDeliver calls = %+v, want [%s]", enq.webhookCalls, id)
+	}
+	if len(store.webhookGapRecoveredCalls) != 1 || store.webhookGapRecoveredCalls[0] != id {
+		t.Fatalf("RecordWebhookGapRecovered calls = %+v, want [%s]", store.webhookGapRecoveredCalls, id)
+	}
+}
+
+func TestSweepSkipsDuplicateWebhookGap(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		recoveryCount: map[uuid.UUID]int{},
+		webhookGaps:   []jobs.WebhookGapJob{{ID: id, Status: jobs.StatusFailed}},
+	}
+	enq := &fakeEnqueuer{enqueueWebhookErr: asynq.ErrDuplicateTask}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.webhookCalls) != 1 || enq.webhookCalls[0] != id {
+		t.Fatalf("EnqueueWebhookDeliver calls = %+v, want [%s]", enq.webhookCalls, id)
+	}
+	if len(store.webhookGapRecoveredCalls) != 0 {
+		t.Fatalf("RecordWebhookGapRecovered should NOT be called on duplicate enqueue, got %d calls", len(store.webhookGapRecoveredCalls))
+	}
+}
+
+func TestSweepWebhookGapFindErrorBestEffort(t *testing.T) {
+	store := &fakeStore{
+		recoveryCount:      map[uuid.UUID]int{},
+		findWebhookGapsErr: errors.New("transient query failure"),
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.webhookCalls) != 0 {
+		t.Fatalf("EnqueueWebhookDeliver should not be called on FindWebhookGaps error, got %d calls", len(enq.webhookCalls))
+	}
+	if len(store.webhookGapRecoveredCalls) != 0 {
+		t.Fatalf("RecordWebhookGapRecovered should not be called on FindWebhookGaps error, got %d calls", len(store.webhookGapRecoveredCalls))
 	}
 }
 
