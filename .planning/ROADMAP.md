@@ -23,7 +23,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 **Milestone Goal:** Close the tech debt surfaced by the v1.0 milestone audit — no new capabilities, purely hardening the hardening.
 
-- [ ] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918/loopback `callback_url` targets via explicit opt-in
+- [ ] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918 `callback_url` targets via explicit opt-in (loopback/link-local stay blocked)
 - [ ] **Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test** - Reconciler also recovers done/failed jobs whose webhook silently never fired, and queued/active staleness recovery is proven under real wall-clock conditions
 - [ ] **Phase 7: Image Dimension Limit (Decompression-Bomb Protection)** - API rejects uploads whose declared pixel dimensions exceed a configured limit, before conversion or storage
 
@@ -35,7 +35,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 **Requirements**: WEBHOOK-06
 **Success Criteria** (what must be TRUE):
   1. With `WEBHOOK_ALLOW_PRIVATE_IPS` unset (default), a `callback_url` pointing at an RFC1918/loopback/link-local address is still rejected with 400 — unchanged from v1.0 behavior.
-  2. With `WEBHOOK_ALLOW_PRIVATE_IPS=true`, job creation with a `callback_url` pointing at an RFC1918/loopback address succeeds, and the webhook is actually delivered to that address.
+  2. With `WEBHOOK_ALLOW_PRIVATE_IPS=true`, job creation with a `callback_url` pointing at an RFC1918 private address succeeds, and the webhook is actually delivered to that address. Loopback and link-local addresses (including the `169.254.169.254` cloud metadata endpoint) remain rejected even with the flag enabled (D-01) — there is no legitimate `callback_url` use case for them.
   3. Even with the flag enabled, non-https schemes and syntactically invalid URLs are still rejected — the opt-out only relaxes the IP-range check, nothing else in validation.
   4. The new environment variable and its default (disabled) are documented in `.env.example` so operators discover it without reading source.
 **Plans**: 1 plan
