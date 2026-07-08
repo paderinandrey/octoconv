@@ -425,3 +425,182 @@ func TestFindStale(t *testing.T) {
 		t.Fatalf("freshActive should not be stale: %+v", stale)
 	}
 }
+
+func TestFindWebhookGaps(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+	clientID := createTestClient(t, r)
+
+	// Case 1: done job, callback_url set, finished_at backdated past the
+	// cutoff, zero webhook_deliveries rows — IS a genuine gap.
+	gapDone, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp", CallbackURL: "https://example.com/cb",
+		Input: Input{ObjectKey: "uploads/wg1/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create gapDone: %v", err)
+	}
+	if err := r.MarkActive(ctx, gapDone); err != nil {
+		t.Fatalf("MarkActive gapDone: %v", err)
+	}
+	if err := r.MarkDone(ctx, gapDone); err != nil {
+		t.Fatalf("MarkDone gapDone: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET finished_at = now() - interval '1 hour' WHERE id = $1`, gapDone); err != nil {
+		t.Fatalf("backdate gapDone finished_at: %v", err)
+	}
+
+	// Case 2: failed job, same shape — status branch covers 'failed' too.
+	gapFailed, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp", CallbackURL: "https://example.com/cb",
+		Input: Input{ObjectKey: "uploads/wg2/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create gapFailed: %v", err)
+	}
+	if err := r.MarkActive(ctx, gapFailed); err != nil {
+		t.Fatalf("MarkActive gapFailed: %v", err)
+	}
+	if err := r.MarkFailed(ctx, gapFailed, "engine_error", "boom", nil); err != nil {
+		t.Fatalf("MarkFailed gapFailed: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET finished_at = now() - interval '1 hour' WHERE id = $1`, gapFailed); err != nil {
+		t.Fatalf("backdate gapFailed finished_at: %v", err)
+	}
+
+	// Case 3: done job, past cutoff, but WITH a delivered webhook_deliveries
+	// row — must NOT be returned (D-05).
+	delivered, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp", CallbackURL: "https://example.com/cb",
+		Input: Input{ObjectKey: "uploads/wg3/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create delivered: %v", err)
+	}
+	if err := r.MarkActive(ctx, delivered); err != nil {
+		t.Fatalf("MarkActive delivered: %v", err)
+	}
+	if err := r.MarkDone(ctx, delivered); err != nil {
+		t.Fatalf("MarkDone delivered: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET finished_at = now() - interval '1 hour' WHERE id = $1`, delivered); err != nil {
+		t.Fatalf("backdate delivered finished_at: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx,
+		`INSERT INTO webhook_deliveries (job_id, url, attempt, delivered) VALUES ($1, $2, 1, true)`,
+		delivered, "https://example.com/cb",
+	); err != nil {
+		t.Fatalf("insert delivered webhook_deliveries row: %v", err)
+	}
+
+	// Case 4: done job, past cutoff, with a dead-lettered (delivered=false,
+	// dead_letter=true) row — must ALSO NOT be returned (D-05, never re-swept
+	// even after exhausted retries).
+	deadLettered, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp", CallbackURL: "https://example.com/cb",
+		Input: Input{ObjectKey: "uploads/wg4/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create deadLettered: %v", err)
+	}
+	if err := r.MarkActive(ctx, deadLettered); err != nil {
+		t.Fatalf("MarkActive deadLettered: %v", err)
+	}
+	if err := r.MarkDone(ctx, deadLettered); err != nil {
+		t.Fatalf("MarkDone deadLettered: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET finished_at = now() - interval '1 hour' WHERE id = $1`, deadLettered); err != nil {
+		t.Fatalf("backdate deadLettered finished_at: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx,
+		`INSERT INTO webhook_deliveries (job_id, url, attempt, delivered, dead_letter) VALUES ($1, $2, 6, false, true)`,
+		deadLettered, "https://example.com/cb",
+	); err != nil {
+		t.Fatalf("insert dead-lettered webhook_deliveries row: %v", err)
+	}
+
+	// Case 5: done job whose finished_at is recent (within the threshold) —
+	// must NOT be returned (D-04, avoids false-positiving an in-flight enqueue).
+	freshDone, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp", CallbackURL: "https://example.com/cb",
+		Input: Input{ObjectKey: "uploads/wg5/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create freshDone: %v", err)
+	}
+	if err := r.MarkActive(ctx, freshDone); err != nil {
+		t.Fatalf("MarkActive freshDone: %v", err)
+	}
+	if err := r.MarkDone(ctx, freshDone); err != nil {
+		t.Fatalf("MarkDone freshDone: %v", err)
+	}
+
+	// Case 6: done job with an empty callback_url — must NOT be returned.
+	noCallback, err := r.Create(ctx, CreateParams{
+		ClientID: clientID, Operation: "convert", Engine: "image",
+		SourceFormat: "png", TargetFormat: "webp",
+		Input: Input{ObjectKey: "uploads/wg6/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create noCallback: %v", err)
+	}
+	if err := r.MarkActive(ctx, noCallback); err != nil {
+		t.Fatalf("MarkActive noCallback: %v", err)
+	}
+	if err := r.MarkDone(ctx, noCallback); err != nil {
+		t.Fatalf("MarkDone noCallback: %v", err)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE jobs SET finished_at = now() - interval '1 hour' WHERE id = $1`, noCallback); err != nil {
+		t.Fatalf("backdate noCallback finished_at: %v", err)
+	}
+
+	gaps, err := r.FindWebhookGaps(ctx, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("FindWebhookGaps: %v", err)
+	}
+	got := map[uuid.UUID]string{}
+	for _, g := range gaps {
+		got[g.ID] = g.Status
+	}
+	if got[gapDone] != StatusDone {
+		t.Fatalf("expected gapDone in webhook gap results as %q, got %+v", StatusDone, gaps)
+	}
+	if got[gapFailed] != StatusFailed {
+		t.Fatalf("expected gapFailed in webhook gap results as %q, got %+v", StatusFailed, gaps)
+	}
+	if _, ok := got[delivered]; ok {
+		t.Fatalf("delivered job must not be a webhook gap: %+v", gaps)
+	}
+	if _, ok := got[deadLettered]; ok {
+		t.Fatalf("dead-lettered job must not be a webhook gap (D-05): %+v", gaps)
+	}
+	if _, ok := got[freshDone]; ok {
+		t.Fatalf("freshDone job must not be a webhook gap (D-04): %+v", gaps)
+	}
+	if _, ok := got[noCallback]; ok {
+		t.Fatalf("noCallback job must not be a webhook gap: %+v", gaps)
+	}
+
+	if err := r.RecordWebhookGapRecovered(ctx, gapDone, StatusDone); err != nil {
+		t.Fatalf("RecordWebhookGapRecovered: %v", err)
+	}
+	var fromStatus, toStatus, action string
+	if err := r.pool.QueryRow(ctx,
+		`SELECT from_status, to_status, detail->>'action' FROM job_events
+		 WHERE job_id = $1 AND detail->>'action' = $2
+		 ORDER BY id DESC LIMIT 1`, gapDone, detailActionWebhookGapRecovered,
+	).Scan(&fromStatus, &toStatus, &action); err != nil {
+		t.Fatalf("query job_events for webhook gap recovery: %v", err)
+	}
+	if fromStatus != StatusDone || toStatus != StatusDone {
+		t.Fatalf("from_status/to_status = %q/%q, want %q/%q (no status change)", fromStatus, toStatus, StatusDone, StatusDone)
+	}
+	if action != detailActionWebhookGapRecovered {
+		t.Fatalf("detail action = %q, want %q", action, detailActionWebhookGapRecovered)
+	}
+}
