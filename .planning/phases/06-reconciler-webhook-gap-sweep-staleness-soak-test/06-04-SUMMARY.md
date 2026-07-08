@@ -95,3 +95,9 @@ None - no external service configuration required. Tests skip cleanly if `DATABA
 ---
 *Phase: 06-reconciler-webhook-gap-sweep-staleness-soak-test*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+- FOUND: internal/reconciler/reconciler_soak_test.go
+- FOUND: .planning/phases/06-reconciler-webhook-gap-sweep-staleness-soak-test/06-04-SUMMARY.md
+- FOUND: a1a2305 (Task 1: test commit)
