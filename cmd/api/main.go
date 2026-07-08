@@ -98,6 +98,7 @@ func main() {
 	}
 	srv := api.NewServer(jobs.NewRepo(pool), store, qc, resolver, health, api.Config{
 		MaxUploadBytes:     envInt64("MAX_UPLOAD_BYTES", 100<<20),
+		MaxImagePixels:     uint64(envInt64("MAX_IMAGE_PIXELS", 100_000_000)), // D-05: 100 megapixels default
 		IPRateLimitRPM:     int(envInt64("RATE_LIMIT_IP_RPM", 60)),
 		ClientRateLimitRPM: int(envInt64("RATE_LIMIT_CLIENT_RPM", 120)),
 	})

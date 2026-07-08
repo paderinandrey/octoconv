@@ -54,14 +54,20 @@ type Server struct {
 	resolver      auth.ClientResolver
 	health        HealthDeps
 	maxUploadByte int64
-	presignTTL    time.Duration
-	ipRateRPM     int
-	clientRateRPM int
+	// maxImagePixels is intentionally uint64 — WIDER than maxUploadByte's
+	// int64 — because it is compared against a product of two uint32
+	// declared dimensions (Pitfall 1); an adversarial max-uint32 x max-uint32
+	// product must not wrap or misbehave under signed/narrower arithmetic.
+	maxImagePixels uint64
+	presignTTL     time.Duration
+	ipRateRPM      int
+	clientRateRPM  int
 }
 
 // Config configures a Server.
 type Config struct {
 	MaxUploadBytes     int64
+	MaxImagePixels     uint64
 	PresignTTL         time.Duration
 	IPRateLimitRPM     int
 	ClientRateLimitRPM int
@@ -78,6 +84,9 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 	if cfg.MaxUploadBytes == 0 {
 		cfg.MaxUploadBytes = 100 << 20 // 100 MiB
 	}
+	if cfg.MaxImagePixels == 0 {
+		cfg.MaxImagePixels = 100_000_000 // D-05: 100 megapixels default
+	}
 	if cfg.IPRateLimitRPM == 0 {
 		cfg.IPRateLimitRPM = 60 // coarse pre-auth flood guard, conservative default
 	}
@@ -85,14 +94,15 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 		cfg.ClientRateLimitRPM = 120 // per-client, conservative for internal batch + interactive usage
 	}
 	return &Server{
-		repo:          repo,
-		storage:       storage,
-		queue:         queue,
-		resolver:      resolver,
-		health:        health,
-		maxUploadByte: cfg.MaxUploadBytes,
-		presignTTL:    cfg.PresignTTL,
-		ipRateRPM:     cfg.IPRateLimitRPM,
-		clientRateRPM: cfg.ClientRateLimitRPM,
+		repo:           repo,
+		storage:        storage,
+		queue:          queue,
+		resolver:       resolver,
+		health:         health,
+		maxUploadByte:  cfg.MaxUploadBytes,
+		maxImagePixels: cfg.MaxImagePixels,
+		presignTTL:     cfg.PresignTTL,
+		ipRateRPM:      cfg.IPRateLimitRPM,
+		clientRateRPM:  cfg.ClientRateLimitRPM,
 	}
 }
