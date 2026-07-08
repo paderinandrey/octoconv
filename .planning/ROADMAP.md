@@ -50,7 +50,11 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   2. The webhook-gap sweep does not re-trigger delivery for jobs that already have at least one `webhook_deliveries` row — including dead-lettered ones — so no job receives a duplicate delivery attempt from this sweep.
   3. A real wall-clock soak test demonstrates that a job left genuinely stranded in `queued`/`active` past the staleness threshold is requeued/recovered by a live, running reconciler process within the expected sweep interval, using real elapsed time (not a mocked or fast-forwarded clock).
   4. The same soak test demonstrates that a job exceeding `MaxRecoveries` under real elapsed time is terminally failed, with the failure recorded in `job_events`.
-**Plans**: TBD
+**Plans**: 4 plans (3 waves)
+- [ ] 06-01-PLAN.md — Webhook queue asynq.Unique lock + derived jitter-inflated WebhookUniqueTTL (D-01, D-02)
+- [ ] 06-02-PLAN.md — FindWebhookGaps NOT EXISTS anti-join + RecordWebhookGapRecovered + supporting index migration (RECON-04, D-04/D-05/D-06)
+- [ ] 06-03-PLAN.md — Reconciler second sweep loop (enqueue-first gap recovery) + unit tests + metric label (D-03, D-06)
+- [ ] 06-04-PLAN.md — Real wall-clock soak test: stranded-job recovery + cap exhaustion (RECON-05, D-07/D-08)
 
 ### Phase 7: Image Dimension Limit (Decompression-Bomb Protection)
 **Goal**: Operators are protected from decompression-bomb uploads — the API rejects images whose declared pixel dimensions exceed a configured limit before any conversion work begins.
@@ -75,6 +79,6 @@ Phases execute in numeric order: 5 → 6 → 7
 | 3. Retry-Safety & Reconciler | v1.0 | 3/3 | Complete | 2026-07-06 |
 | 4. Content Validation, Storage Lifecycle & Observability | v1.0 | 5/5 | Complete | 2026-07-07 |
 | 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete   | 2026-07-08 |
-| 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 0/? | Not started | - |
+| 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 0/4 | Not started | - |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 0/? | Not started | - |
 </content>
