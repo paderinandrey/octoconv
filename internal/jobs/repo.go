@@ -22,10 +22,28 @@ var ErrNotFound = errors.New("job not found")
 // the reconciler's recovery cap (RECON-02, Pitfall 5).
 const detailActionRecovery = "reconciler_recovery"
 
+// detailActionWebhookGapRecovered is the job_events.detail->>'action' tag
+// written by RecordWebhookGapRecovered when the reconciler detects a
+// done/failed job whose completion webhook was silently never enqueued
+// (RECON-04). Distinct from detailActionRecovery since this action never
+// changes jobs.status and is not counted by RecoveryCount's cap check — a
+// webhook-gap recovery is a one-shot, self-terminating action per D-05 (once
+// any webhook_deliveries row exists, the job is never re-swept).
+const detailActionWebhookGapRecovered = "webhook_gap_recovered"
+
 // StaleJob is a lightweight row returned by FindStale: just enough for the
 // reconciler to decide how to recover the job (id + the status it was found
 // stranded in).
 type StaleJob struct {
+	ID     uuid.UUID
+	Status string
+}
+
+// WebhookGapJob is a lightweight row returned by FindWebhookGaps: enough for
+// the sweeper to enqueue a delivery and record the recovery event. Status is
+// carried through unchanged into the job_events row written by
+// RecordWebhookGapRecovered.
+type WebhookGapJob struct {
 	ID     uuid.UUID
 	Status string
 }
@@ -192,6 +210,66 @@ func (r *Repo) FindStale(ctx context.Context, queuedStaleAfter, activeStaleAfter
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// FindWebhookGaps returns done/failed jobs with a non-empty callback_url and
+// ZERO rows in webhook_deliveries (any row — delivered, undelivered, or
+// dead-lettered — excludes a job; see D-05), whose finished_at is older than
+// activeStaleAfter (reusing the existing reconciler threshold, D-04, so a
+// job whose webhook enqueue is legitimately still in flight through the same
+// tick that marked it done/failed is not falsely flagged). The cutoff is
+// computed in Go and bound as a single timestamptz parameter, matching
+// FindStale's existing convention.
+func (r *Repo) FindWebhookGaps(ctx context.Context, activeStaleAfter time.Duration) ([]WebhookGapJob, error) {
+	cutoff := time.Now().Add(-activeStaleAfter)
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT j.id, j.status FROM jobs j
+		WHERE j.status IN ('done', 'failed')
+		  AND j.callback_url IS NOT NULL AND j.callback_url <> ''
+		  AND j.finished_at < $1
+		  AND NOT EXISTS (
+		      SELECT 1 FROM webhook_deliveries wd WHERE wd.job_id = j.id
+		  )`,
+		cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query webhook gaps: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WebhookGapJob
+	for rows.Next() {
+		var g WebhookGapJob
+		if err := rows.Scan(&g.ID, &g.Status); err != nil {
+			return nil, fmt.Errorf("scan webhook gap: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// RecordWebhookGapRecovered appends a job_events row documenting that the
+// reconciler detected and recovered a silently-dropped webhook enqueue
+// (RECON-04). Unlike every other write in this file, this does NOT go
+// through transition(): the job's status is NOT changing (it is already
+// done/failed and stays that way), so from_status == to_status == status,
+// and no row lock is needed — the correctness guard against a duplicate
+// delivery is the asynq.Unique lock the sweeper already checked before
+// calling this (enqueue-first, D-03), not a DB-level lock.
+func (r *Repo) RecordWebhookGapRecovered(ctx context.Context, id uuid.UUID, status string) error {
+	detail := map[string]any{"action": detailActionWebhookGapRecovered}
+	detailJSON, err := json.Marshal(detail)
+	if err != nil {
+		return fmt.Errorf("marshal webhook gap detail: %w", err)
+	}
+	if _, err := r.pool.Exec(ctx,
+		`INSERT INTO job_events (job_id, from_status, to_status, detail) VALUES ($1, $2, $2, $3)`,
+		id, status, detailJSON,
+	); err != nil {
+		return fmt.Errorf("record webhook gap recovery for job %s: %w", id, err)
+	}
+	return nil
 }
 
 // AddOutput inserts a job_outputs row.
