@@ -34,6 +34,8 @@ type jobStore interface {
 	RequeueStale(ctx context.Context, id uuid.UUID, reason string) error
 	MarkFailed(ctx context.Context, id uuid.UUID, code, message string, detail map[string]any) error
 	Get(ctx context.Context, id uuid.UUID) (*jobs.Job, error)
+	FindWebhookGaps(ctx context.Context, activeStaleAfter time.Duration) ([]jobs.WebhookGapJob, error)
+	RecordWebhookGapRecovered(ctx context.Context, id uuid.UUID, status string) error
 }
 
 // enqueuer is the subset of *queue.Client the sweeper depends on.
@@ -78,6 +80,17 @@ func (s *Sweeper) Run(ctx context.Context) {
 // effort — the next tick retries) so one bad job never stalls the sweep. No
 // logging is added here — visibility is limited to job_events (D-15); Phase
 // 4 owns OBS logging/metrics.
+//
+// sweep also runs a SECOND, independent scan (RECON-04, Phase 6) for
+// done/failed jobs whose completion webhook was silently never enqueued
+// (e.g. a Redis blip at the exact moment the worker tried to fire
+// EnqueueWebhookDeliver). This webhook-gap recovery is enqueue-first and
+// asynq.ErrDuplicateTask-guarded exactly like the queued/active loop above,
+// but it is a ONE-SHOT, self-terminating action: it uses
+// detailActionWebhookGapRecovered (not detailActionRecovery), so
+// RecoveryCount never counts it toward MaxRecoveries. There is nothing to
+// "exhaust" — once a webhook_deliveries row exists (delivered, undelivered,
+// or dead-lettered), FindWebhookGaps never matches that job again (D-05).
 func (s *Sweeper) sweep(ctx context.Context) {
 	stale, err := s.store.FindStale(ctx, s.cfg.QueuedStaleAfter, s.cfg.ActiveStaleAfter)
 	if err != nil {
@@ -181,5 +194,37 @@ func (s *Sweeper) sweep(ctx context.Context) {
 		// asynq.ErrDuplicateTask continue above, which is a backlogged
 		// no-op, not a recovery.
 		metrics.RecordReconcilerAction("recovered")
+	}
+
+	// Second scan (RECON-04): done/failed jobs with a callback_url and zero
+	// webhook_deliveries rows, past ActiveStaleAfter since finished_at
+	// (D-04, reusing the existing threshold rather than a new one).
+	// Best-effort on a finder error, same discipline as FindStale above.
+	gaps, err := s.store.FindWebhookGaps(ctx, s.cfg.ActiveStaleAfter)
+	if err != nil {
+		return
+	}
+
+	for _, g := range gaps {
+		// Enqueue-first: the asynq.Unique lock (Plan 01) is the actual
+		// duplicate-delivery guard. Only a successful, non-duplicate
+		// enqueue proves this is a genuine gap rather than a delivery
+		// already live/queued for this job.
+		if err := s.enq.EnqueueWebhookDeliver(ctx, g.ID); err != nil {
+			if errors.Is(err, asynq.ErrDuplicateTask) {
+				// A delivery is already live/queued for this job — not
+				// actually a gap, skip silently (same reasoning as the
+				// image-recovery loop's duplicate guard above).
+				continue
+			}
+			// Any other transient enqueue error: best-effort, retry next tick.
+			continue
+		}
+
+		// Only after a successful, non-duplicate enqueue: record the
+		// recovery event and the metric. This is uncapped/single-shot —
+		// RecordWebhookGapRecovered does not touch RecoveryCount/MaxRecoveries.
+		_ = s.store.RecordWebhookGapRecovered(ctx, g.ID, g.Status)
+		metrics.RecordReconcilerAction("webhook_gap_recovered")
 	}
 }
