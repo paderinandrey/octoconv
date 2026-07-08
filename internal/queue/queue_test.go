@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -153,6 +154,47 @@ func TestImageUniqueTTL(t *testing.T) {
 	}
 }
 
+// TestWebhookUniqueTTL asserts WebhookUniqueTTL derives its result from a
+// jitter-inflated worst-case backoff sum (NOT from calling the jittered
+// WebhookRetryDelay), evaluates to exactly 2477.5s for (6, 10s), and always
+// strictly exceeds the worst-case retry lifetime, is monotonic, and is
+// deterministic across repeated calls.
+func TestWebhookUniqueTTL(t *testing.T) {
+	maxRetry := 6
+	perAttemptTimeout := 10 * time.Second
+	// Jitter-inflated (x1.25) values computed directly from the raw
+	// webhookRetrySchedule (30s,1m,2m,4m,8m,15m) — NOT via WebhookRetryDelay,
+	// which would introduce non-determinism into this test.
+	backoffSum := 37500*time.Millisecond + 75*time.Second + 150*time.Second + 300*time.Second + 600*time.Second + 1125*time.Second
+
+	want := time.Duration(maxRetry+1)*perAttemptTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := WebhookUniqueTTL(maxRetry, perAttemptTimeout)
+	if got != want {
+		t.Errorf("WebhookUniqueTTL(%d, %v) = %v, want %v", maxRetry, perAttemptTimeout, got, want)
+	}
+	if want != 2477500*time.Millisecond {
+		t.Errorf("expected worked example want = 2477.5s, got %v", want)
+	}
+
+	worstCaseRetryLifetime := time.Duration(maxRetry+1)*perAttemptTimeout + backoffSum
+	if got <= worstCaseRetryLifetime {
+		t.Errorf("WebhookUniqueTTL(%d, %v) = %v, want strictly greater than worst-case retry lifetime %v", maxRetry, perAttemptTimeout, got, worstCaseRetryLifetime)
+	}
+
+	// Monotonicity: raising either argument must never shrink the TTL.
+	if WebhookUniqueTTL(maxRetry+1, perAttemptTimeout) <= WebhookUniqueTTL(maxRetry, perAttemptTimeout) {
+		t.Errorf("WebhookUniqueTTL must grow monotonically with maxRetry")
+	}
+	if WebhookUniqueTTL(maxRetry, perAttemptTimeout+time.Second) <= WebhookUniqueTTL(maxRetry, perAttemptTimeout) {
+		t.Errorf("WebhookUniqueTTL must grow monotonically with perAttemptTimeout")
+	}
+
+	// Determinism: no jittered call leaked into the derivation.
+	if got2 := WebhookUniqueTTL(maxRetry, perAttemptTimeout); got2 != got {
+		t.Errorf("WebhookUniqueTTL is not deterministic: %v != %v", got2, got)
+	}
+}
+
 // TestEnqueueImageConvert enqueues a task and confirms it lands in the image
 // queue. Requires a live Redis (REDIS_ADDR); skipped otherwise.
 func TestEnqueueImageConvert(t *testing.T) {
@@ -194,5 +236,47 @@ func TestEnqueueImageConvert(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("enqueued task for job %s not found in queue %q", id, QueueImage)
+	}
+}
+
+// TestEnqueueWebhookDeliverDuplicate asserts that a second
+// EnqueueWebhookDeliver for the same job id, while the first task/lock is
+// still live, returns asynq.ErrDuplicateTask instead of creating a second
+// concurrent webhook task (D-01). Requires a live Redis (REDIS_ADDR);
+// skipped otherwise.
+func TestEnqueueWebhookDeliverDuplicate(t *testing.T) {
+	if os.Getenv("REDIS_ADDR") == "" {
+		t.Skip("REDIS_ADDR not set; skipping integration test")
+	}
+
+	cl, err := NewClient()
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer cl.Close()
+
+	id := uuid.New()
+	if err := cl.EnqueueWebhookDeliver(context.Background(), id); err != nil {
+		t.Fatalf("first EnqueueWebhookDeliver: %v", err)
+	}
+	err = cl.EnqueueWebhookDeliver(context.Background(), id)
+	if !errors.Is(err, asynq.ErrDuplicateTask) {
+		t.Fatalf("second EnqueueWebhookDeliver = %v, want asynq.ErrDuplicateTask", err)
+	}
+
+	opt, _ := RedisOpt()
+	insp := asynq.NewInspector(opt)
+	defer insp.Close()
+
+	infos, err := insp.ListPendingTasks(QueueWebhook)
+	if err != nil {
+		t.Fatalf("ListPendingTasks: %v", err)
+	}
+	for _, ti := range infos {
+		p, perr := ParseWebhookPayload(ti.Payload)
+		if perr == nil && p.JobID == id {
+			_ = insp.DeleteTask(QueueWebhook, ti.ID)
+			break
+		}
 	}
 }

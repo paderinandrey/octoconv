@@ -24,6 +24,13 @@ type Client struct {
 	// and ENGINE_TIMEOUT via ImageUniqueTTL — see its doc comment for the
 	// worst-case-lifetime derivation this TTL must always exceed.
 	imageUniqueTTL time.Duration
+	// webhookUniqueTTL is the per-job asynq.Unique lock TTL for webhook
+	// delivery tasks, derived once at construction from the fixed
+	// webhookMaxRetry/webhookPerAttemptTimeout constants via
+	// WebhookUniqueTTL — see its doc comment for the worst-case-lifetime
+	// derivation this TTL must always exceed. Unlike imageUniqueTTL, its
+	// inputs are not env-configurable (D-05/Phase 2 fixed them).
+	webhookUniqueTTL time.Duration
 }
 
 // NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
@@ -37,9 +44,10 @@ func NewClient() (*Client, error) {
 	imageMaxRetry := envInt("IMAGE_MAX_RETRY", 4)
 	engineTimeout := envDuration("ENGINE_TIMEOUT", 120*time.Second)
 	return &Client{
-		c:              asynq.NewClient(opt),
-		imageMaxRetry:  imageMaxRetry,
-		imageUniqueTTL: ImageUniqueTTL(imageMaxRetry, engineTimeout),
+		c:                asynq.NewClient(opt),
+		imageMaxRetry:    imageMaxRetry,
+		imageUniqueTTL:   ImageUniqueTTL(imageMaxRetry, engineTimeout),
+		webhookUniqueTTL: WebhookUniqueTTL(webhookMaxRetry, webhookPerAttemptTimeout),
 	}, nil
 }
 
@@ -60,7 +68,7 @@ func (c *Client) EnqueueImageConvert(ctx context.Context, jobID uuid.UUID) error
 
 // EnqueueWebhookDeliver puts a webhook delivery task onto the webhook queue.
 func (c *Client) EnqueueWebhookDeliver(ctx context.Context, jobID uuid.UUID) error {
-	task, err := NewWebhookDeliverTask(jobID)
+	task, err := NewWebhookDeliverTask(jobID, c.webhookUniqueTTL)
 	if err != nil {
 		return err
 	}
