@@ -2,21 +2,11 @@
 
 ## What This Is
 
-OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. Сквозной вертикальный срез — конвертация изображений через libvips — на `main` и полностью production-hardened (v1.0, milestone shipped 2026-07-08): обязательная API-key аутентификация (salted-hash ключи, ротация без даунтайма), rate limiting (per-client + pre-auth IP-guard), push-доставка результата через подписанные HMAC-SHA256 webhook'и (bounded retry + backoff, dead-letter), корректный transient/terminal retry в воркере, автоматический reconciler для зависших задач, валидация содержимого файла по magic bytes, автоматическое удаление старых файлов из S3/MinIO по TTL, и полная наблюдаемость (Prometheus-метрики, реальный health-check, asynqmon-дашборд).
+OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. Сквозной вертикальный срез — конвертация изображений через libvips — на `main`, полностью production-hardened (v1.0) и с закрытым по итогам аудита tech debt (v1.1, оба milestone shipped 2026-07-08): обязательная API-key аутентификация с ротацией, rate limiting, HMAC-подписанная webhook-доставка с гибким SSRF-контролем для внутренних сетей, корректный transient/terminal retry, reconciler с восстановлением как зависших задач, так и потерянных webhook-доставок (подтверждено реальным wall-clock тестом), валидация содержимого файла по magic bytes и заявленным размерам (защита от decompression bomb), автоматическое удаление старых файлов по TTL, и полная наблюдаемость (Prometheus-метрики, реальный health-check, asynqmon-дашборд).
 
 ## Core Value
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
-
-## Current Milestone: v1.1 Tech Debt Cleanup
-
-**Goal:** Close the tech debt surfaced by the v1.0 milestone audit — no new capabilities, purely hardening the hardening.
-
-**Target features:**
-- SSRF `callback_url` validation gets an explicit opt-out (`WEBHOOK_ALLOW_PRIVATE_IPS`) so internal-network deployments on private IPs can actually receive webhooks
-- Reconciler sweep extended to catch `done`/`failed` jobs with a non-empty `callback_url` and no `webhook_deliveries` row (closes the Redis-blip webhook-loss race)
-- Decompression-bomb protection: reject uploads whose declared image dimensions exceed a configured limit, as part of content validation
-- Reconciler staleness soak test: real wall-clock validation of the `queued`/`active` staleness recovery paths, not just integration tests against a live DB
 
 ## Requirements
 
@@ -39,15 +29,16 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Валидация содержимого файла по magic bytes (жёсткий список сигнатур под 5 зарегистрированных форматов) отклоняет несовпадения с 422 до записи в S3 — Phase 4 (5/5 must-haves, live e2e verified)
 - ✓ MinIO ILM lifecycle-правило автоматически удаляет `uploads/`/`results/` по TTL (7 дней по умолчанию), без ручной очистки — Phase 4
 - ✓ Prometheus-метрики (исходы задач, длительность, webhook-доставки, reconciler-действия, глубина очереди) на отдельном localhost-only `/metrics`; реальный `/healthz` (пинг Postgres/Redis/S3, 503 при деградации); asynqmon-дашборд для визуальной инспекции очереди — Phase 4
+- ✓ SSRF-валидация `callback_url` снимает блокировку RFC1918 приватных адресов через явный флаг `WEBHOOK_ALLOW_PRIVATE_IPS`; loopback/link-local/metadata-endpoint остаются заблокированы всегда — Phase 5 (4/4 success criteria, live e2e verified)
+- ✓ Reconciler дополнительно находит `done`/`failed` задачи с потерянным webhook enqueue (нет строк в `webhook_deliveries`) и инициирует ровно одну повторную доставку, защищено `asynq.Unique`-локом на webhook-очереди — Phase 6 (RECON-04, live e2e verified)
+- ✓ Восстановление зависших `queued`/`active` задач подтверждено автоматическим soak-тестом на реальном прошедшем времени (не mock-часах) — Phase 6 (RECON-05)
+- ✓ Защита от decompression bomb: zero-dependency парсеры заявленных размеров изображения для всех 5 форматов (png/jpg/webp/heic/tiff), настраиваемый лимит `MAX_IMAGE_PIXELS` (100МП по умолчанию) — Phase 7 (VALID-03, live e2e verified)
 
 ### Active
 
-<!-- Milestone v1.1 Tech Debt Cleanup — все 4 пункта происходят из v1.0-MILESTONE-AUDIT.md. Чисто закрывающий релиз, без новых возможностей. -->
+<!-- Milestone v1.1 (Tech Debt Cleanup) shipped 2026-07-08 — все требования этапа закрыты, tech debt из v1.0-аудита полностью погашен. Следующий milestone ещё не определён; запустить /gsd:new-milestone. -->
 
-- [ ] SSRF-валидация `callback_url` получает явный флаг отключения (`WEBHOOK_ALLOW_PRIVATE_IPS`) для деплоев на внутренних приватных сетях
-- [ ] Reconciler: sweep для `done`/`failed` задач с непустым `callback_url` и отсутствующей записью в `webhook_deliveries` — закрывает гонку потери вебхука при сбое Redis
-- [ ] Защита от decompression bomb — лимит заявленных размеров изображения при валидации содержимого
-- [ ] Соак-тест reconciler'а на реальных wall-clock staleness-сценариях
+(нет активных пунктов — оба milestone закрыты без переносов)
 
 ### Out of Scope
 
@@ -64,10 +55,11 @@ OctoConv — внутренний асинхронный сервис конве
 - Рядом существовавший каталог `octo-conv` (Rust-прототип) не используется — разошёлся со спекой; текущая реализация на Go написана с нуля.
 - Клиенты сервиса — внутренние сервисы компании, не внешние потребители. Это снижает требования к публичной документации/биллингу, но не снимает требований к auth и rate limiting.
 - **Milestone v1.0 (Hardening MVP) shipped 2026-07-08.** 4 фазы, 15 планов, ~38 задач, ~6100 строк Go, 9 дней. Полный отчёт: `.planning/milestones/v1.0-ROADMAP.md`, `.planning/milestones/v1.0-REQUIREMENTS.md`, `.planning/milestones/v1.0-MILESTONE-AUDIT.md`.
+- **Milestone v1.1 (Tech Debt Cleanup) shipped 2026-07-08** (тот же день — короткий закрывающий milestone). 3 фазы, 7 планов, 13 задач, 2 дня разработки. Закрыл все 5 tech-debt пунктов из v1.0-аудита без единого переноса. Полный отчёт: `.planning/milestones/v1.1-ROADMAP.md`, `.planning/milestones/v1.1-REQUIREMENTS.md`, `.planning/milestones/v1.1-MILESTONE-AUDIT.md`.
 - Изначальные технические долги из `.planning/codebase/CONCERNS.md` (single-attempt processing, отсутствие таймаута вне конвертации, статичный `/healthz`, отсутствие content-валидации) — все закрыты в рамках Phase 3/4.
-- Схема БД полностью используется: `clients` (auth, Phase 1), `callback_url`/`webhook_deliveries` (Phase 2); `presets` остаются неиспользуемыми — вне скопа v1.0.
-- Milestone-аудит (`v1.0-MILESTONE-AUDIT.md`) прошёл без блокеров (24/24 требования, 14/14 точек интеграции, живой E2E-сценарий подтверждён), но зафиксировал 5 некритичных tech-debt пунктов — три перенесены в Active выше как кандидаты для следующего milestone, остальные два — soak-тест reconciler'а (Phase 3) и разовая ревизия `docker-compose.yml` на скрытые расхождения с `.env.example` (обнаружен и исправлен один реальный: отсутствовал `WEBHOOK_SIGNING_SECRET` у воркера с момента Phase 2, коммит `36b559b`).
-- Code review при исполнении Phase 2 нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
+- Схема БД полностью используется: `clients` (auth, Phase 1), `callback_url`/`webhook_deliveries` (Phase 2); `presets` остаются неиспользуемыми — вне скопа обоих milestone.
+- v1.1-аудит (`v1.1-MILESTONE-AUDIT.md`) прошёл без блокеров и без tech debt (4/4 требования, 5/5 точек интеграции, живые smoke-тесты всех новых механизмов по отдельности и в комбинации против пересобранного docker-стека) — впервые за проект milestone закрылся с нулевым переносом.
+- Code review при исполнении Phase 2 (v1.0) нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
 
 ## Constraints
 
@@ -87,7 +79,9 @@ OctoConv — внутренний асинхронный сервис конве
 | Content validation, storage TTL и observability объединены в одну закрывающую фазу | Все три независимы друг от друга и от auth/webhook/reconciler критического пути | ✓ Good — Phase 4 закрыта одним блоком, 5 планов в 3 волнах |
 | Detected-формат (не расширение) — источник истины для pair-check в Phase 4 | Расширение может лгать; magic bytes — единственный проверяемый факт о содержимом | ✓ Good — reorder подтверждён живым 422 на несовпадении |
 | `/metrics` на отдельном localhost-only порту, а не на публичном `API_ADDR` | Операционные данные (глубина очереди, исходы задач) не должны быть доступны любому клиенту с сетевым доступом к API | ✓ Good — подтверждено: порт не публикуется на хост вообще |
-| SSRF-валидация `callback_url` блокирует весь RFC1918/loopback без исключений | Принято в Phase 2 как безопасный дефолт | ⚠️ Revisit — milestone-аудит отметил риск: при реальном деплое на приватных IP компании это может сделать вебхуки недоставляемыми; см. Active |
+| SSRF-валидация `callback_url` блокирует весь RFC1918/loopback без исключений | Принято в Phase 2 как безопасный дефолт | ✓ Good — Phase 5 добавила узкий opt-out только для RFC1918 (`WEBHOOK_ALLOW_PRIVATE_IPS`); loopback/link-local/metadata-endpoint остаются заблокированы всегда |
+| Reconciler webhook-gap sweep: `asynq.Unique` на webhook-очереди с TTL, деривированным из реального retry-бюджета (зеркалит `ImageUniqueTTL`) | Защита от двойной доставки при гонке sweep-тиков; TTL должен учитывать jitter `WebhookRetryDelay`, иначе получится average-case, а не worst-case | ✓ Good — Phase 6, TTL=2477.5с подтверждён тестами, live-verified без дублей |
+| Decompression-bomb защита: свои zero-dependency парсеры размеров вместо golang.org/x/image или shell-out в vipsheader | Согласуется с философией zero-new-deps из Phase 4; избегает нового process-exec surface в API | ✓ Good — Phase 7, все 5 форматов (включая HEIC) защищены одинаково, 0 новых зависимостей |
 | CAD и остальные классы движков — вне скопа этого этапа | Открытый вопрос по CAD SDK не решён; остальные движки — следующий этап роста, не текущий hardening | — Pending |
 | Контракт ядра (Handler/Capability/Input/Output) отложен | Рефакторинг делать при добавлении новых движков, а не сейчас — иначе придётся переделывать дважды | — Pending |
 
@@ -109,4 +103,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-08 after starting v1.1 (Tech Debt Cleanup) milestone*
+*Last updated: 2026-07-08 after v1.1 (Tech Debt Cleanup) milestone complete*
