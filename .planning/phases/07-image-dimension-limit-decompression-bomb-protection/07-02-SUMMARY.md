@@ -108,3 +108,7 @@ None - no external service configuration required. Operators who want a non-defa
 ---
 *Phase: 07-image-dimension-limit-decompression-bomb-protection*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All created/modified files verified present; all task commit hashes (2f861e5, b844eb8, b204d0b) verified present in git log.
