@@ -101,3 +101,7 @@ WEBHOOK-06 is fully addressed: default posture is unchanged (SC1), the opt-in wo
 ---
 *Phase: 05-webhook-ssrf-private-ip-opt-out*
 *Completed: 2026-07-08*
+
+## Self-Check: PASSED
+
+All created/modified files verified present on disk; all commit hashes (e4047f5, 7bfe27d, fef7193, 3301396) verified present in git log.
