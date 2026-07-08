@@ -362,3 +362,269 @@ SELECT webhook_deliveries WHERE status='pending' AND updated_at < now()-threshol
 ---
 *Architecture research for: production-hardening an internal async file-conversion service (Go)*
 *Researched: 2026-07-02*
+
+---
+
+# Architecture Research — Addendum: v1.2 Document Engine Class (LibreOffice)
+
+**Domain:** Adding a `document` engine class (LibreOffice, `soffice --headless`) to OctoConv's existing `Converter`/`Registry` conversion pipeline
+**Researched:** 2026-07-09
+**Confidence:** HIGH (integration points — grounded directly in current repo code) / MEDIUM (LibreOffice-specific operational behavior — WebSearch-verified against multiple independent community/bug-tracker sources, no official LibreOffice docs consulted directly) / LOW (exact Docker image size delta — directionally consistent across sources but no hard number verified)
+
+This addendum answers the document-engine-class integration questions for the v1.2 milestone, on top of the system documented above (v1.0/v1.1 hardening) and the ground-truth code in `internal/convert/`, `internal/queue/`, `internal/worker/`, `cmd/worker/main.go`, and `internal/api/handlers.go`. The locked decision (`.planning/PROJECT.md`) is to extend the existing `Converter`/`Registry` abstraction — **not** introduce a Handler/Capability/Input/Output contract, and **not** a new binary.
+
+## Standard Architecture
+
+### System Overview (delta)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ API (cmd/api) — internal/api/handlers.go: handleCreateJob            │
+│  Sniff → [detected==source?] → Supports(pair)? → dimension-check     │
+│  (image-only, MUST become conditional) → callback_url → S3 upload →  │
+│  jobs.Create (Postgres, status=queued) → queue.EnqueueImageConvert   │
+│  or a NEW queue.EnqueueDocumentConvert (routed by resolved engine)    │
+└───────────────────────────────┬────────────────────────────────────┘
+                                 │ asynq (Redis) — engine-class queues
+                 ┌───────────────┴────────────────┐
+                 │                                 │
+        queue "image"  (existing)         queue "document"  (NEW)
+        TypeImageConvert                   TypeDocumentConvert (NEW)
+                 │                                 │
+                 └───────────────┬────────────────┘
+                                 │ SAME asynq.Server, SAME cmd/worker binary
+┌──────────────────────────────────────────────────────────────────────┐
+│ Worker (cmd/worker) — internal/worker/worker.go: Handler               │
+│  HandleImageConvert(ctx,t)    ── timeout=ENGINE_TIMEOUT                │
+│  HandleDocumentConvert(ctx,t) (NEW) ── timeout=DOCUMENT_ENGINE_TIMEOUT │
+│  both call a shared process(ctx, job, timeout) [signature widened]    │
+└───────────────────────────────┬────────────────────────────────────┘
+                                 │
+┌──────────────────────────────────────────────────────────────────────┐
+│ internal/convert — Converter interface + Registry (convert.go)        │
+│  convert.Default.Register(LibvipsConverter{})        [existing]       │
+│  convert.Default.Register(LibreOfficeConverter{})    [NEW, converters.go] │
+│  LibreOfficeConverter.Convert() shells out via runCommand (exec.go,   │
+│  UNCHANGED) to `soffice --headless --convert-to pdf`                  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Responsibilities
+
+| Component | Responsibility | File (existing / NEW) |
+|-----------|----------------|------------------------|
+| `LibreOfficeConverter` | Implements `Converter` for `{docx,xlsx,pptx,odt,ods,odp} → pdf`; shells out to `soffice --headless`; owns per-job profile isolation and soffice's "exit 0 but no output" quirk | **NEW** `internal/convert/libreoffice.go` |
+| Registry wiring | One-line registration of the new converter | **MODIFY** `internal/convert/converters.go` (`init()`) |
+| ZIP-container format sniffing | Disambiguate OOXML (docx/xlsx/pptx) vs ODF (odt/ods/odp) vs a bare `.zip` — all share `PK\x03\x04` | **NEW** logic inside/alongside `internal/convert/sniff.go` |
+| Dimension-check scoping | Skip decompression-bomb pixel-dimension check for non-image formats | **MODIFY** `internal/convert/dimensions.go` (add a predicate) + `internal/api/handlers.go` (guard the call) |
+| Document queue routing | `TypeDocumentConvert`/`QueueDocument` constants, `NewDocumentConvertTask`, retry schedule | **MODIFY** `internal/queue/queue.go` |
+| Document producer | `EnqueueDocumentConvert` on the queue client | **MODIFY** `internal/queue/client.go` |
+| Document task handler | `HandleDocumentConvert` bound to `TypeDocumentConvert`, using `DOCUMENT_ENGINE_TIMEOUT` | **MODIFY** `internal/worker/worker.go` |
+| Worker wiring | Register second queue + second timeout, add `document` to `asynq.Config.Queues` | **MODIFY** `cmd/worker/main.go` |
+| API request path | Route enqueue call by resolved engine class; conditionally skip dimension check | **MODIFY** `internal/api/handlers.go` |
+| Docker image | Add LibreOffice headless components alongside `libvips-tools` | **MODIFY** `Dockerfile.worker` |
+
+## Recommended Project Structure (delta only — no new top-level packages)
+
+```
+internal/convert/
+├── convert.go          # UNCHANGED — Converter interface, Registry, NormalizeFormat
+├── converters.go        # MODIFY — register LibreOfficeConverter{} in init()
+├── libvips.go           # UNCHANGED
+├── libreoffice.go        # NEW — LibreOfficeConverter (Pairs, Convert)
+├── exec.go              # UNCHANGED — runCommand already generic (Setpgid+SIGKILL);
+│                        #   its own doc comment already anticipates soffice.bin by name
+├── sniff.go             # MODIFY — extend signature table / add zip-container disambiguation
+├── dimensions.go        # MODIFY — add HasDimensionLimit(format) predicate; dimensionParsers stays image-only
+internal/queue/
+├── queue.go             # MODIFY — TypeDocumentConvert, QueueDocument, NewDocumentConvertTask,
+│                        #          documentRetrySchedule, DocumentRetryDelay, DocumentUniqueTTL
+├── client.go            # MODIFY — EnqueueDocumentConvert, documentMaxRetry, documentUniqueTTL fields
+internal/worker/
+├── worker.go            # MODIFY — Handler gains documentEngineTimeout field + HandleDocumentConvert;
+│                        #          process() signature widened to accept an explicit timeout;
+│                        #          isTerminal() gains LibreOffice-specific signature matching
+cmd/worker/main.go        # MODIFY — wire DOCUMENT_ENGINE_TIMEOUT, register HandleDocumentConvert,
+│                        #          add QueueDocument to asynq.Config.Queues
+internal/api/handlers.go  # MODIFY — route enqueue by engine class; guard dimension-check by format
+Dockerfile.worker         # MODIFY — add libreoffice-{writer,calc,impress} + fonts
+```
+
+### Structure Rationale
+
+No new packages. Every addition is either a new file inside an existing package (`libreoffice.go` next to `libvips.go`, mirroring the file-per-engine convention already documented for `internal/convert`) or a targeted extension of an existing file that already has a per-format dispatch table (`sniff.go`'s `signatures` slice, `dimensions.go`'s `dimensionParsers` map, `queue.go`'s per-queue retry-schedule constants). This matches the locked decision: extend `Converter`/`Registry`, do not introduce a new abstraction layer.
+
+## Architectural Patterns
+
+### Pattern 1: Two-stage ZIP-container disambiguation (NEW — required for docx/xlsx/pptx/odt/ods/odp)
+
+**What:** `docx`, `xlsx`, `pptx`, `odt`, `ods`, `odp`, and a bare `.zip` all share the identical 4-byte ZIP local-file-header magic (`PK\x03\x04`). The existing `sniff.go` signature table (`matchPNG`, `matchJPEG`, etc.) matches on a fixed 12-byte prefix and cannot disambiguate these — a naive "add PK\x03\x04 as a signature" would misclassify every OOXML/ODF/zip file as the same format.
+
+Real-world tools (`file`/libmagic; confirmed via research) resolve this by reading past the ZIP magic into the **first local-file-entry's filename and, for OOXML, its (typically deflate-compressed) content**:
+- **ODF (odt/ods/odp):** the ODF spec *mandates* the first ZIP entry be named `mimetype`, **stored uncompressed** (compression method `0`), whose raw payload is the literal string `application/vnd.oasis.opendocument.text` (odt) / `...spreadsheet` (ods) / `...presentation` (odp). This is a cheap, bounded-prefix check with no decompression needed — parse the local-file-header fields (compression method at header offset 8-9, filename length at offset 26-27), confirm filename == `"mimetype"` and method == `0`, then string-compare the immediately-following uncompressed bytes.
+- **OOXML (docx/xlsx/pptx):** producers (Microsoft Office, LibreOffice, OpenXML SDK) conventionally emit `[Content_Types].xml` as the **first** ZIP entry (not spec-mandated, but a de facto universal convention libmagic itself relies on). Its content is usually deflate-compressed (method `8`); disambiguating docx/xlsx/pptx requires **inflating that first entry** (Go stdlib `compress/flate`, zero new dependency — consistent with the codebase's existing zero-new-deps discipline already established in `dimensions.go`) and substring-matching on `wordprocessingml.document` (docx) / `spreadsheetml.sheet` (xlsx) / `presentationml.presentation` (pptx).
+- **Generic `.zip`:** first entry is neither `mimetype` (stored) nor `[Content_Types].xml` with a matching content-type string → falls through to "unrecognized" (existing D-02 422 path), exactly like today's unmatched-signature case.
+
+**When to use:** Any container format whose outer magic bytes are ambiguous (this is the *only* ambiguous case in the current/planned format set — none of the 5 existing image signatures overlap).
+
+**Trade-offs:** This is meaningfully more code than any existing entry in `sniff.go` (which are all pure byte-compares) — it is closer in shape to `dimensions.go`'s hand-rolled parsers (bounded window, fail-closed, own const for peek size) than to `sniff.go`'s current one-liners. Recommend a **new bounded peek constant** (e.g., `zipEntryPeekLen`, sized generously — several KB, since `[Content_Types].xml` uncompressed is typically 1-5 KB but can grow with many part overrides in large workbooks) separate from `sniffLen=12`, with the existing fail-closed philosophy: unrecognized content within the bounded window → reject, never fall back to trusting the extension.
+
+### Pattern 2: Per-job LibreOffice profile isolation reuses the existing per-job workDir (NEW, but zero interface change)
+
+**What:** LibreOffice headless (`soffice --headless`) is **not safe for concurrent invocations sharing the same user profile** — a second `soffice` process finds the first's `.lock` file and either attaches to the running instance or fails outright (confirmed via multiple independent sources: LibreOffice bug tracker, Gotenberg's own architecture notes, community writeups). The fix used everywhere in practice is `-env:UserInstallation=file:///<unique-dir>` per invocation, giving each conversion its own isolated profile.
+
+Conveniently, `internal/worker/worker.go`'s `process()` **already** creates a fresh per-job temp directory (`workDir, err := os.MkdirTemp("", "octoconv-"+job.ID.String()+"-")`, `worker.go:270`) that both `inPath` and `outPath` live inside and that is `os.RemoveAll`'d on completion. `LibreOfficeConverter.Convert(ctx, inPath, outPath, opts)` can derive its `-env:UserInstallation` target from `filepath.Dir(outPath)` (i.e., the same per-job workDir) with **zero change to the `Converter` interface signature** — the isolation falls out of infrastructure that already exists for an unrelated reason (temp-file cleanup).
+
+**When to use:** Any converter engine that maintains process-local mutable state across invocations (LibreOffice's UNO profile). Not needed for libvips, which is a pure single-shot CLI invocation with no shared state.
+
+**Trade-offs:** This means the `document` asynq queue *can* safely run with concurrency > 1 in `cmd/worker/main.go`'s `asynq.Config.Queues` map (unlike the naive "must serialize to concurrency=1" answer commonly suggested for LibreOffice) — **because** profile isolation is per-job, not global. This is a meaningfully better outcome than the common "single LibreOffice instance behind a queue" pattern used by tools like Gotenberg (which serialize because they share one long-lived soffice instance across requests) — OctoConv's per-job short-lived `soffice --headless --convert-to` invocation model sidesteps that entirely, at the cost of LibreOffice's slower per-invocation startup (see Pattern 3/Scaling section below). As a secondary, free benefit: the worker container runs `USER nobody` (`Dockerfile.worker:16`), which typically has no writable `$HOME`; LibreOffice's default profile location is `$HOME/.config/libreoffice`, so explicitly passing `-env:UserInstallation` avoids relying on a writable home directory at all.
+
+### Pattern 3: soffice's unreliable exit code — the Converter, not worker.go, must validate success
+
+**What:** Unlike `vips` (whose behavior the codebase's own comment in `worker.go` confirms as "exit code is 1 for EVERY failure mode"), LibreOffice's `--convert-to` is documented (LibreOffice bug tracker, multiple confirmed reports across versions) to **return exit code 0 even when conversion fails** (e.g., "Error: source file could not be loaded" on stderr, no PDF produced) — so `runCommand`'s existing "non-zero exit or ctx timeout = error" contract (`exec.go`, unchanged) is **not sufficient** on its own for this engine.
+
+**When to use:** `LibreOfficeConverter.Convert()` must, after `runCommand` returns nil, explicitly verify the expected output file exists in the outdir with non-zero size (recalling: `soffice --outdir <dir> --convert-to pdf <inPath>` writes `<inPath-basename>.pdf`, **not** the caller's arbitrary `outPath` — see Pattern 4) and return its own synthetic error (e.g., `fmt.Errorf("libreoffice: no output produced (source file could not be loaded)")`) when it does not. This keeps the "translate engine quirks into a Go error" responsibility inside the concrete `Converter` implementation, matching the existing pattern where `LibvipsConverter.Convert` wraps vips-specific behavior (`fmt.Errorf("libvips: %w", err)`) rather than leaking engine internals into `worker.go`.
+
+**Trade-offs:** `internal/worker/worker.go`'s `isTerminal(err)` function (`worker.go:41`) currently has a hardcoded `terminalVipsSignatures` slice scanned against `err.Error()`. This needs an equivalent `terminalLibreOfficeSignatures` slice (e.g., `"source file could not be loaded"`, `"no export filter"`) — either as a second slice checked alongside the first, or (simpler, since these substrings are engine-specific and won't collide) appended into the same scan. Recommend keeping `isTerminal` engine-agnostic (scan both slices unconditionally) rather than branching on `job.Engine`, to avoid adding a new parameter to a function three call sites already share.
+
+### Pattern 4: soffice's `--outdir` + basename-derived filename requires a rename step
+
+**What:** `soffice --headless --convert-to pdf --outdir <dir> <inPath>` names its output `<basename(inPath) without ext>.pdf` inside `<dir>` — it has **no flag to specify an arbitrary output filename**. But `worker.go:process()` already constructs a specific `outPath := filepath.Join(workDir, "out."+job.TargetFormat)` (`worker.go:278`) and passes that exact path to `Convert(ctx, inPath, outPath, opts)`.
+
+**When to use:** `LibreOfficeConverter.Convert` must run `soffice --headless --convert-to pdf --outdir <dir> <inPath>` with `dir := filepath.Dir(outPath)` (already the per-job `workDir`), then `os.Rename(filepath.Join(dir, stripExt(filepath.Base(inPath))+".pdf"), outPath)` before returning success. Purely internal to `libreoffice.go` — no change needed to `worker.go`'s call site or the `Converter` interface.
+
+## Data Flow
+
+### Request Flow (delta from existing `handleCreateJob`)
+
+```
+multipart upload
+    ↓
+convert.Sniff(file)                         [UNCHANGED signature, EXTENDED signature table/logic
+    ↓                                         for zip-container disambiguation, Pattern 1]
+detected == declared extension?  (422 if not)
+    ↓
+convert.Default.Supports(detected, target)   [UNCHANGED — Registry.Lookup already engine-agnostic;
+    ↓                                          LibreOfficeConverter.Pairs() registers docx→pdf etc.]
+convert.HasDimensionLimit(detected)?          [NEW predicate]
+    ├─ true  (image format) → convert.Dimensions(...) as today
+    └─ false (document format, or any future non-raster format) → SKIP, rest unchanged
+    ↓
+callback_url validation (UNCHANGED)
+    ↓
+S3 upload, jobs.Create (UNCHANGED — job.Engine already a column; set to "document" for these pairs)
+    ↓
+route enqueue by engine class:
+    job.Engine == "image"    → queue.EnqueueImageConvert    [existing]
+    job.Engine == "document" → queue.EnqueueDocumentConvert [NEW]
+```
+
+### Worker Flow (delta from existing `HandleImageConvert`)
+
+```
+asynq dispatches by task Type (ServeMux routing, UNCHANGED mechanism):
+    TypeImageConvert    → Handler.HandleImageConvert    (existing, timeout=ENGINE_TIMEOUT)
+    TypeDocumentConvert → Handler.HandleDocumentConvert  (NEW,      timeout=DOCUMENT_ENGINE_TIMEOUT)
+                              ↓ both call:
+                          Handler.process(ctx, job, timeout)   [signature WIDENED — was
+                              ↓                                  single engineTimout field before]
+                          context.WithTimeout(ctx, timeout)     [same whole-attempt-timeout pattern,
+                              ↓                                  parameterized instead of hardcoded]
+                          registry.Lookup(job.SourceFormat, job.TargetFormat)
+                              ↓ resolves to LibreOfficeConverter for docx/xlsx/pptx/odt/ods/odp → pdf
+                          download → conv.Convert(ctx, inPath, outPath, nil) → upload → MarkDone
+```
+
+### Key Data Flows
+
+1. **Engine-class routing is entirely queue/task-type driven, not registry-driven.** The `Converter` `Registry` only ever answers "can this (from,to) pair convert, and with what converter" — it has no concept of queues, timeouts, or task types. Those live in `internal/queue` (task type/queue name constants) and `internal/worker` (which `Handle*` method runs, with what timeout). This separation is why adding a converter to the registry (`converters.go`) and adding a new queue/task type/handler (`queue.go`/`worker.go`/`cmd/worker/main.go`) are independent changes that can be built and tested in either order — the registry doesn't need to know queues exist, and the queue/handler layer only needs the registry to already contain a matching `Pair`.
+2. **`job.Engine` is already a persisted column** (used today as the literal `"image"` constant, `internal/api/handlers.go:26` `engineImage`), so `handleCreateJob` already has the data it needs to decide `image` vs `document` enqueue routing — no schema change required. The natural implementation is a small lookup (e.g., a `convert` package helper mapping normalized target format → engine-class string, or a type switch on the `Converter` value returned by `Registry.Lookup`) rather than hardcoding a format list inside `internal/api`.
+
+## Anti-Patterns
+
+### Anti-Pattern 1: Adding `PK\x03\x04` as a plain `sniff.go` signature entry
+
+**What people do:** Naively extend the `signatures` slice with `{"docx", matchZIP}` using the same 12-byte-prefix-match shape as `matchPNG`/`matchWebP`.
+**Why it's wrong:** `PK\x03\x04` is shared by docx/xlsx/pptx/odt/ods/odp/plain-zip/epub/jar/apk — a plain-magic match cannot distinguish them, and `Sniff`'s existing "first match wins" iteration order would silently misclassify five of the six new formats as whichever is listed first.
+**Do this instead:** Implement the two-stage container-inspection logic from Pattern 1 (read past the ZIP local-file-header into the first entry's name/content) as its own function, called only when the outer bytes match `PK\x03\x04`.
+
+### Anti-Pattern 2: Sharing one long-lived `soffice` instance across worker goroutines (the "Gotenberg model")
+
+**What people do:** Start one `soffice --headless` process in "listening/server" mode at worker startup and pipe conversion requests to it, to amortize the multi-second LibreOffice startup cost.
+**Why it's wrong:** Requires serializing all document conversions to concurrency 1 (LibreOffice's own lock mechanism forbids concurrent operations against one profile/instance), adds a long-lived stateful process to manage (restart-on-crash, health-check, zombie `soffice.bin` cleanup) that doesn't fit the codebase's existing "hardened one-shot `os/exec` invocation" model (`exec.go`), and is explicitly a maintenance burden even in tools built around exactly that model (Gotenberg's own issue tracker documents queue-limiting problems from this design).
+**Do this instead:** Pattern 2 — one-shot `soffice --headless --convert-to` per job with a job-scoped `-env:UserInstallation`, reusing `runCommand`'s existing hardened process-group-kill-on-timeout behavior (`exec.go`, unchanged) exactly as `LibvipsConverter` does today. This trades a few hundred ms–seconds of LibreOffice startup overhead per job for zero new process-lifecycle-management code — an acceptable trade given `DOCUMENT_ENGINE_TIMEOUT` is already being set longer than `ENGINE_TIMEOUT` for this exact reason.
+
+### Anti-Pattern 3: Trusting `soffice`'s exit code the same way `vips`'s is trusted
+
+**What people do:** Reuse `isTerminal`'s "vips always exits 1 on failure" assumption for LibreOffice, or simply treat `runCommand`'s `nil` return as conversion success.
+**Why it's wrong:** Confirmed via LibreOffice's own bug tracker (multiple independent reports across versions): `soffice --convert-to` can exit `0` while having produced no output file and logged "source file could not be loaded" only to stderr.
+**Do this instead:** Pattern 3 — `LibreOfficeConverter.Convert` must positively verify the renamed output file exists with non-zero size before returning `nil`, converting the "silent failure" case into an explicit Go error the same way any other engine failure is surfaced.
+
+## Integration Points
+
+### External Services
+
+| Service | Integration Pattern | Notes |
+|---------|---------------------|-------|
+| `soffice` (LibreOffice headless CLI) | Same `os/exec` + `Setpgid` + SIGKILL-on-timeout pattern as `vips` (`internal/convert/exec.go`, unchanged, already explicitly documented as anticipating LibreOffice — see `exec.go`'s doc comment referencing `soffice.bin` by name) | Needs `-env:UserInstallation=file://<per-job-workDir>/loprofile` per invocation (Pattern 2); needs post-hoc output-file existence check (Pattern 3); needs a rename step from LibreOffice's basename-derived output filename to the caller's `outPath` (Pattern 4) |
+
+### Internal Boundaries
+
+| Boundary | Communication | Notes |
+|----------|---------------|-------|
+| `internal/convert` (Registry) ↔ `internal/worker` (Handler) | `registry.Lookup(from, to)` returns a `Converter`; `Handler.process` calls `.Convert(ctx, inPath, outPath, nil)` | Unchanged interface — `LibreOfficeConverter{}` slots in exactly like `LibvipsConverter{}`; `process()`'s signature gains an explicit `timeout time.Duration` parameter (previously read from the single `h.engineTimout` field) |
+| `internal/api` (handleCreateJob) ↔ `internal/queue` (Client) | Currently a single hardcoded `s.queue.EnqueueImageConvert(ctx, createdID)` call | **Must become a branch**: route to `EnqueueImageConvert` or the new `EnqueueDocumentConvert` based on which engine class the resolved `Converter` belongs to (derivable via the registry, or via the persisted `job.Engine`/detected-format engine-class lookup) |
+| `internal/api` (handleCreateJob) ↔ `internal/convert` (Dimensions) | Currently an unconditional call to `convert.Dimensions(detected, rest)` for every format | **Must become conditional** on a new `convert.HasDimensionLimit(detected)`-style predicate — see "Confirmed Gap" below |
+| `cmd/worker/main.go` ↔ `internal/worker` (Handler) | `worker.NewHandler(..., envDuration("ENGINE_TIMEOUT", 120*time.Second), ...)` — single timeout threaded through one constructor param | Constructor gains a second `documentEngineTimeout time.Duration` parameter (read from `DOCUMENT_ENGINE_TIMEOUT`, e.g. default 600s vs `ENGINE_TIMEOUT`'s 120s, given LibreOffice's slower cold-start + larger-document conversion times); `asynq.Config.Queues` map gains a `queue.QueueDocument: N` entry alongside `QueueImage`/`QueueWebhook` |
+
+### Confirmed Gap: `internal/api/handlers.go`'s dimension-check is NOT already scoped to images
+
+Reading `internal/convert/dimensions.go` directly: `dimensionParsers` is a closed `map[string]dimensionParser` keyed by exactly `{png, jpg, webp, heic, tiff}`. `Dimensions(format, r)` for any format **not** in that map returns `ErrDimensionsUnknown` (fail-closed) — it does **not** treat an unrecognized format as "no check applicable." `internal/api/handlers.go:handleCreateJob` (lines 152-170) calls `convert.Dimensions(detected, rest)` **unconditionally** for every accepted format, immediately after the pair-check, with no format-based branch. **As written today, this would 422-reject every docx/xlsx/pptx/odt/ods/odp upload** with "cannot determine declared image dimensions" — this is a real, must-fix integration point, not a non-issue. The minimal fix is to add a small exported predicate to `internal/convert` (e.g. `HasDimensionLimit(format string) bool` backed by the same `dimensionParsers` map) and wrap the existing dimension-check block in `internal/api/handlers.go` with `if convert.HasDimensionLimit(detected) { ... }`.
+
+## Build Order (dependency-ordered)
+
+1. **`internal/convert/sniff.go`** — implement ZIP-container disambiguation (Pattern 1). No dependency on anything else; testable standalone with sample docx/xlsx/pptx/odt/ods/odp fixtures.
+2. **`internal/convert/dimensions.go`** — add `HasDimensionLimit` (or equivalent) predicate. Small, independent, unblocks the API-side fix.
+3. **`internal/convert/libreoffice.go`** — implement `LibreOfficeConverter` (Pairs + Convert, including Patterns 2/3/4). Depends on (1) only insofar as tests want realistic fixture files; otherwise independent of the queue/worker layer. Register in `internal/convert/converters.go`'s `init()`.
+4. **`internal/queue/queue.go` + `internal/queue/client.go`** — add `TypeDocumentConvert`/`QueueDocument`, `NewDocumentConvertTask`, a document retry schedule/delay func (mirroring `ImageRetryDelay`'s shape but calibrated to LibreOffice's slower attempts), `DocumentUniqueTTL`, `EnqueueDocumentConvert`. Independent of (1)-(3); can be built in parallel.
+5. **`internal/worker/worker.go`** — widen `process()`'s signature to take an explicit timeout, add `Handler.documentEngineTimeout` field, add `HandleDocumentConvert`, extend `isTerminal` with LibreOffice signatures. Depends on (3) (needs `LibreOfficeConverter` registered to be meaningfully testable end-to-end) and (4) (needs `TypeDocumentConvert`/payload parsing reused, `queue.QueueDocument` for metrics labeling).
+6. **`cmd/worker/main.go`** — wire `DOCUMENT_ENGINE_TIMEOUT`, register `HandleDocumentConvert` on the mux, add `QueueDocument` to `asynq.Config.Queues`. Depends on (5).
+7. **`internal/api/handlers.go`** — branch the enqueue call by engine class; guard the dimension-check with `HasDimensionLimit`. Depends on (1)+(2)+(4) (needs the new Sniff logic, the predicate, and `EnqueueDocumentConvert` to exist) but is otherwise independent of the worker-side changes (5)/(6) — the API can be built/tested against a stubbed `Enqueuer` per the existing interface-segregation pattern in `internal/api/api.go`.
+8. **`Dockerfile.worker`** — add LibreOffice headless packages. Purely additive; can happen any time after (3), needed before live end-to-end testing of the whole path.
+
+This order lets format-detection (1)(2), the engine implementation (3), and queue plumbing (4) proceed in parallel (no shared dependencies), converging in the worker (5)(6), with the API branch (7) and Docker image (8) as the final integration steps before an end-to-end test.
+
+## Scaling Considerations
+
+Not a public-facing/high-QPS service (internal clients only, per CLAUDE.md constraints) — the relevant "scale" axis here is per-job cost and worker resource contention, not request volume tiers.
+
+| Concern | Current (image only) | With `document` added |
+|---------|----------------------|------------------------|
+| Per-job engine cost | `vips copy` — sub-second for typical images | `soffice --headless` — multi-second cold start per invocation (no shared long-lived instance, Pattern 2) *plus* actual conversion time; large multi-sheet xlsx/many-slide pptx can run tens of seconds. This is the stated rationale for a longer `DOCUMENT_ENGINE_TIMEOUT`. |
+| Worker container resource limits | `docker-compose.yml` sets `cpus: "2.0"`, `memory: 1g` for the (single, shared) worker service | Each concurrent `soffice` invocation is itself a multi-process tree (soffice.bin + helpers) with non-trivial memory footprint (150-300MB+ per instance is a commonly cited community rule of thumb, not an official hard number) — the existing 1 GiB limit was sized for libvips-only concurrency and **should be revisited** once `WORKER_CONCURRENCY`/`QueueDocument`'s asynq weight are set, to avoid OOM-killing the worker under concurrent document jobs. Flag as a phase-planning follow-up rather than guessing a fixed number here. |
+| Queue-level concurrency | `asynq.Config.Queues: {image: 2, webhook: 1}` | Add `document: N` — because Pattern 2's per-job profile isolation removes the "must be 1" constraint some naive integrations impose, `N` can be tuned like any other queue weight, bounded in practice by the container memory ceiling above rather than by LibreOffice's own locking. |
+
+## Docker Impact
+
+`Dockerfile.worker`'s runtime stage currently adds a single package (`libvips-tools`) to `debian:bookworm-slim`. LibreOffice headless conversion needs a meaningfully larger package set:
+
+- **Minimum viable set** for docx/xlsx/pptx/odt/ods/odp → pdf: `libreoffice-writer libreoffice-calc libreoffice-impress` (covers Writer/Calc/Impress document families, which map onto both the OOXML and ODF variants of each) — **not** the full `libreoffice` metapackage, which additionally pulls in Base (database), Math, Draw, and various GUI/help components unnecessary for headless PDF export. Use `apt-get install -y --no-install-recommends` (same flag already used for `libvips-tools`) to avoid recommended-but-unneeded extras (e.g., `libreoffice-gnome`, spell-check dictionaries for unneeded languages).
+- **Fonts:** headless LibreOffice document→PDF fidelity is font-dependent — a documented, commonly-hit pitfall is substituted fonts silently reflowing/repaginating documents when expected fonts (e.g., core Microsoft-compatible fonts referenced by imported docx/pptx files) are missing from the container. Worth budgeting a core font package (e.g., `fonts-liberation` or an equivalent Debian package providing metric-compatible substitutes for common MS fonts) alongside the LibreOffice components — flagged as a pitfall to validate against real client documents during implementation, not a hard requirement confirmed by official docs in this research pass.
+- **Size/build-time impact — genuinely worth flagging, not a minor footnote:** LibreOffice is a categorically larger dependency than libvips. Where `libvips-tools` is a single CLI package with a small, focused dependency tree, `libreoffice-writer`/`-calc`/`-impress` collectively pull in LibreOffice's shared core (`libreoffice-core`) plus dozens of supporting libraries — commonly reported as several hundred MB installed, versus low tens of MB for libvips-tools. This will measurably increase both the built worker image size and `docker-compose build`/CI build time (larger `apt-get install` package count and download size). Because the locked decision keeps image and document engines in the **same** `cmd/worker` binary and the **same** `Dockerfile.worker` (mirroring the precedent set when the `webhook` queue was added to the same worker in Phase 2 — no new binary), **every worker replica will carry this weight even in a deployment that only wants to scale image conversions.** This is an accepted trade-off given the locked "no new binary" decision, but should be called out explicitly in the phase plan as a known cost, with "split into per-engine-class worker images" noted as a candidate future optimization if image size/build time or independent scaling of image vs. document workers becomes an actual operational pain point.
+
+## Sources
+
+- [How Accurate Is Magic Number Detection for Identifying File Types? (inventivehq.com)](https://inventivehq.com/blog/how-accurate-is-magic-number-detection-for-identifying-file-types) — MEDIUM confidence, corroborated by the libmagic-focused search below
+- [libmagic / Office Open XML detection via `[Content_Types].xml` as first ZIP member (perlmonks.org)](https://www.perlmonks.org/?node_id=958016) — MEDIUM confidence, cross-referenced against the inventivehq result
+- [Identify .xlsx and .docx or .pptx from their header signature — Microsoft Learn forum](https://learn.microsoft.com/en-us/archive/msdn-technet-forums/190e803a-5306-48f4-a901-5d4f5b2e1fa2) — MEDIUM confidence
+- LibreOffice concurrency / `-env:UserInstallation` isolation: [Serving Concurrent Requests for LibreOffice Service (jdhao.github.io)](https://jdhao.github.io/2021/06/11/libreoffice_concurrent_requests/), [Gotenberg issue #94 "Libreoffice Concurrence"](https://github.com/thecodingmachine/gotenberg/issues/94), [Gotenberg conversion engines docs (deepwiki mirror)](https://deepwiki.com/gotenberg/gotenberg/4-conversion-engines) — MEDIUM confidence, multiple independent sources agree
+- LibreOffice exit-code-0-on-failure: [Debian bug #1058653 "libreoffice-writer-nogui: fails to convert ODT to PDF 'Error: source file could not be loaded'"](https://groups.google.com/g/linux.debian.bugs.dist/c/VOK10GzVqs0), [shelfio/libreoffice-lambda-layer issue #36](https://github.com/shelfio/libreoffice-lambda-layer/issues/36) — MEDIUM confidence, multiple independent bug reports agree
+- `soffice --convert-to` output-filename-from-basename behavior: [Baeldung — Converting doc/docx to PDF with LibreOffice](https://www.baeldung.com/linux/latex-doc-docx-pdf-conversion) — MEDIUM confidence
+- LibreOffice Debian package naming (`libreoffice-writer`/`-calc`/`-impress`, `libreoffice-nogui`): [LinuxCapable — How to Install LibreOffice on Debian](https://linuxcapable.com/how-to-install-libreoffice-on-debian-linux/), [Debian Wiki — LibreOffice](https://wiki.debian.org/LibreOffice) — MEDIUM confidence
+- Repo files read directly (HIGH confidence, primary source): `internal/convert/convert.go`, `internal/convert/sniff.go`, `internal/convert/dimensions.go`, `internal/convert/converters.go`, `internal/convert/libvips.go`, `internal/convert/exec.go`, `internal/queue/queue.go`, `internal/queue/client.go`, `internal/worker/worker.go`, `cmd/worker/main.go`, `internal/api/handlers.go`, `Dockerfile.worker`, `.planning/PROJECT.md`
+
+**No exact LibreOffice/apt package-size figure was independently verified against an official source** (Debian package metadata / `apt-cache show` output was not directly queried) — the "several hundred MB" figure is directionally consistent across multiple community sources, not a hard number. Flagged LOW confidence on the precise size; recommend running `docker build` locally during implementation and measuring the actual delta rather than trusting this estimate for capacity planning.
+
+---
+*Architecture research for: OctoConv v1.2 — document engine class (LibreOffice) integration*
+*Researched: 2026-07-09*

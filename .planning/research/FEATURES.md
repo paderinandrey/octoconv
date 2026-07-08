@@ -1,229 +1,139 @@
 # Feature Research
 
-**Domain:** Internal async job-processing API (file/image conversion) — "submit → poll or webhook → download" pattern
-**Researched:** 2026-07-02
-**Confidence:** MEDIUM-HIGH (webhook/rate-limit/outbox patterns are well-documented industry practice; asynq-specific reconciliation is synthesized from asynq's public API docs + general dual-write literature, not a single canonical "asynq reconciler" reference)
+**Domain:** Office-document-to-PDF conversion (docx/xlsx/pptx/odt/ods/odp → pdf), via LibreOffice headless, as a new engine class inside an existing internal, API-key-authenticated async conversion service
+**Researched:** 2026-07-09
+**Confidence:** MEDIUM (LibreOffice headless behavior verified across multiple independent sources — official docs, bug tracker, Gotenberg's production implementation, OpenDocument spec; some specifics, e.g. exact registry key names and current-version CVE status, are LOW confidence and should be spot-checked against the pinned LibreOffice version at implementation time)
 
 ## Feature Landscape
 
 ### Table Stakes (Users Expect These)
 
-These are the items already listed in `PROJECT.md` Active scope. Research confirms all six are genuinely "table stakes" for a production async job API, even for internal-only clients — none of them are optional once real traffic and real client teams depend on the service. "Users" here = the internal engineering teams integrating with OctoConv.
+These are the "don't ship without this" items for a document-conversion engine class layered on OctoConv's existing hardened infrastructure. Several map directly onto patterns already built for the image engine (`internal/convert/sniff.go`, `internal/convert/exec.go`, `internal/worker/worker.go`) — called out explicitly below.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| API-key auth scoped to `client_id` | Any service reachable on the network can currently create jobs and read other clients' presigned download URLs (CONCERNS.md: "No authentication ... fully public"). Internal-only does not mean trust-everyone — a compromised or buggy internal service is the realistic threat model. | LOW-MEDIUM | Static bearer/API-key header validated against `clients` table, hashed at rest (never store plaintext keys). Must enforce ownership on `GET /v1/jobs/{id}` (403/404 for jobs not owned by caller), not just on creation. |
-| Per-client rate limiting | Without limits, one misbehaving/looping internal caller can starve the shared queue and worker pool for everyone else (see "Scaling Limits" in CONCERNS.md — API always accepts regardless of queue depth). This is the standard failure mode for shared internal infra. | LOW-MEDIUM | Token bucket per `client_id` is the industry-default algorithm for this shape of API — allows legitimate bursts (batch submission) while bounding sustained rate. Return `429` + `Retry-After`. |
-| Webhook delivery (at-least-once, signed, retried) | `callback_url` and `webhook_deliveries` already exist in the schema but are unused (CONCERNS.md: "No webhook delivery despite schema support"). Every mature job-processing API (Stripe, GitHub, S3 event notifications, video/image conversion SaaS like Cloudinary/Coconut) ships push notifications with signature verification and automatic retry — polling-only is the "incomplete" version of this pattern. | MEDIUM-HIGH | See dedicated breakdown below — this is the single largest feature in scope. |
-| Reconciler/sweeper for stranded jobs | Explicitly a known gap with a code comment admitting it ("a reconciler (next steps) will recover it") — jobs can get stuck in `queued` forever if enqueue fails after the DB write commits (CONCERNS.md). This is a correctness bug, not a nice-to-have. | MEDIUM-HIGH | See dedicated breakdown below. Tightly coupled to fixing the existing single-attempt-processing bug. |
-| Magic-bytes content validation | Trusting `path.Ext` + client-supplied `Content-Type` (current behavior) means a client can upload arbitrary bytes with a `.png` extension and have it handed directly to `vips` (CONCERNS.md). Sniffing real file type before trusting client metadata is baseline hygiene for any file-ingestion API, internal or not. | LOW | Use content-sniffing (stdlib `http.DetectContentType` or `github.com/gabriel-vasile/mimetype` for broader/more accurate format coverage) against the first N bytes; reject on extension/content mismatch *before* upload to S3, not after. |
-| S3/MinIO lifecycle TTL on `uploads/` and `results/` | `job_outputs.expires_at` exists in schema but nothing sets/enforces it — storage currently grows unbounded forever (CONCERNS.md: "Impact: Storage grows unbounded... no cost/capacity ceiling"). This is a standard, near-zero-maintenance feature once retention policy is decided. | LOW | Prefer a native S3/MinIO bucket lifecycle rule (prefix + age-based expiration) over an application-level sweeper — it's built into the object store, requires no extra process, and can't drift from what's actually stored. Reserve `expires_at` in Postgres for reporting/API-visible "this result disappears at X" rather than as the enforcement mechanism. |
-| Baseline observability (metrics + real health checks) | `/healthz` currently returns `{"status":"ok"}` unconditionally without checking Postgres/Redis/S3 (CONCERNS.md) — an orchestrator restarting on this signal is worse than no health check. Prometheus metrics (queue depth, job latency, success/failure rate, webhook delivery success rate) are the minimum needed to detect the exact failure modes this milestone is designed to close (stuck jobs, webhook delivery failures, rate-limit thrash). | LOW-MEDIUM | asynqmon (or asynq's built-in web UI) for queue/task introspection; Prometheus client for `/metrics`; split `/healthz` (liveness, cheap) from `/readyz` (checks DB/Redis/S3 with short timeouts). |
-| Transient-vs-terminal error distinction in the worker | Not separately listed in PROJECT.md but is a *hard dependency* of both the reconciler and of webhook delivery being meaningful: currently every job gets exactly one real attempt regardless of asynq's retry config, because `MarkFailed` (terminal) is called even for transient infra blips, which then poisons any retry (CONCERNS.md). A reconciler built on top of this bug will just keep re-stranding jobs. | MEDIUM | Classify errors (S3/Postgres transient network errors, context deadline exceeded → retry; malformed input, unsupported format, decompression-bomb rejection → terminal). Only call `MarkFailed` for terminal errors; let asynq's native retry mechanism handle transient ones. |
-| Idempotent job creation (dedupe on retried submissions) | Internal callers doing HTTP retries (timeouts, load-balancer retries) will otherwise create duplicate conversion jobs and duplicate storage costs — a documented pitfall in every job-submission API. | LOW-MEDIUM | Accept an optional client-supplied idempotency key (or dedupe on `client_id` + content hash) at the API layer; asynq separately supports `TaskID`/`Unique` options for queue-level dedup, but that only protects against duplicate *enqueue*, not duplicate *job rows* — dedup needs to happen at the Postgres write. |
+| Content-type sniffing for ZIP-based office formats (docx/xlsx/pptx/odt/ods/odp) | Same rationale as existing image magic-byte sniffing (D-01/D-02): the declared extension is attacker-controlled and must be verified against actual content before storage/queue. Without this, a `.zip`, `.jar`, or arbitrary renamed archive sails through as a "docx". | MEDIUM | **Not a pure prefix-sniff like `sniff.go`.** ODF (odt/ods/odp) *does* fit the existing streaming-prefix pattern: per the OpenDocument spec (Part 3, §17.4), the very first ZIP entry MUST be an uncompressed file literally named `mimetype`, and at a fixed offset (byte 30 = "mimetype" string, byte 38 = the mimetype value, e.g. `application/vnd.oasis.opendocument.text`) — this is a genuine "magic bytes" equivalent, extendable in `sniff.go`'s existing `signature` table with an offset-based matcher. OOXML (docx/xlsx/pptx) has **no such fixed-offset guarantee** — entry order in the ZIP central directory is not spec-mandated. Detecting OOXML requires opening the ZIP's central directory (stdlib `archive/zip`, needs `io.ReaderAt` + size, not a pure forward `io.Reader`) and checking for the presence of the expected root part (`word/document.xml` for docx, `xl/workbook.xml` for xlsx, `ppt/presentation.xml` for pptx). `multipart.File` (what `r.FormFile` already returns in `handlers.go`) implements `io.ReaderAt` + `io.Seeker`, so this is possible without buffering to a temp file, but it is architecturally a second, different sniffing code path from the current one, not a drop-in extension. |
+| Reject declared-format/detected-format mismatch | Same discipline as existing D-01/D-04 for images — a `.pptx` that is actually a `.docx` (or an arbitrary ZIP) must 422, not be auto-corrected or silently accepted. | LOW | Falls out of the sniff step above once it exists; same handler-level check shape as the current image mismatch branch in `handlers.go`. |
+| Zip-bomb / declared-size guard for office containers | OOXML/ODF are ZIP archives; a ZIP central directory declares each entry's uncompressed size *without decompressing* — the same "trust the declared metadata, reject before doing expensive work" pattern already shipped for images (Phase 7, VALID-03: declared pixel dimensions checked before decode). A maliciously crafted docx/xlsx can have a small compressed size but enormous declared uncompressed size (classic zip-bomb shape), which would otherwise be handed straight to LibreOffice, which then decompresses it internally. | LOW–MEDIUM | Zero new dependency: stdlib `archive/zip`'s `zip.File.UncompressedSize64` is available directly from the central directory without extracting content. Sum declared uncompressed sizes across all entries and reject if the total (or the compression ratio) exceeds a configured limit — same shape as `MAX_IMAGE_PIXELS`, e.g. a new `MAX_DOCUMENT_UNCOMPRESSED_BYTES`. This is the direct document-engine analog of Phase 7's decompression-bomb work and should reuse that decision (D-NN) rather than re-litigating it. |
+| Reject macro-enabled documents disguised via extension, and macro-carrying documents in general | LibreOffice headless does not execute macros' UI-bound event handlers by design, but conversion of a document containing macros/OLE payloads is still attacker-supplied code reaching the engine process, and there is a documented history of exploitation via the conversion code path (spreadsheet formula/webservice injection, OLE remote-fetch). Treat "no macro execution" as defense-in-depth, not a substitute for rejecting macro content outright. | LOW | Cheap to detect using the *same* ZIP-entry-listing check used for OOXML root-part detection above: presence of `word/vbaProject.bin` / `xl/vbaProject.bin` / `ppt/vbaProject.bin` (OOXML) or `Basic/` scripts + `<manifest:file-entry manifest:media-type="text/x-vBasic">`-style markers (ODF) is a clean reject signal. Since the milestone's supported formats are only docx/xlsx/pptx/odt/ods/odp (not the macro-enabled docm/xlsm/pptm/odt-with-scripts variants), any document that *looks* like the closed format list but *carries* a macro payload is itself a mismatch worth a 422, mirroring the "declared vs detected" discipline. |
+| Disable macro execution + external content fetch at the LibreOffice engine level (defense in depth) | Headless mode suppresses most interactive dialogs but is not an airtight security boundary — LibreOffice has a documented history of SSRF/file-disclosure via ODT `draw:image` remote references, `=WEBSERVICE()`-style formula fetches in spreadsheets, and OLE remote-URL frames. This matters here because the client is "internal service" not "internal user," but the *file content* is still attacker-influenced end-user data being passed through — the trust boundary is the file, not the caller. | LOW | Set via `registrymodifications.xcu`/user profile flags at container build time (baked into the worker image, not per-request): `Security/Scripting/DisableMacroExecution=true` (or `MacroSecurityLevel=3`), and disable "update links on load" / remote graphics. No code dependency — this is Dockerfile/image configuration, analogous to how `Dockerfile.worker` already bakes in `libvips-tools`. Flag for phase-specific research: exact registry key paths and CLI flags should be verified against the actual LibreOffice version pinned in `Dockerfile.worker`, not just training-data key names. |
+| Per-invocation isolated LibreOffice user profile (`-env:UserInstallation`) | **This is the single most important document-engine-specific correctness issue, not just a security one.** `soffice` writes a lock file into its user profile directory on start — if a second `soffice` invocation finds that lock, it either hangs waiting for the "already running" instance or fails outright. OctoConv's worker already runs multiple concurrent goroutines per queue (`WORKER_CONCURRENCY`, `cmd/worker/main.go`); running LibreOffice one-shot-per-job with a *shared default* profile under any concurrency > 1 will cause intermittent hangs/failures that look like flaky engine timeouts but are actually a resource-contention bug, not a data problem. | LOW | Directly composes with the existing per-job `os.MkdirTemp("", "octoconv-"+job.ID.String()+"-")` work directory already created in `internal/worker/worker.go:270` for input/output files — extend it to also house a job-scoped profile dir passed as `-env:UserInstallation=file://<workDir>/profile`, cleaned up by the same existing `defer os.RemoveAll(workDir)`. No new lifecycle code needed, just a new subpath and one more `soffice` flag. |
+| Hard external timeout via the existing hardened-exec pattern, not reliance on LibreOffice's own error reporting | LibreOffice headless conversion is documented to **hang indefinitely at 100% CPU** rather than fail cleanly on: corrupted/malformed docx, password-protected documents (silently produces no output and no stderr in some versions, rather than erroring), and documents that would otherwise trigger a "repair document?" or "this document contains macros" dialog. There is no reliable engine-native way to distinguish "processing a large file" from "hung waiting on an unanswerable dialog" — the only robust mitigation observed across LibreOffice's own bug tracker and every automation wrapper (Gotenberg, jodconverter, unoconv) is an external hard timeout + SIGKILL of the process group. | LOW (mechanism exists) / MEDIUM (tuning) | **Directly reuses `internal/convert/exec.go`'s `runCommand`** as-is — process-group `Setpgid` + `SIGKILL` on context deadline is exactly the mitigation this problem needs, and it is already implemented and battle-tested. The only new work is (a) registering a `DOCUMENT_ENGINE_TIMEOUT` distinct from `ENGINE_TIMEOUT` (already an explicit v1.2 requirement in PROJECT.md, because LibreOffice startup + conversion is materially slower than libvips — LibreOffice's own docs/Gotenberg configs use tens-of-seconds-to-minutes-scale timeouts vs. libvips' near-instant conversions) and (b) treating "killed on timeout" as the *expected*, common failure mode for bad documents (classify as terminal, not transient — a corrupt/password-protected file will hang identically on every retry, so retrying it burns the retry budget for nothing; this is the document-engine equivalent of `terminalVipsSignatures` in `worker.go`, but detected by timeout-as-signal rather than a stderr string match, since LibreOffice frequently produces no diagnostic stderr at all in the hang case). |
+| Detect and reject password-protected / encrypted documents explicitly (where feasible) rather than relying solely on timeout | Distinct from the generic hang case above: password-protected OOXML files are, structurally, **not** valid ZIP archives at all (they're OLE/CFB-wrapped encrypted blobs per MS-OFFCRYPTO) — so this is actually detectable *before* ever invoking LibreOffice, at the same sniff stage as content-type detection, not only as a post-hoc timeout. | LOW | A `.docx`/`.xlsx`/`.pptx` upload that fails the "is this a valid ZIP with the expected root part" check because it's actually an OLE Compound File (magic bytes `D0 CF 11 E0 A1 B1 1A E1`) is with very high probability an encryption-protected Office document saved in the legacy container. This can piggyback on the same sniff/reject path as "detected != declared" (422) rather than needing separate logic — genuinely password-protected ODF (which stays ZIP-shaped but has encrypted stream content per entry) is harder to detect pre-flight and will fall through to the timeout-based mitigation above. |
+| `Converter` interface fit: output path vs. LibreOffice's `--outdir`-only contract | The existing `Converter.Convert(ctx, inPath, outPath, opts)` interface (`internal/convert/convert.go`) assumes the engine can write to an exact `outPath`. `soffice --headless --convert-to pdf --outdir <dir> <inPath>` does **not** accept an explicit output filename — it always writes `<dir>/<basename(inPath) without ext>.pdf`. | LOW | Pure integration detail, not a design change: point `--outdir` at `filepath.Dir(outPath)`, then rename the engine's fixed-name output to `outPath` after a successful run. No interface change needed — PROJECT.md has already decided the document engine registers as one more `Converter` in the existing `Registry` without a contract rework, and this detail is compatible with that decision. |
 
 ### Differentiators (Competitive Advantage)
 
-Not required for this milestone's "production ready" bar, but worth flagging now because some interact with the reconciler/webhook/rate-limit work and are natural v1.x follow-ons.
+None of these are meaningful competitive advantages for an internal, single-consumer-driven tool — but they are legitimate, bounded v1.x+ additions once the base engine class is stable and a real internal consumer asks for them. Listed for roadmap awareness, not v1.2 scope.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Per-client webhook secrets + rotation | Stripe/GitHub-style HMAC secret rotation without downtime lets a client rotate compromised secrets without coordinating a deploy window. Meaningful once >1 external-facing team depends on webhooks. | LOW-MEDIUM | Straightforward extension of the `clients` table (store current + previous secret, accept either during a grace window). |
-| Manual replay UI/CLI for failed webhook deliveries | `webhook_deliveries` already gives you the audit log; exposing "retry this delivery" as an ops action (rather than fully automatic forever-retry) turns an audit table into an operational tool. | LOW | Could be a CLI command against the DB initially rather than a UI — internal-only clients don't need self-service. |
-| Per-client rate-limit tiers / burst allowances | Different internal teams have different legitimate load profiles (batch nightly job vs interactive request). A flat global-per-client limit is fine for v1; tiering is a natural evolution once real usage data exists. | LOW | Store limit config per row in `clients` rather than a global constant — cheap to add later if the column exists from day one. |
-| Priority queues / per-client fairness | Prevents one client's large batch from starving another client's interactive jobs sharing the same asynq queue (flagged as a scaling limit in CONCERNS.md, but not urgent at current single-worker scale). | MEDIUM | asynq natively supports multiple named queues with weighted priority — defer until there's evidence of noisy-neighbor problems. |
-| OpenTelemetry distributed tracing across API → queue → worker → S3 | Makes debugging a specific job's full lifecycle (submission → enqueue → pickup → engine → upload → webhook) far faster than log-correlation alone. | MEDIUM-HIGH | High value once there are multiple engine classes (doc/av/CAD) and cross-service calls; lower urgency for a single image/libvips slice. |
-| Automatic dead-letter reprocessing with backoff ceiling | Beyond manual replay: auto-retry archived asynq tasks under specific safe conditions (e.g., known-transient error class) instead of requiring a human to trigger `RetryArchivedTask`. | MEDIUM | Risk of retry storms if the underlying cause wasn't transient — treat as a v2 refinement once error classification (see table stakes) has matured and proven reliable. |
+| PDF/A compliance output option | Some internal consumers (archival/compliance/legal-adjacent workflows) may specifically need PDF/A, not just PDF. | LOW–MEDIUM | LibreOffice supports this natively via export filter data (`--convert-to 'pdf:writer_pdf_Export:{"SelectPdfVersion":{"type":"long","value":"1"}}'` style syntax) — no new engine, just an `opts` value threaded into the existing `Convert(ctx, inPath, outPath, opts map[string]any)` signature, which already exists and is currently unused (`nil` passed today). Defer until a concrete consumer need surfaces. |
+| Page-range selection for conversion | Converting only specific pages/sheets is a common "nice to have" for large decks/spreadsheets. | MEDIUM | Supported for Impress via filter options; inconsistent/awkward for Writer. Real complexity is in exposing this cleanly through the job API (a new job parameter), not the engine call itself. |
+| Cross-format conversion within the document class (docx↔odt, xlsx↔ods, etc.) | Already explicitly named as an out-of-scope v2 candidate in PROJECT.md. | LOW (engine already supports it) | LibreOffice can do these conversions with the same `--convert-to` mechanism already being built — the *engine* work is nearly free, but PROJECT.md has deliberately scoped v1.2 to "→ pdf only" to keep the milestone small. Treat as a near-zero-marginal-cost expansion once justified, not a reason to scope-creep now. |
+| Embedded font preservation in output PDF | Sounds like a differentiator but largely isn't one to build — LibreOffice's PDF export embeds fonts by default. The real risk is the *opposite* problem (see anti-feature/pitfall below: font substitution when a document references a font not installed in the worker container, causing silent layout drift). Not a feature to build; a font-provisioning concern for the Docker image. | N/A | Not a build item — flag as an operational concern (which fonts are installed in `Dockerfile.worker`) rather than a feature. |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|------------------|-------------|
-| Public developer portal / self-service API docs & key management UI | Feels like "what a real API product does" | Clients are internal company services only (PROJECT.md constraint) — building a portal is pure scope creep with zero users who need it; every hour spent here is an hour not spent on the reconciler/webhook correctness work that's actually blocking production readiness | Provision API keys via an internal runbook / ops script against the `clients` table; document the API in a README or internal wiki page |
-| Usage-based billing / metering | Natural companion to rate limiting and "looks professional" | No monetization need for internal clients; adds an entire subsystem (usage aggregation, invoicing, dashboards) with no stakeholder asking for it | Prometheus metrics (already table-stakes) give enough visibility into per-client volume for capacity planning without building billing |
-| Real-time job status via WebSockets/SSE | Feels more "modern" than poll-or-webhook | Webhooks already solve the push-notification need; adding a second real-time transport doubles the delivery-guarantee surface (now you need retry/reconnect logic for two channels) for no client-visible benefit over an at-least-once webhook + idempotent polling fallback | Webhook delivery (table stakes) + existing `GET /v1/jobs/{id}` polling covers 100% of the "how do I know when it's done" need |
-| Fully automatic, unbounded dead-letter auto-retry | "Just keep retrying until it works" feels resilient | Silently masks systemic failures (e.g., a bad engine deploy) behind infinite retries, burning compute and delaying detection — this is exactly the inverse of the bug already in CONCERNS.md ("transient infra hiccups permanently fail jobs") just in the other direction | Bounded retries with asynq's native backoff + archive-on-exhaustion (table stakes), surfaced via metrics/alerts for a human to triage; manual replay (differentiator) once triaged |
-| mTLS or OAuth2 client-credentials flow for auth | "More secure than API keys" | Significant added complexity (cert issuance/rotation or an OAuth token service) for a closed internal-network deployment where a hashed API key already raises the bar far above the current fully-public state; the risk being mitigated (external attacker) isn't the actual threat model (internal misbehaving service) | Hashed API key per client (table stakes) is proportionate to the actual risk; revisit mTLS only if the network perimeter assumption changes (e.g., multi-cluster, zero-trust mesh) |
-| Building a custom webhook-management dashboard | Natural companion once `webhook_deliveries` exists | Duplicates what asynqmon + a SQL query against `webhook_deliveries` already gives an operator; a bespoke UI is a maintenance burden with no external customers to justify it | Use asynqmon for queue-level visibility, direct SQL/psql access or a simple internal CLI for `webhook_deliveries` inspection |
+| Supporting macro-enabled variants (docm/xlsm/pptm) or "any Office format LibreOffice can open" | Feels like a trivial extension — "LibreOffice already opens these, why not accept them?" | Macro-enabled documents are exactly the attack surface this milestone must guard against (Q2); accepting them widens the trust boundary for a service whose stated core value is *safety* for internal callers, for a format class nobody has actually asked for (PROJECT.md's format list is fixed and explicit: docx/xlsx/pptx/odt/ods/odp only). | Reject macro-carrying documents outright (see table-stakes row above) regardless of extension; if a real internal consumer later needs docm support, treat it as a deliberate, separately-reviewed scope decision, not a silent side effect of "LibreOffice can open it anyway." |
+| Watermarking / post-processing the output PDF | Seems like a small bolt-on once you already have a PDF. | LibreOffice's `--convert-to` has no built-in watermark mechanism; doing it "properly" needs either a macro (directly conflicts with the "disable macro execution" security posture above) or a separate PDF-manipulation step, which is a new dependency/new attack surface (parsing/writing PDFs) the project's zero-new-deps philosophy would need to explicitly re-litigate. | Not v1.2. If needed later, treat as a distinct, explicitly-scoped feature with its own dependency review — don't smuggle it in as "just a LibreOffice option." |
+| Pixel-perfect fidelity to Microsoft Office's own rendering | Reasonable-sounding expectation ("the PDF should look exactly like it would from Word/Excel/PowerPoint"). | LibreOffice is a different rendering engine with known, well-documented layout/font-substitution differences from MS Office, especially for complex Excel formulas, custom fonts, and PowerPoint animations/transitions (which have no PDF equivalent anyway). Chasing parity is an open-ended, low-value sink for an internal tool. | Document known-limitation behavior (font substitution when a referenced font isn't installed in the worker image, layout drift on complex documents) as an accepted characteristic, not a bug backlog. Provision the worker image with the internal company's standard corporate fonts if font mismatch becomes a recurring real complaint — that's an operational fix, not a code feature. |
+| Full OOXML/ODF schema validation before conversion | Sounds like the "correct" equivalent of the image engine's magic-byte check, and there are real tools for it (ODF Toolkit Validator, Office-o-tron / `office-o-tron`). | Both are Java-based, heavyweight, third-party tools aimed at *spec conformance* (does this XML validate against the ECMA-376/ODF XSD schemas?), not malicious-content detection — the LibreOffice project's own Jan 2026 blog post on this topic is explicit that conformance validation does not cover security threats. Pulling in a JVM dependency also directly violates the project's established zero-new-dependencies philosophy for content validation (Phase 4/7 precedent). | The lightweight, zero-dependency checks already described under table stakes (ZIP structure + expected root-part presence + declared-size sum + macro-part absence) give the actually-relevant security/sanity signal without a new runtime dependency. |
+| Trying to make LibreOffice conversion behave like a stateful, pooled "hot" service (persistent `soffice` listener process, à la unoconv/jodconverter/Gotenberg's internal architecture) | Faster per-conversion latency (avoids ~1-3s LibreOffice cold-start per job) is a real, well-documented benefit of this pattern in every production LibreOffice wrapper researched. | Directly conflicts with PROJECT.md's explicit v1.2 decision to add the document engine as "just another `Converter`" without any core contract rework — a persistent listener needs lifecycle management (start/health-check/restart-on-crash/restart-after-N-conversions, per Gotenberg's own `--libreoffice-restart-after` mitigation for the accumulate-state-and-degrade problem) that doesn't fit the current one-shot-`runCommand`-per-job model at all, and reintroduces exactly the single-shared-instance concurrency problem the per-job `-env:UserInstallation` isolation above is designed to sidestep. | Ship one-shot `soffice --convert-to` per job (matches existing `LibvipsConverter` shape exactly). Revisit pooling only if per-job LibreOffice startup latency is measured as an actual problem for the real internal consumer — not preemptively. |
 
 ## Feature Dependencies
 
 ```
-API-key auth (client_id resolution)
-    ├──requires──> per-client rate limiting (needs client identity to key the bucket)
-    └──requires──> webhook delivery attribution (delivery must know which client/callback_url)
+Content-type sniffing for ZIP-based formats (ODF prefix-check + OOXML central-directory check)
+    └──requires──> stdlib archive/zip random-access read (multipart.File as io.ReaderAt)
+                       └──enables──> Reject declared/detected mismatch (422)
+                       └──enables──> Zip-bomb declared-size guard (reads same central directory)
+                       └──enables──> Macro-part-presence rejection (reads same central directory)
+                       └──enables──> Pre-flight password-protected-OOXML detection (OLE-CFB magic bytes instead of ZIP)
 
-Transient-vs-terminal error classification
-    ├──requires──> reconciler/sweeper is meaningful (else sweeper just re-strands jobs the same way)
-    └──requires──> asynq's native retry actually functions as configured
+Per-invocation isolated LibreOffice profile (-env:UserInstallation)
+    └──requires──> existing per-job os.MkdirTemp workDir (internal/worker/worker.go) — ALREADY BUILT
+    └──prevents──> lock-file hangs under WORKER_CONCURRENCY > 1 (document queue)
 
-Reconciler/sweeper
-    └──requires──> transient-vs-terminal error classification (see above)
-    └──enhances──> webhook delivery reliability (fewer jobs silently stuck = fewer missed webhooks)
+Hard external timeout (DOCUMENT_ENGINE_TIMEOUT)
+    └──requires──> existing runCommand hardened exec (internal/convert/exec.go) — ALREADY BUILT, reused as-is
+    └──replaces──> reliance on LibreOffice's own error/exit-code reporting (unreliable — silent hangs, no stderr on password-protected input)
 
-Webhook delivery
-    ├──requires──> API-key auth / client_id (callback_url + secret are per-client concerns)
-    ├──requires──> idempotent job creation (avoid double-delivery from duplicate job rows)
-    └──enhances──> observability (delivery success/failure rate is a core metric)
+Disable macro execution + external fetch at engine config level ──enhances──> Macro-part-presence rejection (defense in depth, not a substitute)
 
-Magic-bytes validation
-    (no hard dependency — independent, should land before/alongside auth since it's pure request-validation)
+PDF/A / page-range options (differentiators) ──requires──> Convert(ctx, inPath, outPath, opts) opts plumbing — ALREADY EXISTS, currently unused (nil)
 
-S3 lifecycle TTL
-    (no hard dependency — independent; only needs a decided retention policy, not other features)
-
-Observability (metrics + readiness checks)
-    ├──enhances──> reconciler (need metrics to know sweep is firing / jobs are stuck)
-    ├──enhances──> webhook delivery (need delivery success-rate visibility)
-    └──enhances──> rate limiting (need to see 429 rates per client to tune limits)
-
-Per-client webhook secret rotation (differentiator)
-    └──requires──> webhook delivery (table stakes) must exist first
-
-Priority queues / per-client fairness (differentiator)
-    └──requires──> per-client rate limiting (related but distinct concept — rate limiting bounds request rate; fairness bounds queue scheduling)
+Persistent "hot" LibreOffice listener (anti-feature) ──conflicts──> PROJECT.md's "extend Registry/Converter, no core contract rework" decision
+Watermarking (anti-feature) ──conflicts──> Disable-macro-execution security posture (watermarking via macro) AND zero-new-deps philosophy (watermarking via new PDF lib)
 ```
 
 ### Dependency Notes
 
-- **Reconciler requires transient-vs-terminal error classification:** Building the sweeper before fixing the "every job gets exactly one real attempt" bug (CONCERNS.md) means the sweeper will re-enqueue jobs that then fail again on the very first `MarkActive` guard-clause conflict, or will indefinitely resurrect jobs that should have been terminal. These two items should land in the same phase, error classification first.
-- **Webhook delivery requires client_id/auth:** `callback_url` is currently a bare column on `jobs` with no ownership concept; delivery attempts, signing secrets, and retry attribution all need to know *which client* to look up. Auth must land before or alongside webhook delivery, not after.
-- **Rate limiting requires client_id/auth:** a per-client token bucket is meaningless without a stable client identity to key it on — this is a hard precondition, not just a nice ordering.
-- **Magic-bytes validation and S3 lifecycle TTL are independent:** neither blocks nor is blocked by the auth/webhook/reconciler cluster. They can be built in parallel or slotted into any phase based on risk-ordering preference (both are called out as security/cost concerns in CONCERNS.md and are comparatively low effort).
-- **Observability enhances everything else:** it's not a hard dependency for the other features to function, but building the reconciler or webhook delivery *without* metrics to observe them defeats the purpose — you'd have no way to tell if the sweeper is actually recovering stuck jobs or if webhook delivery success rate is acceptable. Strongly recommend landing basic metrics early, not last.
-
-## Webhook Delivery — Deep Dive
-
-Industry-standard webhook systems (Stripe, GitHub, and general engineering references) converge on the same guarantees. For OctoConv's `jobs.callback_url` + `webhook_deliveries` schema, table stakes are:
-
-1. **At-least-once delivery, not exactly-once.** Never promise exactly-once — promise idempotent consumption instead (see #4). This is the universal pattern; exactly-once webhook delivery isn't achievable over HTTP.
-2. **Retry with exponential backoff + jitter, bounded duration.** Stripe's live-mode policy is a useful reference point: retries for up to 3 days with exponential backoff, then the endpoint is marked failed/disabled. A smaller internal service can use a shorter total window (e.g., minutes-to-hours, not days) given internal callers are expected to have much higher uptime than arbitrary third-party endpoints — but the shape (exponential backoff + full jitter to avoid retry-storm thundering herd, capped max delay) is the right pattern regardless of window length.
-3. **HMAC-SHA256 signature over the raw payload, in a header** (e.g., `X-OctoConv-Signature`), verified with constant-time comparison on the receiving end. Include a timestamp in the signed payload/header and have receivers reject deliveries outside a tolerance window (Stripe uses 5 minutes) to mitigate replay attacks.
-4. **Idempotency via a stable delivery/event ID.** Every delivery attempt for the same underlying event should carry the same `event_id` (distinct from a fresh HTTP-level attempt) so receivers can dedupe — "persist processed event IDs, short-circuit on repeat" is the standard consumer-side pattern to document for internal client teams.
-5. **Timeout on the delivery HTTP call itself**, short enough that a slow/hanging client endpoint doesn't block the delivery worker pool (mirrors the existing "no timeout on storage/DB calls" gap already flagged in CONCERNS.md — don't repeat that mistake for outbound HTTP).
-6. **Dead-letter on exhaustion, not silent drop.** `webhook_deliveries` should retain the row with a terminal `failed`/`exhausted` status and full attempt history rather than deleting it — this is what makes manual replay (a documented differentiator) possible later.
-7. **Fire delivery asynchronously from job completion**, not inline in the worker's completion transaction — use a separate asynq task (or a small poller reading `webhook_deliveries` rows in `pending` state) so a slow/down client endpoint can never block job processing throughput.
-
-## Reconciler / Sweeper — Deep Dive
-
-There is no single "canonical asynq reconciler" reference pattern in public docs — this is genuinely a build-it-yourself component, synthesized from asynq's public `Inspector` API plus general transactional-outbox / dual-write literature:
-
-- **Two distinct failure modes to cover**, matching the two states currently unguarded:
-  1. **Orphaned in Postgres, missing from Redis**: DB row is `queued` but the corresponding asynq task was never enqueued (enqueue call failed after the DB commit) — the exact bug already documented in CONCERNS.md.
-  2. **Orphaned in Redis, missing/stale in Postgres** (less likely given current code order, but worth guarding): a task exists in the queue/active set but the DB row disagrees, e.g., after a worker crash mid-processing leaves a job `active` in Postgres with no live asynq task holding it.
-- **Detection approach:** a periodic asynq task itself (asynq supports scheduled/periodic tasks natively) that:
-  - Queries Postgres for jobs in `queued` older than a grace threshold (e.g., 30-60s — long enough to not race a normal enqueue-then-pickup, short enough to recover quickly) and cross-checks against asynq's `Inspector.ListPendingTasks`/`ListActiveTasks` for that job ID; if absent from Redis, re-enqueue.
-  - Queries Postgres for jobs `active` past a "worker heartbeat" threshold (there is no such heartbeat in the current schema — this would be a new addition, e.g., `jobs.lease_expires_at` set/refreshed by the worker) and treats expired leases as candidates for either re-enqueue or terminal failure depending on attempt count.
-- **Two architectural alternatives, pick one deliberately:**
-  - **Reactive sweeper (recommended for this milestone):** keep the current write-then-enqueue order, add the periodic reconciler as a safety net for the (hopefully rare) failure window. Lower implementation cost, fits the existing code shape, and CONCERNS.md's own suggested fix approach already points this direction.
-  - **Transactional outbox:** write job + an outbox row in the same Postgres transaction, have a separate relay process move outbox rows into asynq using `FOR UPDATE SKIP LOCKED` to allow multiple relay instances safely. Stronger correctness guarantee (eliminates the failure window entirely rather than detecting-and-repairing it) but is a more invasive rewrite of the job-creation path. Worth flagging as the "if reconciler false-negatives become a real problem" escalation path, not required for v1 of this milestone.
-- **Bound re-enqueue attempts.** The sweeper must track an attempt/reconcile counter (or reuse asynq's own retry count once re-enqueued) and stop retrying after N sweeps, moving the job to a terminal `failed` state with a distinguishable reason (e.g., `stranded_max_attempts`) — otherwise a permanently-broken downstream (e.g., Redis genuinely down) turns the sweeper itself into an infinite-retry anti-pattern.
-- **Emit metrics on every sweep action** (jobs found stuck, jobs recovered, jobs terminally failed) — this is the concrete tie-in to the observability table-stakes item; without it, nobody will know the reconciler is doing its job or is itself broken.
-
-## Rate Limiting — Deep Dive
-
-For an internal-only, API-key-authenticated service, the expected shape differs from public API rate limiting mainly in what's *not* needed:
-
-- **Per-client quota is table stakes; a global-only limit is not sufficient**, because the failure mode being prevented is one noisy/buggy internal caller starving the shared queue for everyone else (already flagged as a scaling limit in CONCERNS.md) — a single global limit doesn't stop a single client from consuming all of it.
-- **A coarse global ceiling is a reasonable secondary safety net** on top of per-client limits (protects total worker/storage capacity regardless of how well-behaved individual clients are), but should not be the primary mechanism.
-- **Token bucket is the standard algorithm choice** here: it naturally accommodates legitimate bursty usage (e.g., an internal batch job submitting 200 conversions at once) while still bounding sustained throughput — better fit than a strict fixed-window counter for this workload shape.
-- **What's genuinely NOT needed for internal-only clients** (differs from public-API expectations):
-  - No need for tiered/paid rate-limit plans — a flat per-client default is sufficient for v1 (see differentiators table for future tiering).
-  - No need for public-facing rate-limit documentation/dashboards — internal teams can be told their limit via the same runbook used to provision their API key.
-  - No need for IP-based limiting layered on top of client-key-based limiting — the API key is already the trust boundary in a closed internal network.
-- **Implementation note:** if the API is ever scaled to multiple replicas, an in-process (single-instance) token bucket is insufficient — the limiter state needs to live in Redis (already a dependency via asynq) for cross-instance consistency, using standard atomic Lua-script-based Redis token-bucket implementations to avoid the race conditions that plague naive multi-step Redis rate limiters.
+- **ZIP-based content sniffing requires random-access reads:** unlike the existing image `Sniff()` (pure forward `io.Reader`, prefix-only), OOXML detection needs the ZIP central directory, which lives at the *end* of the file. This is achievable without buffering (Go's `multipart.File` already implements `io.ReaderAt`), but it means the document-format sniffing code path is architecturally distinct from `internal/convert/sniff.go`'s current shape, not a one-line addition to the existing `signatures` table. ODF sniffing, by contrast, *is* a natural extension of the existing prefix-based table (fixed-offset `mimetype` check).
+- **The zip-bomb guard and the macro-rejection check share one read of the same ZIP central directory** — implement them together as a single "inspect the office ZIP container" step, not two separate passes over the file.
+- **Per-job profile isolation and the existing temp-workdir lifecycle are the same mechanism** — this is the cheapest table-stakes item in this list precisely because `internal/worker/worker.go` already creates and tears down a per-job scratch directory; the document engine just needs one more subpath inside it.
+- **The external hard-timeout mechanism needs zero new code** — `runCommand` in `internal/convert/exec.go` already does process-group `SIGKILL` on context deadline, which is precisely the documented mitigation for LibreOffice's hang-on-bad-input failure mode. The only genuinely new decision is timeout *value* tuning (`DOCUMENT_ENGINE_TIMEOUT`) and *classification* (timeout ⇒ terminal, not transient, for this engine — worth an explicit decision record, since it inverts the usual "timeout = maybe-transient" assumption used for `ENGINE_TIMEOUT`/image conversions).
 
 ## MVP Definition
 
-### Launch With (v1) — this milestone
+Framed against the actual milestone scope already fixed in `.planning/PROJECT.md` (v1.2: docx/xlsx/pptx/odt/ods/odp → pdf only, extending the existing `Converter`/`Registry`, no HTML→PDF, no cross-format matrix).
 
-This *is* the MVP for this hardening milestone — all items are already scoped in PROJECT.md's Active section and confirmed as genuine table stakes by this research, not aspirational additions.
+### Launch With (v1.2)
 
-- [ ] API-key auth scoped to `client_id`, enforced on both job creation and job lookup — closes the current fully-public API gap
-- [ ] Transient-vs-terminal error classification in the worker — prerequisite for the reconciler and for asynq's retry to function at all
-- [ ] Reconciler/sweeper for jobs stranded in `queued` (and `active` past a lease threshold) — closes the documented "stuck forever" bug
-- [ ] Webhook delivery: signed (HMAC-SHA256 + timestamp), retried with exponential backoff + jitter, delivery attempts logged in `webhook_deliveries`, dead-lettered (not silently dropped) on exhaustion
-- [ ] Per-client rate limiting (token bucket), 429 + Retry-After on exceed
-- [ ] Magic-bytes content validation before storage upload / engine invocation
-- [ ] S3/MinIO bucket lifecycle TTL on `uploads/` and `results/` prefixes
-- [ ] Prometheus metrics + real `/readyz` dependency checks + asynqmon for queue introspection
+- [ ] ZIP-container structural sniff (ODF fixed-offset `mimetype` check + OOXML central-directory root-part check) rejecting non-matching/unrecognized content, mirroring D-01/D-02 for images — essential: this is the direct table-stakes equivalent of the image engine's already-shipped magic-byte validation, and the milestone explicitly reuses that philosophy.
+- [ ] Declared-uncompressed-size (zip-bomb) guard on office containers before handing them to LibreOffice — essential: direct analog of the already-shipped image decompression-bomb protection (Phase 7); leaving this out would make the document engine class less hardened than the image engine class it's meant to sit alongside.
+- [ ] Macro-part-presence rejection (reject any of the 6 supported formats if it contains a `vbaProject.bin`/Basic-script part) — essential: cheapest possible mitigation for the most concrete named risk (Q2), reuses the same container inspection as the previous two items.
+- [ ] Per-job isolated `-env:UserInstallation` LibreOffice profile — essential: without it, the document queue cannot safely run with `WORKER_CONCURRENCY > 1`, which is a correctness bug waiting to surface in production, not a hardening nice-to-have.
+- [ ] `DOCUMENT_ENGINE_TIMEOUT` wired through the existing `runCommand` hardened-exec path, with timeout classified as a terminal (not transient) failure for this engine — essential: it is the only reliable backstop against LibreOffice's documented hang-on-bad-input behavior (corrupt files, password-protected files, "repair document?" scenarios) since there is no trustworthy engine-native error signal to depend on instead.
+- [ ] LibreOffice engine-level hardening baked into `Dockerfile.worker` (disable macro execution, disable remote-content/link fetching) — essential defense-in-depth, near-zero cost (image config, not code).
 
 ### Add After Validation (v1.x)
 
-- [ ] Per-client webhook secret rotation — once webhook delivery has been running long enough that a rotation need has actually come up
-- [ ] Manual replay tooling for failed webhook deliveries — once `webhook_deliveries` has accumulated real failure data worth acting on
-- [ ] Per-client rate-limit tiers — once real usage patterns across internal clients are observed
-- [ ] Idempotency key support on job creation, if duplicate-submission problems are observed in practice (flagged as table stakes above but can slip to v1.x if initial client integrations are well-behaved and this isn't yet causing pain)
+- [ ] Pre-flight OLE-CFB (password-protected legacy container) detection as an explicit, distinct 422 reason from generic "unrecognized content" — trigger: once real usage surfaces password-protected uploads often enough that a clearer error message (vs. a generic timeout-driven failure) is worth the marginal implementation cost.
+- [ ] `opts`-driven PDF/A export — trigger: a concrete internal consumer asks for it (the `Convert(ctx, inPath, outPath, opts)` plumbing to support it already exists).
 
 ### Future Consideration (v2+)
 
-- [ ] Priority queues / per-client fairness — defer until there's evidence of noisy-neighbor contention (single worker replica today per CONCERNS.md)
-- [ ] OpenTelemetry distributed tracing — higher value once multiple engine classes (doc/av/CAD, per PROJECT.md Out of Scope) exist and cross-service debugging gets harder
-- [ ] Transactional outbox rewrite of job creation — only if the reactive-sweeper reconciler proves to have unacceptable false-negative/recovery-latency characteristics in practice
-- [ ] Automatic (non-manual) dead-letter reprocessing — only after error classification has proven reliable enough to trust unattended retries
+- [ ] Cross-format conversion within the document class (docx↔odt etc.) — already explicitly deferred in PROJECT.md; the engine work is nearly free once the base class ships, but scope discipline says wait for real demand.
+- [ ] Page-range / partial-document conversion — defer until a specific consumer need is named; API-surface design cost exceeds engine cost.
+- [ ] Persistent/pooled LibreOffice listener process for lower per-job latency — defer until per-job cold-start latency is measured as an actual operational problem; premature given the "extend Converter, don't rework the core" decision already made for this milestone.
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|----------------------|----------|
-| API-key auth + client scoping | HIGH | LOW-MEDIUM | P1 |
-| Transient-vs-terminal error classification | HIGH | MEDIUM | P1 |
-| Reconciler/sweeper | HIGH | MEDIUM-HIGH | P1 |
-| Webhook delivery (signed, retried, logged) | HIGH | MEDIUM-HIGH | P1 |
-| Per-client rate limiting | MEDIUM-HIGH | LOW-MEDIUM | P1 |
-| Magic-bytes validation | MEDIUM | LOW | P1 |
-| S3 lifecycle TTL | MEDIUM | LOW | P1 |
-| Metrics + readiness checks | HIGH (enabling) | LOW-MEDIUM | P1 |
-| Webhook secret rotation | LOW-MEDIUM | LOW-MEDIUM | P2 |
-| Manual webhook replay tooling | LOW-MEDIUM | LOW | P2 |
-| Idempotency key on job creation | MEDIUM | LOW-MEDIUM | P2 |
-| Per-client rate-limit tiers | LOW | LOW | P3 |
-| Priority queues / fairness | LOW (today) | MEDIUM | P3 |
-| OpenTelemetry tracing | LOW (today) | MEDIUM-HIGH | P3 |
-| Transactional outbox rewrite | LOW (unless sweeper fails in practice) | HIGH | P3 |
-
-**Priority key:**
-- P1: Must have for this milestone's "production ready" bar
-- P2: Should have, natural v1.x follow-on once v1 is running
-- P3: Nice to have, revisit only if a specific pain point emerges
-
-## Competitor / Reference System Analysis
-
-Not a market-competitor comparison (OctoConv is internal, non-commercial) — instead, reference implementations that define the domain's "table stakes" bar for job-processing + webhook APIs.
-
-| Feature | Stripe (webhooks) | GitHub (webhooks) | AWS S3 (lifecycle) | Our Approach |
-|---------|--------------------|--------------------|----------------------|--------------|
-| Signature verification | HMAC-SHA256 over raw body, `Stripe-Signature` header with timestamp | HMAC-SHA256, `X-Hub-Signature-256` header | N/A | HMAC-SHA256 signed payload + timestamp header, constant-time verify |
-| Retry policy | Exponential backoff, up to 3 days (live mode) | Exponential backoff, limited attempts, then endpoint flagged | N/A | Exponential backoff + full jitter, shorter total window appropriate for internal callers (minutes-hours, not days) |
-| Delivery failure handling | Endpoint auto-disabled after prolonged failure + notification | Delivery visible/re-deliverable in UI | N/A | Dead-letter row in `webhook_deliveries`, manual replay (v1.x), alert via metrics |
-| Object expiration | N/A | N/A | Native bucket lifecycle rules (prefix + age) | Native MinIO/S3 lifecycle rule on `uploads/`/`results/` prefixes, not app-level sweep |
-| Rate limiting | Per-API-key limits, documented per endpoint | Per-token, primary + secondary (abuse) limits | N/A | Per-client token bucket, single-tier flat limit for v1, coarse global ceiling as secondary net |
+| ZIP-container structural sniff (ODF + OOXML) | HIGH | MEDIUM | P1 |
+| Zip-bomb declared-size guard | HIGH | LOW | P1 |
+| Macro-part rejection | HIGH | LOW | P1 |
+| Per-job isolated LibreOffice profile | HIGH (prevents production hangs under concurrency) | LOW | P1 |
+| `DOCUMENT_ENGINE_TIMEOUT` + terminal-on-timeout classification | HIGH | LOW | P1 |
+| Engine-level macro/remote-fetch hardening (Docker image config) | MEDIUM–HIGH (defense in depth) | LOW | P1 |
+| Pre-flight password-protected detection (OLE-CFB) | MEDIUM | LOW | P2 |
+| PDF/A export option | LOW–MEDIUM | LOW | P2 |
+| Page-range conversion | LOW | MEDIUM | P3 |
+| Cross-format conversion (docx↔odt etc.) | LOW (no named demand yet) | LOW (engine-cheap) | P3 |
+| Watermarking | LOW | MEDIUM–HIGH (new dependency or macro) | Anti-feature |
+| Persistent/pooled LibreOffice instance | LOW (no measured latency problem yet) | HIGH | Anti-feature (for now) |
 
 ## Sources
 
-- [Webhook Retry Best Practices for Sending Webhooks (Hookdeck)](https://hookdeck.com/outpost/guides/outbound-webhook-retry-best-practices)
-- [Webhook Retry Policy: Backoff, Idempotency & Dead Letter Code (HookRay)](https://hookray.com/blog/webhook-retry-strategies-2026)
-- [Webhook Reliability: Idempotency & Retry Reference (Digital Applied)](https://www.digitalapplied.com/blog/webhook-reliability-idempotency-retries-engineering-reference-2026)
-- [Building Reliable Webhook Delivery: Retries, Signatures, and Failure Handling (DEV Community)](https://dev.to/young_gao/building-reliable-webhook-delivery-retries-signatures-and-failure-handling-40ff)
-- [Webhook Delivery Guarantees — At-Least-Once, Retries, HMAC & Dead Letters](https://codelit.io/blog/api-webhooks-delivery-guarantee)
-- [Webhook Best Practices: Retry Logic, Idempotency, and Error Handling (DEV Community)](https://dev.to/henry_hang/webhook-best-practices-retry-logic-idempotency-and-error-handling-27i3)
-- [Receive Stripe events in your webhook endpoint (Stripe official docs)](https://docs.stripe.com/webhooks)
-- [Stripe Webhook Best Practices: Raw Body, Signatures & Retries (HookRay)](https://hookray.com/blog/stripe-webhook-best-practices-2026)
-- [hibiken/asynq — GitHub](https://github.com/hibiken/asynq)
-- [asynq package docs — pkg.go.dev](https://pkg.go.dev/github.com/hibiken/asynq)
-- [Unique Tasks — hibiken/asynq Wiki](https://github.com/hibiken/asynq/wiki/Unique-Tasks)
-- [Periodic Tasks — hibiken/asynq Wiki](https://github.com/hibiken/asynq/wiki/Periodic-Tasks)
-- [Transactional Outbox Pattern (gmhafiz)](https://www.gmhafiz.com/blog/transactional-outbox-pattern/)
-- [Transactional Outbox: a Postgres Ledger, Not a Queue](https://tiarebalbi.com/en/blog/the-transactional-outbox-is-not-a-queue)
-- [Transactional Outbox Pattern: From Theory to Production (NP Blog)](https://www.npiontko.pro/2025/05/19/outbox-pattern)
-- [Design A Rate Limiter (ByteByteGo)](https://bytebytego.com/courses/system-design-interview/design-a-rate-limiter)
-- [API Rate Limiting Strategies: 2026 Engineering Reference (Digital Applied)](https://www.digitalapplied.com/blog/api-rate-limiting-strategies-2026-engineering-reference)
-- [Rate Limiting Best Practices in REST API Design (Speakeasy)](https://www.speakeasy.com/api-design/rate-limiting)
-- [gabriel-vasile/mimetype — GitHub](https://github.com/gabriel-vasile/mimetype/)
-- [Detecting MIME Types in Go (GeekyRyan)](https://rnemeth90.github.io/posts/2024-03-27-golang-detect-file-type/)
-- `.planning/PROJECT.md` (project scope and constraints)
-- `.planning/codebase/CONCERNS.md` (existing implementation gaps, verified against research)
+- [LibreOffice Security advisories](https://www.libreoffice.org/about-us/security/advisories) — MEDIUM confidence, official but general
+- [A Tale of Exploitation in Spreadsheet File Conversions (buer.haus)](https://buer.haus/2019/10/18/a-tale-of-exploitation-in-spreadsheet-file-conversions/) — MEDIUM confidence, documents real conversion-pipeline exploitation (formula/webservice injection reaching LibreOffice via headless conversion)
+- [Soffice headless convert-to hangs, soffice.bin not killed (Ask LibreOffice)](https://ask.libreoffice.org/t/soffice-com-headless-convert-to-pdf-d-test-docx-outdir-d-output-hung-and-soffice-bin-is-not-getting-killed/88685) — MEDIUM confidence, corroborates hang-on-bad-input behavior
+- [Converting docx in headless mode hangs (Ask LibreOffice) / LibreOffice bug tracker mirror](https://ask.libreoffice.org/t/converting-docx-in-headless-mode-hangs/37502) — MEDIUM confidence
+- [Does LibreOffice throw an error converting password-protected files? (Ask LibreOffice)](https://ask.libreoffice.org/t/does-libreoffice-throw-any-error-code-message-while-converting-password-protected-file-to-pdf/74319) — MEDIUM confidence, corroborates silent-failure behavior on password-protected input
+- [Gotenberg configuration docs](https://gotenberg.dev/docs/configuration) — HIGH confidence, current production reference implementation wrapping LibreOffice as an HTTP conversion API; confirms outbound-fetch pinning proxy, "uploaded documents never trusted" default (since 8.34.0), restart-after-N-conversions mitigation, and start/idle timeout knobs
+- [Gotenberg troubleshooting docs](https://gotenberg.dev/docs/troubleshooting) — MEDIUM confidence
+- [OASIS OpenDocument v1.2 Part 3: Packages spec, §17.4 mimetype file](https://docs.oasis-open.org/office/v1.2/cs01/OpenDocument-v1.2-cs01-part3.html) — HIGH confidence, primary spec source for the ODF fixed-offset magic-bytes-equivalent check
+- [How to correctly create ODF documents using zip (jejik.com)](https://www.jejik.com/articles/2010/03/how_to_correctly_create_odf_documents_using_zip/) — MEDIUM confidence, corroborates spec interpretation with concrete byte offsets
+- [Office Open XML — Wikipedia](https://en.wikipedia.org/wiki/Office_Open_XML) — MEDIUM confidence, general structure confirmation ([Content_Types].xml, ZIP magic `50 4B 03 04`)
+- [LibreOffice dev blog: Validating ODF and OOXML files (Jan 2026)](https://dev.blog.documentfoundation.org/2026/01/22/validating-odf-and-ooxml-files/) — HIGH confidence, current official source; explicitly confirms schema-validation tools (ODF Toolkit Validator, Office-o-tron) check conformance, not security, and are Java-based (informing the "anti-feature: full schema validation" entry)
+- [How can I run multiple instances of soffice under Linux (Ask LibreOffice)](https://ask.libreoffice.org/en/question/82515/how-can-i-run-multiple-instances-of-soffice-under-linux/) — MEDIUM confidence, corroborates `-env:UserInstallation` + lock-file mechanism
+- [How completely disable macros on computers (Ask LibreOffice)](https://ask.libreoffice.org/t/how-completely-disable-macros-on-computers/32626) — LOW-MEDIUM confidence, corroborates `DisableMacroExecution`/`MacroSecurityLevel` registry keys exist; exact key path should be re-verified against the pinned LibreOffice version before implementation
+- Existing codebase precedent (HIGH confidence, primary source): `internal/convert/sniff.go`, `internal/convert/exec.go`, `internal/convert/libvips.go`, `internal/convert/convert.go`, `internal/worker/worker.go`, `internal/queue/queue.go`, `internal/api/handlers.go`, `.planning/PROJECT.md`
 
 ---
-*Feature research for: internal async job-processing API (file conversion) production-hardening milestone*
-*Researched: 2026-07-02*
+*Feature research for: office-document-to-PDF conversion engine class (OctoConv v1.2)*
+*Researched: 2026-07-09*

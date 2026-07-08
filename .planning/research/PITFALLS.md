@@ -1,246 +1,149 @@
-# Pitfalls Research
+# Pitfalls Research: Adding LibreOffice Document Conversion to OctoConv
 
-**Domain:** Production-hardening an internal async job-processing service (Go/chi/asynq/Postgres/MinIO) — adding auth, rate limiting, webhook delivery, a reconciler, magic-bytes validation, S3 lifecycle TTL, and observability to an already-running vertical slice.
-**Researched:** 2026-07-02
-**Confidence:** HIGH for patterns grounded in the existing codebase (`.planning/codebase/CONCERNS.md`), MEDIUM for general webhook/queue ecosystem practices (verified against multiple independent sources).
+**Domain:** Adding a second (heavier, historically flakier) `os/exec`-based conversion engine class — LibreOffice headless — to an existing hardened async job-processing system (Go, asynq/Redis, Postgres-first state machine, guarded transitions, engine-class queue routing).
+**Researched:** 2026-07-09
+**Confidence:** MEDIUM-HIGH (LibreOffice headless failure modes are extremely well-documented across TDF bugzilla, Gotenberg's production issue tracker, and multiple independent Docker/serverless LibreOffice wrapper projects — verified against >=2 independent sources each; codebase-specific integration gaps below are HIGH confidence, read directly from `internal/reconciler/reconciler.go`, `internal/queue/queue.go`, `internal/worker/worker.go`, `cmd/worker/main.go`)
 
-This research assumes the reader has read `.planning/codebase/CONCERNS.md`. Several pitfalls below are not hypothetical — they are the exact bugs already present in OctoConv's codebase, described here in generalized form so the roadmap phases that touch them don't reintroduce the same mistake elsewhere.
+This supersedes the previous milestone's PITFALLS.md (which covered v1.0/v1.1 hardening — auth, webhooks, reconciler, magic-bytes, observability — all now shipped and validated). This research is scoped entirely to v1.2's document-engine addition.
+
+This research assumes the milestone's stated approach: LibreOffice registers as one more `convert.Converter` in the existing `Registry` (no new Handler/Capability contract), reusing the existing `runCommand` hardened-exec wrapper (`internal/convert/exec.go`), a new `document` asynq queue mirroring `image`'s engine-class routing pattern, and a separate `DOCUMENT_ENGINE_TIMEOUT`.
 
 ## Critical Pitfalls
 
-### Pitfall 1: Retrofitting retry-safety by adding retries without first classifying errors
+### Pitfall 1: Reconciler is hardcoded to `EnqueueImageConvert` — it will misroute or wrongly exhaust stranded document jobs
 
 **What goes wrong:**
-Teams bump asynq's `MaxRetry` or add backoff config and assume "retries are now fixed," without changing the handler's error-handling logic. If the handler still treats every non-nil error as terminal (calls a `MarkFailed`-equivalent state transition before returning), the retry mechanism never gets a chance to run — the *second* delivery of the same task fails immediately because the state machine now rejects the `queued`/`active` → terminal transition a second time, and that guard error gets wrapped in `SkipRetry` (or equivalent), silently converting "retry configured" into "one attempt, then archived." This is the exact bug already present in OctoConv's `HandleImageConvert` (`internal/worker/worker.go:40-63`) — asynq is configured for retries but every job effectively gets one real attempt.
+`internal/reconciler/reconciler.go`'s `enqueuer` interface only declares `EnqueueImageConvert` and `EnqueueWebhookDeliver` (lines 42-45), and `sweep()` unconditionally calls `s.enq.EnqueueImageConvert(ctx, j.ID)` (line 127) for **every** job `FindStale` returns, regardless of which engine class the job actually belongs to. `jobs.StaleJob` (repo.go:37) also currently carries only `{ID, Status}` — no format/engine info. If a `document` queue is added without touching the reconciler, any docx/xlsx/pptx job that gets stranded in `queued`/`active` (worker crash, container restart, Redis blip) will be re-enqueued onto the **image** queue as an `image:convert` task. The image worker's `HandleImageConvert` will call `registry.Lookup("docx", "pdf")`, get a miss, and hit the existing terminal-classification string check `strings.Contains(msg, "no converter for")` in `isTerminal()` (worker.go:55) — so the job is marked permanently `failed` with a misleading `engine_error` / "unsupported or corrupted input format" message, even though a live document worker could have processed it correctly. Worse, this consumes one of the job's `MaxRecoveries` reconciler slots on a bug, not a real failure.
 
 **Why it happens:**
-Retry-safety looks like a queue-configuration problem ("just set MaxRetry higher") when it's actually an error-taxonomy problem: the handler must know the difference between "this specific input can never succeed" (terminal — mark failed, don't retry) and "the world was briefly unavailable" (transient — return the error and let asynq redeliver, leaving the job's domain state unchanged or in a re-entrant-safe state). Retrofitting onto a handler that currently makes this same terminal-only assumption compounds the mistake because the state machine itself (not just the handler logic) actively forbids re-entry.
+The reconciler was built and tested against a single engine class (image). Its enqueuer interface was never designed to be format/engine-aware because there was nothing to route between. Adding a second `Convert*`-shaped task type is an easy thing to forget to wire into the reconciler, because the reconciler's tests/e2e verification historically only exercised the image path (RECON-04/RECON-05 in `.planning/PROJECT.md` were verified for image jobs specifically).
 
 **How to avoid:**
-1. Define an explicit error taxonomy in code (sentinel errors or an error-classification function) — e.g. `ErrTerminal` (bad input, unsupported format, malformed file) vs. everything else defaults to transient.
-2. Only transition the job to a terminal DB state (`failed`) for classified-terminal errors. For transient errors, return the raw error from the handler *without* moving the job out of `active` — let asynq's redelivery re-invoke the handler.
-3. Make the state machine re-entrant: allow `active -> active` (no-op) or design the handler to be idempotent on retry (i.e., check-then-act on whether the output already exists in storage before re-running the conversion), not just permissive of the transition.
-4. Use asynq's `IsFailure` predicate (verified via Context7/official docs: `Config.IsFailure(error) bool`) to prevent transient errors from consuming the task's retry-count budget at all, so a flaky dependency doesn't exhaust retries before it recovers.
-5. Cap retryable transient errors with `asynq.MaxRetry` and route exhausted-retry tasks to asynq's archive/dead-letter queue rather than silently dropping them — someone needs to see permanently-stuck jobs.
+- Extend `jobs.StaleJob` (and the `FindStale` SQL) to also select `source_format, target_format` (or a persisted `engine`/`queue` column — `CreateParams` in `repo.go` already has an `Engine` field, confirm whether it's persisted and queryable).
+- Add `EnqueueDocumentConvert` to the reconciler's `enqueuer` interface, and route `sweep()`'s recovery call through `convert.Default.Lookup(sourceFormat, targetFormat)` (or an equivalent queue-name lookup) instead of hardcoding `EnqueueImageConvert`.
+- Add a live e2e test that strands a **document** job (kill the worker mid-conversion, or directly flip its row to `active` with an old `updated_at`) and asserts the reconciler recovers it onto the `document` queue, not `image`.
 
 **Warning signs:**
-- The handler calls the "mark failed" repository method before returning an error, in the same code path used for storage/network errors.
-- No test exercises "handler fails once due to a transient error, then succeeds on retry" — only "handler fails and job ends up `failed`."
-- `asynq.SkipRetry` appears wrapping errors that originate from infrastructure (DB, S3, Redis) rather than from input validation.
-- Job state transition guards (`queued -> active`, `active -> done/failed`) have no path back to `active` from `active` or `failed` for legitimate retries.
+- Grep for `EnqueueImageConvert` outside `internal/worker`/`internal/api` — any reconciler-side hardcoded call site is the smoking gun.
+- In staging/load-testing: kill `-9` the worker process mid-document-conversion and watch whether the job eventually completes via `document` queue reprocessing or dies with `no converter for docx -> pdf`.
 
 **Phase to address:**
-Should be its own phase (or the first sub-task of the reliability phase), completed *before* the reconciler phase — the reconciler and retry-safety fix interact (see Pitfall 3) and should not be built independently of each other.
+Must be handled in the same phase that adds the `document` queue/converter — this is not deferrable, since the reconciler already runs continuously in production against `main` and will act on document jobs from the moment they exist, whether or not anyone remembered to update it.
 
 ---
 
-### Pitfall 2: Webhook delivery with no idempotency key, letting retries create duplicate side effects downstream
+### Pitfall 2: LibreOffice can exit 0 while writing an empty, truncated, or otherwise corrupted PDF — the existing `isTerminal`/upload pipeline has no output validation at all
 
 **What goes wrong:**
-The delivery system retries a webhook because it didn't receive a 2xx within its timeout — but the original POST *did* arrive and was processed by the receiver, and the receiver's slow response (not a delivery failure) triggered the retry. The receiving internal service then processes "job completed" twice: double-charges, double-triggers downstream automation, or writes duplicate records. This is a "your problem becomes their problem" pitfall — it doesn't break OctoConv itself, but it breaks every internal consumer of `callback_url`, and consumers will not consistently build dedup logic unless the payload gives them a stable key to dedup on.
+LibreOffice headless has a long, well-documented history (TDF bugzilla #52125, multiple Ask LibreOffice threads, and independent wrapper-library postmortems) of returning **exit code 0** on conversions that actually failed internally — producing a 0-byte or truncated PDF, or silently dropping content — rather than a clean non-zero exit. This is fundamentally different from libvips' behavior, which the codebase's own comment (`worker.go:28-31`) already notes returns exit code 1 for every failure, requiring stderr-substring classification. LibreOffice can be *worse*: no error at all, on either the exit code or stderr, yet a broken output file. Separately, `internal/worker/worker.go`'s `process()` (lines 245-306) never inspects `outPath` before uploading it — it uploads whatever bytes exist at `outPath` and marks the job `done` as long as `conv.Convert()` returns `nil` and the S3 upload succeeds. A 0-byte or garbage PDF would sail straight through to `MarkDone`, a webhook fired to the client with a "success" `download_url`, and the client would download an unusable file.
 
 **Why it happens:**
-At-least-once delivery is the only economically sane guarantee for webhooks (exactly-once delivery requires distributed transactions across service boundaries that don't exist here). Teams build the retry/backoff logic first (because it's visible in demos) and treat idempotency as a receiver-side concern, forgetting that the receiver can only dedup if the sender provides something stable to dedup on.
+The existing error-classification design (`isTerminal`) was built entirely around libvips' behavior (always non-zero exit, message-based terminal/transient split). It implicitly assumed "process succeeded" == "output is valid," which held for libvips in practice but does not hold for LibreOffice.
 
 **How to avoid:**
-- Include a stable, unique delivery identifier in every webhook payload/header (e.g., `X-Octoconv-Delivery-Id` sourced from the `webhook_deliveries.id` primary key, *not* regenerated per retry attempt — same delivery ID on every retry of the same logical event).
-- Document in the webhook contract that receivers MUST treat delivery as at-least-once and dedup on this ID; this is a contract concern even for internal consumers.
-- Distinguish "delivery attempt" (retryable, has its own row/counter in `webhook_deliveries`) from "event" (the job completion, one per job) — the delivery ID should be tied to the job/event, not to the attempt, so retries of the same event carry the same ID.
+- Add a generic, engine-agnostic output-sanity check in `process()` (not converter-specific) immediately after `conv.Convert()` succeeds and before `uploadFrom()`: file exists, size > 0, and (for `pdf` targets specifically) the first bytes equal `%PDF-`. This protects every current and future converter, not just LibreOffice, and is cheap (a few bytes read).
+- Treat a failed sanity check as a **terminal** error (retrying won't fix a structurally-corrupt LibreOffice run on the same input) — do not let it fall into `isTerminal`'s transient default.
+- Additionally define a `terminalLibreOfficeSignatures` list (mirroring `terminalVipsSignatures`) once real stderr text is observed from live LibreOffice runs in this environment — do not assume libvips' signatures generalize; LibreOffice's error vocabulary is completely different (e.g., "Error: source file could not be loaded").
+- Log/record the actual output file size in `job_events.detail` on every document conversion (even successes) for at least the first weeks post-launch, to catch a slow-onset pattern of "successful" near-empty PDFs before customers notice.
 
 **Warning signs:**
-- `webhook_deliveries` schema has no natural idempotency key exposed to the payload, or the ID changes on each retry.
-- No documentation tells internal consumers what "duplicate delivery" looks like or how to detect it.
+- Any `done` job whose `job_outputs.size_bytes` is anomalously small relative to a "reasonable minimum PDF" (a few hundred bytes at least) is a red flag worth alerting on.
+- Manual smoke test: feed LibreOffice a deliberately-corrupt but well-formed-zip docx (e.g., valid `[Content_Types].xml` but garbage `document.xml`) and confirm the worker does NOT mark the job `done`.
 
 **Phase to address:**
-Webhook delivery phase — must be part of the initial webhook payload/header design, not bolted on after the first internal consumer complains about duplicates.
+Must be handled in the core LibreOffice-Converter implementation phase — this is a correctness gap in the shared `process()` path, not an edge case to defer. Ship the output-validation check in the same plan that introduces the LibreOffice converter, and make it generic so it also silently hardens the existing image path for free.
 
 ---
 
-### Pitfall 3: No signature verification on outbound webhooks, or verification the receiver can't practically implement
+### Pitfall 3: The user-profile lock is a hard concurrency ceiling that the existing hardened-exec wrapper does not account for — and a SIGKILLed stuck instance can leave a stale lock that poisons *all* subsequent conversions
 
 **What goes wrong:**
-Either (a) OctoConv sends webhooks with no signature at all, so any internal service that can guess or intercept a `callback_url` can forge a "job completed" notification with an attacker-controlled result URL, or (b) a signature scheme is added but only documented informally, so most internal consumers skip verification because it's friction, defeating the purpose. A related, more subtle version: verifying against the parsed/re-serialized body instead of the exact raw bytes sent — JSON re-serialization can reorder keys or change whitespace, making the signature check fail (or "succeed" against the wrong body) depending on which side is affected.
+LibreOffice headless writes a lock file (`.~lock.<name>#`) tied to its `$HOME`/`UserInstallation` profile directory the moment it starts. A second `soffice --headless` invocation that shares the **same** `$HOME`/profile path while the first is still running will not run a second independent conversion — depending on version/build it will either (a) silently attach to/hang waiting for the already-running instance, or (b) fail outright/crash (LibreOffice bugzilla #82775, #106134: "headless mode does not allow concurrent jobs," "crashes when serving multiple concurrent requests"). This is categorically different from libvips, which is a plain stateless CLI tool with no shared-state singleton behavior — the existing hardened-exec model (spawn one process per job, `Setpgid`, SIGKILL on timeout, reap, done) implicitly assumes each invocation is fully independent, which is exactly the assumption LibreOffice violates under concurrency.
+
+The interaction with the existing timeout-and-SIGKILL machinery (`internal/convert/exec.go`) is the dangerous part: `runCommand` kills the process group with `SIGKILL` on `ctx.Done()` — a hard, un-catchable signal. LibreOffice never gets a chance to run its own lock-file cleanup on exit. If a `soffice --headless` process gets stuck (e.g., on a pathological document) and is SIGKILLed by `DOCUMENT_ENGINE_TIMEOUT`, the stale `.~lock` file (and the crash-marker inside its profile) is very plausibly left behind on the shared filesystem, exactly as documented in multiple LibreOffice bug reports about SIGKILL/crash leaving `.~lock` files that block the *next* invocation from starting at all. If every worker goroutine/process shares one `$HOME`/profile path (the default if `HOME` is not overridden per-invocation), **one hung document poisons the entire document queue** until the lock is manually removed — a total document-conversion outage triggered by a single bad input file, with no automatic recovery (the reconciler would just keep re-enqueuing the job, and it would keep failing/timing out against the same stale lock).
 
 **Why it happens:**
-"Internal service, low priority" reasoning creeps in ("it's not public-facing, why bother") — but internal-only is a network-position assumption, not an authentication guarantee (see Pitfall 5). Signature schemes are also frequently implemented once and never load-tested against real receiver code, so verification bugs (raw body vs. re-parsed body, timestamp tolerance, encoding) aren't caught until an internal consumer's verification silently always fails or always passes.
+LibreOffice's headless mode was designed around a single long-lived "one office suite per user session" model, not a stateless multi-tenant conversion-worker model. Every wrapper project in the ecosystem (Gotenberg, `unoconv`, various serverless LibreOffice projects) has hit and had to work around this; it is the single most common LibreOffice-in-production pitfall across the ecosystem.
 
 **How to avoid:**
-- Sign every outbound webhook with HMAC-SHA256 over the raw request body plus a timestamp, using a per-client secret (from the `clients` table, likely a separate `webhook_secret` distinct from the API key used for inbound auth — do not reuse the API key as the webhook signing secret).
-- Include the timestamp in the signed payload and give receivers a tolerance window (e.g., 5 minutes) to reject replayed old webhooks, but don't make the tolerance so tight that clock skew between internal services causes false rejections.
-- Publish a minimal verification snippet (even just a comment in the webhook payload docs) so internal teams copy-paste correct verification instead of reimplementing HMAC comparison with non-constant-time `==` checks.
-- Use constant-time comparison (`hmac.Equal` in Go) when *OctoConv itself* validates anything symmetric, and recommend the same to consumers.
+- **Never** run two `soffice --headless` invocations against the same profile directory concurrently. Pass a unique `-env:UserInstallation=file:///<tmpdir>` per invocation, generated per-job (the same `os.MkdirTemp("", "octoconv-"+job.ID.String()+"-")` workDir already created in `process()` is a natural place to derive a per-job profile dir).
+- With a per-job unique profile dir, a stale lock from a killed process can no longer poison *other* jobs — it only affects that one job's already-doomed temp directory, which `defer os.RemoveAll(workDir)` in `process()` already cleans up regardless of success/failure. This turns a fleet-wide outage into a single-job failure, which is the correct blast radius.
+- Still explicitly cap **concurrent LibreOffice invocations per worker process** at 1 (or a small, deliberately-chosen N) even with per-job profiles — LibreOffice's own internal state (shared memory segments, X11-less rendering backend) has documented instability under true parallelism regardless of profile isolation (see Pitfall 6). Do not rely on `WORKER_CONCURRENCY`/asynq's queue concurrency map alone; it was tuned for cheap libvips processes, not LibreOffice.
+- Do not attempt to reuse a single long-lived "listener" `soffice --accept=...` daemon process to avoid per-job cold-start cost (a design several wrapper projects have tried) — it reintroduces exactly the shared-profile/shared-process-state problem this fix avoids, and Gotenberg's own issue tracker documents this as *more* unstable than one-process-per-conversion, requiring considerable extra retry/health-check machinery this codebase does not have.
 
 **Warning signs:**
-- `callback_url` is stored and POSTed to with no additional secret/signature field in the `clients` or `webhook_deliveries` schema.
-- No dedicated webhook-secret column/rotation mechanism separate from the client's API key.
+- A sudden pattern of `DOCUMENT_ENGINE_TIMEOUT` failures across *unrelated* jobs starting at the same moment (rather than one bad document) — check for a shared, non-per-job `HOME`/profile path.
+- `find <profile-root> -name '.~lock*'` finding stale lock files that don't correspond to any currently-running `soffice.bin` process.
 
 **Phase to address:**
-Webhook delivery phase, designed alongside idempotency (Pitfall 2) — these two are typically shipped together as "webhook payload contract" and should not be split across phases.
+Must be handled in the core LibreOffice-Converter implementation phase — the per-job unique `UserInstallation` path is a one-line addition to the command args at the same point libvips is invoked, and is far cheaper to build in from day one than to retrofit after a first fleet-wide lock-poisoning incident.
 
 ---
 
-### Pitfall 4: Unbounded or unbackoff'd webhook retries causing a retry storm against a struggling receiver
+### Pitfall 4: The soffice launcher may fork a detached `soffice.bin` that escapes the existing `Setpgid`/process-group-SIGKILL — verify, don't assume, the hardened-exec wrapper actually kills LibreOffice on timeout
 
 **What goes wrong:**
-A receiving internal service degrades (slow, briefly down, redeploying). OctoConv's webhook sender retries aggressively (fixed short interval, no cap, no backoff) — a burst of completed jobs during the outage now floods the same endpoint with tightly-packed retries the moment it degrades, keeping it down longer or causing it to reject even healthy traffic once it recovers (thundering herd on recovery). Without a maximum retry count or a dead-letter/give-up path, `webhook_deliveries` rows accumulate indefinitely in a "still retrying" state and nobody is ever alerted that a receiver has been unreachable for days.
+`internal/convert/exec.go`'s doc comment already explicitly names LibreOffice's `soffice.bin` as the reason the process-group-kill design exists ("children such as LibreOffice's `soffice.bin` do not get orphaned/left hanging"), but this has never actually been exercised against a real LibreOffice binary — libvips is a single self-contained process with no forking launcher. Depending on which LibreOffice build/package ends up in the worker image, `/usr/bin/soffice` is either (a) a thin script/binary that directly `exec`s into `soffice.bin` — in which case the PID never changes and `Setpgid` on the original child correctly covers the real worker process — or (b) an `oosplash`-based launcher that **forks** a separate `soffice.bin` child process, a documented pattern in LibreOffice's own mailing-list history ("killing soffice.bin from oosplash") specifically because POSIX signal-forwarding from a launcher to a forked child is inherently racy. If the packaged build forks rather than execs, and the forked child ever calls `setsid`/detaches into its own session (a plausible defensive move for a GUI app trying to survive terminal disconnects), `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)` will kill the launcher but the real `soffice.bin` doing the actual (possibly stuck) conversion work can survive, orphaned, still holding its profile lock — recreating Pitfall 3's poisoning scenario even with per-job profile dirs, because the orphaned process keeps running indefinitely, consuming CPU/RAM the timeout was supposed to reclaim.
 
 **Why it happens:**
-The naive version of a delivery system ("send the POST, if it fails try again in N seconds") looks correct in isolation and only breaks under load or partial-outage conditions that don't show up in a demo.
+The hardened-exec wrapper's contract ("kill the whole process group") is correct in principle, but its soundness depends on an assumption about the specific binary's process topology that has never been tested against real LibreOffice — it was written speculatively, ahead of this milestone, based on general awareness of `soffice.bin`'s reputation rather than verification against the actual chosen Docker base image's LibreOffice package.
 
 **How to avoid:**
-- Use exponential backoff with jitter (e.g., 1s, 5s, 30s, 5m, 30m, up to hours) and a hard cap on both retry count and total time window (industry-common: 24-48h before giving up).
-- Cap the number of *concurrent* in-flight delivery attempts to a single `callback_url`/client so a burst of completed jobs doesn't multiply into a burst of simultaneous POSTs to the same struggling endpoint.
-- After exhausting retries, mark the delivery permanently failed in `webhook_deliveries` and surface it (metrics/log) rather than deleting or silently stopping — this ties directly into the observability phase.
-- If asynq is reused to schedule webhook delivery attempts (natural fit given it already provides delayed/retry task scheduling), apply the same `IsFailure`/backoff configuration used for the fix in Pitfall 1, rather than hand-rolling a second retry mechanism.
+- On the actual runtime base image chosen for the worker (Debian bookworm-slim, matching existing `Dockerfile.worker`), explicitly verify empirically: spawn a `soffice --headless` conversion of a document engineered to hang (e.g., an extremely complex file, or a test-only stub binary that sleeps), let `runCommand`'s timeout fire, and run `ps -ef` / `pgrep soffice` immediately after to confirm **zero** `soffice`/`soffice.bin`/`oosplash` processes remain. Do this as an explicit integration test, not a one-off manual check, since a Debian package upgrade could silently change the launcher topology later.
+- Prefer invoking `soffice.bin` directly (bypassing any wrapper/launcher script) if the package layout allows it — several production LibreOffice-conversion wrappers do exactly this specifically to sidestep launcher-forking ambiguity.
+- If forking is confirmed, extend the kill to also search for and kill any `soffice.bin` processes whose profile-dir argument matches the job's per-job `UserInstallation` path (belt-and-suspenders), not just the process group.
 
 **Warning signs:**
-- Retry interval is a fixed constant with no backoff multiplier.
-- No maximum attempt count or expiry in the webhook delivery loop/schema.
-- No metric for "deliveries currently in the retrying state" or "deliveries that exhausted retries."
+- Any `docker exec <worker> ps aux` during/after load testing showing accumulating `soffice.bin <defunct>` or long-lived orphaned `soffice.bin` entries after their originating job has already timed out/failed in Postgres.
+- Container memory creeping upward over many timeout events without corresponding process count staying flat.
 
 **Phase to address:**
-Webhook delivery phase for the retry/backoff logic; observability phase should add the metric/alert for exhausted deliveries so this doesn't silently rot.
+Must be verified in the core LibreOffice-Converter implementation phase, as an explicit test/checklist item before this milestone is considered done — this directly determines whether the project's one and only timeout-safety mechanism (the hardened-exec wrapper the whole architecture already leans on) actually works for the new engine.
 
 ---
 
-### Pitfall 5: API-key auth that actually trusts network position (Docker network / internal VPC) instead of the key
+### Pitfall 5: Running as `USER nobody` with no writable `$HOME`/font cache will produce cryptic, not obviously LibreOffice-related, startup failures
 
 **What goes wrong:**
-Because clients are "only internal services," it's tempting to treat network reachability as sufficient trust and implement auth as an afterthought — e.g., a middleware that's easy to bypass by hitting an internal port directly, or logic that only checks the API key on some routes but not others, or a health/debug/admin endpoint left unauthenticated "because it's internal." The result: anyone who can reach the API on the internal network (which in practice is a larger trust boundary than intended — other teams' services, CI runners, debug tooling, a misconfigured ingress) can submit jobs as any client or read any client's job status, because the code path that's supposed to enforce `client_id` scoping is either missing or only partially wired (this is explicitly already the case in OctoConv today — `internal/api/routes.go:16-20` has zero auth middleware, and `jobs.client_id` exists in the schema but nothing enforces it).
+The current `Dockerfile.worker` runs the worker binary as `USER nobody` with no `HOME` environment variable set and no font packages installed — fine for libvips (a stateless CLI with no profile/cache needs) but not fine for LibreOffice, which on first run needs to create and write a user profile/configuration directory (normally `$HOME/.config/libreoffice`) and, separately, build/read a fontconfig cache. On most minimal base images, `nobody`'s `$HOME` in `/etc/passwd` is `/nonexistent` or similarly unwritable. The failure mode here is not a clean, obvious "permission denied, please chmod" — it is typically one of: `soffice` hanging on startup waiting on a directory it cannot create, a bare non-descriptive fatal crash, or (per the per-job `-env:UserInstallation` fix in Pitfall 3) the same failure just relocated to whatever temp directory is chosen for the profile if that directory itself is not writable by `nobody`.
 
 **Why it happens:**
-"Internal service" is treated as a synonym for "trusted," but internal network boundaries erode constantly (shared clusters, service meshes, third-party CI, contractors, misconfigured network policies) and are not something the application itself controls or can verify. The org constraint here (see PROJECT.md: "auth requirements not reduced despite internal-only clients") exists precisely because this mistake is common enough to call out explicitly.
+`nobody` is deliberately a minimal, low-privilege account with no home directory by design — this is exactly why it was already chosen for security (limiting blast radius of untrusted-input engine execution), but LibreOffice, unlike libvips, actually needs a small amount of writable, per-process state to function at all.
 
 **How to avoid:**
-- Enforce API-key auth as middleware applied globally to the router (or an explicit allowlist of the 1-2 truly public routes like `/healthz`), not opt-in per-handler — opt-in auth is the pattern that leaks unauthenticated routes over time as new endpoints get added.
-- Resolve the API key to a `client_id` in the middleware and thread it through `context.Context`; every handler that reads/writes a `jobs` row must filter/verify against that `client_id`, not just trust the caller-supplied job ID.
-- Return `404` (not `403`) for jobs that exist but belong to a different client, to avoid confirming job-ID existence to an unauthorized caller.
-- Do not treat "runs inside the Docker/K8s internal network" as an auth bypass condition anywhere in the code, even temporarily for local dev — use a distinct, clearly-fake dev API key seeded in `docker-compose.yml` instead of an auth-skip flag, so the auth code path is always exercised.
+- Explicitly set `HOME` for the worker process (or at minimum for each `soffice` invocation via `cmd.Env` in a LibreOffice-specific wrapper around `runCommand`) to a location guaranteed writable by `nobody` — the simplest robust choice is the same per-job `os.MkdirTemp` workDir already created in `process()` (which is created by the worker process itself, so it inherits whatever UID the worker runs as, and is already cleaned up via `defer os.RemoveAll(workDir)`).
+- Confirm `/tmp` in the runtime image is world-writable (standard `1777` — true by default on `debian:bookworm-slim`, but worth an explicit assertion/test rather than an assumption, since a future hardening pass to the Dockerfile could tighten this).
+- Pre-provision the LibreOffice font cache once (a fontconfig cache build, e.g., `fc-cache -f`) during the Docker **build** stage as `root`, so `nobody` at runtime only ever needs to *read* the cache, never build it from scratch — building it lazily at runtime as an unprivileged user with no writable home is a likely source of the "first request is mysteriously slow/fails, subsequent ones are fine" symptom documented in several LibreOffice-in-Docker projects.
+- Explicitly install a font package (at minimum `fonts-liberation` or `fonts-dejavu-core`, both liberally licensed and Debian-packaged) rather than shipping zero fonts — see Pitfall 7 for why this also affects output correctness, not just startup.
 
 **Warning signs:**
-- Any route registered outside the auth middleware group without a documented reason.
-- A `client_id` on the `jobs` row that's set once at creation but never checked again on read (`GET /v1/jobs/{id}` returning any job regardless of the caller's key).
-- Environment-variable or build-flag "skip auth" toggles that could accidentally ship enabled.
+- Worker container logs showing `soffice`/LibreOffice invocations that neither succeed nor time out within a normal duration on the very first request after a fresh container start, but behave normally afterward (classic "lazily building a cache it can't persist" signature).
+- Any conversion failing identically and immediately regardless of input document — a strong signal the failure is environmental (profile/HOME), not document-specific.
 
 **Phase to address:**
-Auth phase — explicitly the first hardening priority per PROJECT.md Key Decisions ("Auth + rate limiting — первый приоритет hardening").
+Must be handled in the core LibreOffice-Converter implementation phase, specifically in the `Dockerfile.worker` changes — this is a one-time environment-provisioning cost, cheap to get right up front, expensive to debug after the fact because the resulting errors do not obviously point at "HOME is unwritable."
 
 ---
 
-### Pitfall 6: API keys stored/logged in plaintext, or rotation designed as an afterthought
+### Pitfall 6: A single malicious/malformed office document can exhaust CPU/RAM well within `DOCUMENT_ENGINE_TIMEOUT` — wall-clock timeout alone does not bound worst-case resource usage the way it effectively does for libvips
 
 **What goes wrong:**
-Keys generated for the `clients` table get stored as plaintext (or reversibly encrypted) rather than hashed, meaning a database read (backup leak, replica misconfiguration, insider access) exposes every client's live credential. Separately, keys get logged in cleartext via standard HTTP access logs or error logs (`Authorization` header dumped on a 401/500), and because rotation was never designed in from the start, the schema has only one active key per client — rotating a leaked key requires either an outage window (old key stops working before the new one is distributed) or an emergency schema migration under pressure.
+The milestone plan's only stated document-specific safeguard is `DOCUMENT_ENGINE_TIMEOUT` (a larger wall-clock bound than `ENGINE_TIMEOUT`, to accommodate legitimately slow large-file conversions). This is a materially weaker guarantee for LibreOffice than the equivalent timeout is for libvips. libvips processes images with a roughly predictable memory footprint proportional to (already pixel-limited via `MAX_IMAGE_PIXELS`, per the existing decompression-bomb protection) decoded pixel buffers — a stuck/slow libvips job is overwhelmingly a *time* problem, not a *memory* problem, so a wall-clock timeout is a reasonably tight proxy for "this went wrong, kill it." LibreOffice's resource profile under a crafted or pathological document (a spreadsheet with an enormous but sparsely-populated used-range, deeply nested/merged tables, thousands of embedded images or OLE objects, ZIP-based OOXML "quadratic blowup" via highly-repetitive shared-string tables) is a genuine, separate DoS surface: LibreOffice can spike to multiple GB of RSS well *before* the wall-clock timeout fires, especially on a busy CPU where the same clock budget yields less real work done. A timeout still eventually kills the process, but only *after* the container has potentially already been OOM-killed by the kernel (see the shared-container pitfall in Technical Debt Patterns below), which is a much worse failure mode than a clean timeout-triggered `SkipRetry`/`failed` job.
 
 **Why it happens:**
-Hashing feels like unnecessary friction for an "internal, low-stakes" system, and rotation is invisible until the first time a key needs to be rotated urgently (compromise, employee offboarding) — at which point the lack of a grace-period mechanism turns a 5-minute credential swap into a coordinated multi-team incident.
+Office document formats (OOXML/ODF) are ZIP containers of deeply-relational XML with no built-in size/complexity ceiling analogous to an image's simple width x height product — the same class of "declared vs. actual size" attack this project already explicitly defended against for images (`MAX_IMAGE_PIXELS`, magic-byte + declared-size validation, Phase 7 in `.planning/PROJECT.md`) has a real analog for spreadsheets/documents (cell count x formula complexity, embedded-image count/size, XML entity/reference nesting) that the current milestone scope does not mention addressing.
 
 **How to avoid:**
-- Store only a salted hash (SHA-256 is sufficient for high-entropy random API keys, unlike password hashing) of the API key in `clients`; show the raw key to the operator exactly once at creation time.
-- Support two simultaneously-valid keys per client from day one (e.g., `clients.api_key_hash` + `clients.api_key_hash_secondary` with an expiry timestamp on the secondary), even if the rotation *tooling* (CLI/admin endpoint) ships later — retrofitting the schema for multi-key support after the fact is far more disruptive than including the column now.
-- Scrub `Authorization`/API-key headers from all structured logs and error responses at the middleware/logging-config level, not per-handler.
-- Treat key values as secrets in any seed data / fixtures / docker-compose env — don't reuse the same "dev" key across environments long enough for it to end up in a shared `.env.example` that gets copied into a real deployment.
+- Set a hard **container-level memory limit** on whichever container runs document conversions (the existing `docker-compose.yml` already sets `cpus: "2.0", memory: 1g` on the worker — decide explicitly whether document conversions share this limit or get their own, separately-sized container) so a memory-runaway LibreOffice process is killed by the kernel/cgroup (OOM) well before it can affect co-located jobs, rather than silently degrading host memory pressure.
+- At minimum, validate **declared** input complexity cheaply before invoking LibreOffice at all — e.g., reject XLSX/DOCX/PPTX files above a configurable size ceiling (mirroring `MAX_UPLOAD_BYTES`, which already exists at the API layer) and, if feasible without adding a new dependency, a cheap pre-check of the ZIP central directory (already unzipping the file is required anyway to read `[Content_Types].xml`) for absurd nesting/entry counts — the same "detect before you fully process" philosophy already used for image decompression bombs.
+- Do not treat `DOCUMENT_ENGINE_TIMEOUT` alone as equivalent protection to what `ENGINE_TIMEOUT` + `MAX_IMAGE_PIXELS` jointly provide for images — the roadmap should explicitly decide whether a memory ceiling / input-complexity check is in scope for this milestone or an accepted, documented residual risk for v1.2.
 
 **Warning signs:**
-- `clients` table has a single plaintext `api_key` column with no hash and no secondary-key column.
-- Access logs or error handlers include the raw `Authorization` header value.
-- No documented/scripted process exists for "rotate this client's key without downtime."
+- Worker container OOM-kill events (visible via `docker inspect`/`OOMKilled: true`, or a spike in container restarts) correlating with document conversions, especially before `DOCUMENT_ENGINE_TIMEOUT` would have fired.
+- Document conversion jobs whose engine RSS (if instrumented) grows non-linearly with input file size.
 
 **Phase to address:**
-Auth phase.
-
----
-
-### Pitfall 7: Reconciler double-processing jobs that are merely slow, not actually stranded
-
-**What goes wrong:**
-The reconciler/sweeper scans for jobs stuck in `queued` (or `active`) past a threshold and re-enqueues them — but "stuck" is inferred purely from elapsed wall-clock time on the DB row, without checking whether a worker is, in fact, still actively processing that job (just slowly, e.g. a large image or a briefly overloaded libvips process). The reconciler re-enqueues a duplicate task; now two workers race to process the same job concurrently, both call `MarkActive`/`MarkDone` against the same row, produce two competing writes to the same `results/{job_id}/...` storage key, and the client's presigned download URL may point at whichever write "won," non-deterministically. This is the single most likely new bug this milestone introduces, because it directly modifies the exact state machine and enqueue path already flagged as fragile in CONCERNS.md.
-
-**Why it happens:**
-A time-based sweep is the simplest reconciler to write, but "job has been in `queued`/`active` longer than N minutes" conflates two very different situations: (1) the enqueue call genuinely failed after the DB write committed (the documented gap in `internal/api/handlers.go:105-109`) — safe to re-enqueue, nothing is running; and (2) the job is legitimately mid-flight in a worker that's just slow or under load — unsafe to re-enqueue, a duplicate will race the original.
-
-**How to avoid:**
-- Give the reconciler a way to distinguish "never made it into the queue" from "in the queue/being processed but slow." Options, in order of robustness:
-  - Best: use asynq's own inspector API (verified via Context7/official docs) to check whether a task with this job's ID actually exists in the queue (scheduled/pending/active/retry sets) before re-enqueueing — if asynq already knows about it, do not duplicate.
-  - Minimum: use a heartbeat/lease pattern — the worker periodically updates an `updated_at`/`lease_expires_at` timestamp on the `active` job row while processing; the reconciler only re-enqueues `active` jobs whose lease has actually expired (not just "old"), and only re-enqueues `queued` jobs whose age exceeds a bound tied to a max realistic enqueue-lag, not conversion time.
-- Make re-enqueue itself idempotent at the queue layer: derive the asynq task ID deterministically from the job ID (asynq supports unique task options — verified via official docs `asynq.TaskID`/`asynq.Unique`) so a duplicate enqueue for the same job ID is rejected by asynq itself rather than relying purely on reconciler logic to never race.
-- Make the worker handler itself idempotent regardless of reconciler correctness (defense in depth): before running the conversion, check if `results/{job_id}/...` already exists and the job is already `done`; if so, no-op rather than re-converting and re-uploading.
-- Reconcile in both directions deliberately and separately: "stranded queued row with no matching queue task" (recoverable) vs. "orphaned queue task with no matching DB row" (shouldn't happen but log/alert if it does) — don't collapse these into one sweep function.
-
-**Warning signs:**
-- Reconciler query is only `WHERE status = 'queued' AND created_at < now() - interval`, with no check against asynq's actual queue/task state.
-- No idempotency key or unique task ID used when the reconciler calls the same `Enqueue*` function the API handler calls.
-- No test exercises "reconciler runs concurrently with a legitimately slow in-flight job" — only "reconciler runs against a job that was never enqueued."
-- Worker handler has no short-circuit for "output already exists in storage for this job ID."
-
-**Phase to address:**
-Reconciler phase — should be sequenced *after* the retry-safety fix (Pitfall 1), because a correct reconciler needs the state machine to already distinguish transient-retry-in-progress states from truly-abandoned ones; building the reconciler against the current single-attempt state machine will encode assumptions that break once retry-safety changes the state machine underneath it.
-
----
-
-### Pitfall 8: Reconciler and asynq's own retry mechanism fighting over the same job
-
-**What goes wrong:**
-Once Pitfall 1 is fixed (asynq retries transient failures), the system now has *two* independent recovery mechanisms operating on the same job: asynq's built-in redelivery (for tasks that got into the queue but whose handler failed transiently) and the new reconciler (for jobs whose DB row exists but which may never have made it into the queue, or whose queue task is presumed lost). If these two mechanisms aren't designed with a shared understanding of "who owns recovery for which failure mode," they can both attempt to recover the same job simultaneously — e.g., the reconciler re-enqueues a job that asynq was about to retry naturally, doubling concurrency on that job right when Pitfall 7's race condition is most likely to bite.
-
-**Why it happens:**
-Retry-safety and reconciliation are usually planned as two separate, sequential backlog items ("fix retries," then later "add a sweeper for stuck jobs") without an explicit design pass on how their responsibilities don't overlap — each looks complete in isolation.
-
-**How to avoid:**
-- Write down (in the design, not just in code comments) a clear ownership split: asynq's retry/backoff owns recovery for tasks *known to be in the queue* that failed; the reconciler owns recovery only for the enqueue-gap case (DB row exists, no corresponding queue task ever got created, or is provably gone e.g. after asynq's own retry budget is exhausted and the task was archived/dead-lettered).
-- Have the reconciler check asynq's queue/archive state (via the inspector API) before acting, so it never re-enqueues a job that asynq is still actively retrying.
-- Consider: for jobs whose asynq task was archived (retries exhausted), decide explicitly whether that's a terminal failure (surface to client, no reconciler action) or a candidate for reconciler-driven re-enqueue with a distinct, lower threshold count — don't let the reconciler retry indefinitely, or you've just built an infinite-retry loop with extra steps.
-
-**Warning signs:**
-- Reconciler and asynq retry configuration were designed/implemented in separate PRs without either referencing the other's failure-handling assumptions.
-- No single source of truth for "how many total attempts has this job had" across both mechanisms combined (asynq's per-task retry count and any reconciler-driven re-enqueues need to sum toward one job-level attempt cap).
-
-**Phase to address:**
-Reconciler phase, but requires explicit acknowledgment of the retry-safety phase's design as an input — flag this as a phase *dependency*, not just an ordering preference.
-
----
-
-### Pitfall 9: Rate limiting implemented at a layer that doesn't match the actual bottleneck, or that trusts the same weak identity as auth
-
-**What goes wrong:**
-Rate limiting gets added per-IP (meaningless for internal services often calling through a shared gateway/NAT, where many clients share one source IP, or one client's traffic looks like it comes from many pods) instead of per-`client_id` derived from the verified API key. Or, rate limiting is enforced only at the HTTP layer (requests/sec to `POST /v1/jobs`) while the actual scarce resource is worker/conversion capacity — a client under the request-rate limit can still flood the queue with a burst of large, slow-converting jobs and starve every other client's jobs, because nothing limits *concurrent in-flight jobs per client*, only request rate.
-
-**Why it happens:**
-Per-IP rate limiting is the default example in every rate-limiting library/tutorial and is trivial to bolt onto chi middleware without touching the auth-derived identity; it's easy to ship without realizing it doesn't map to the actual multi-tenancy model (multiple clients behind shared infra, or one client's burst monopolizing shared worker concurrency regardless of request rate).
-
-**How to avoid:**
-- Key all rate limiting off the authenticated `client_id`, never off IP — this requires rate limiting middleware to run *after* auth middleware in the chain, not before.
-- Add a second limiter dimension beyond requests/sec: cap concurrent in-flight (`queued`+`active`) jobs per client, since that's what actually protects shared worker concurrency (`WORKER_CONCURRENCY`) from one noisy client — a burst of accepted-but-queued jobs is just as damaging as a burst of raw requests.
-- Return `429` with a `Retry-After` header so well-behaved internal clients back off correctly instead of hammering.
-
-**Warning signs:**
-- Rate limit middleware reads `r.RemoteAddr`/`X-Forwarded-For` instead of the resolved client identity from auth context.
-- Only one rate-limiting dimension exists (request rate), with no per-client cap on jobs currently `queued`/`active`.
-
-**Phase to address:**
-Rate limiting phase, sequenced immediately after auth (rate limiting has a hard dependency on auth resolving a `client_id` first).
-
----
-
-### Pitfall 10: Magic-bytes validation that trusts the sniffed type without re-checking against the requested conversion pair, or that itself becomes a decompression-bomb vector
-
-**What goes wrong:**
-Magic-bytes sniffing gets added to replace trusting the file extension/Content-Type (closing the gap flagged in CONCERNS.md), but two follow-on mistakes are common: (1) the code sniffs the type and stores/logs it but doesn't actually *reject* mismatches against the client-declared source format before enqueueing — so a mismatched file still reaches the worker and either fails late (wasting a worker slot/timeout) or, worse, is silently "coerced" into being processed as the client-declared type; (2) the sniffing step itself reads/buffers more of the file than necessary to make a decision, or triggers early decode, reintroducing a resource-exhaustion vector at the API layer instead of the worker layer — moving the decompression-bomb risk (already flagged in CONCERNS.md for the worker) earlier in the pipeline rather than eliminating it.
-
-**Why it happens:**
-Magic-bytes checks are often treated as a pure "detect and log" addition bolted onto the existing upload handler without revisiting the accept/reject decision point, and sniffing libraries that read a small fixed-size header are assumed to be safe by default without confirming they don't attempt a full decode.
-
-**How to avoid:**
-- Reject (422, same status as the existing unsupported-pair check) at upload time when sniffed magic bytes don't match the client-declared source format — don't just log and proceed.
-- Ensure sniffing reads only a small, bounded header (a few hundred bytes to a few KB), never a full decode, at the API layer — this is a distinct, smaller check than the full decompression-bomb guard the worker still needs (per CONCERNS.md, that guard doesn't exist yet either and should be tracked alongside, even if not literally the same phase).
-- Reuse the same format/pair validation logic path that already exists for extension-based checks (`internal/convert` registry) so magic-bytes becomes an additional gate in front of it, not a parallel, divergent code path.
-
-**Warning signs:**
-- Magic-bytes result is logged/stored but the existing 422-on-unsupported-pair logic is untouched (still only keyed off extension).
-- The sniffing library/call reads the entire file into memory or invokes a decoder rather than checking a fixed header prefix.
-
-**Phase to address:**
-Magic-bytes validation phase; flag the worker-side decompression-bomb guard (pixel-count/dimension limits) as a related-but-separate CONCERNS.md item that this phase does not by itself resolve.
+Should be explicitly decided (not silently deferred) in the core LibreOffice-Converter implementation phase: either (a) ship a memory-ceiling/complexity-check alongside the timeout as launch-blocking, or (b) explicitly document it in `.planning/PROJECT.md`'s "Out of Scope"/accepted-risk list the same way CAD and HTML->PDF already are, so it is a deliberate decision rather than a silent gap discovered later via an incident.
 
 ---
 
@@ -248,100 +151,101 @@ Magic-bytes validation phase; flag the worker-side decompression-bomb guard (pix
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|-----------------|------------------|
-| Single API key per client, no rotation support in schema | Faster auth phase delivery | Emergency key rotation requires a schema migration under incident pressure | Never for this milestone — add the secondary-key column now even if rotation tooling ships later |
-| Time-based-only reconciler sweep (no queue-state check) | Simple to implement and reason about | Double-processes legitimately slow jobs (Pitfall 7) once volume/latency variance increases | Only acceptable as a stopgap if reconciler action is "alert a human," never "auto re-enqueue," until queue-state checking is added |
-| Fixed-interval webhook retry with no backoff | Simple, ships fast | Retry storms against a degraded receiver (Pitfall 4) | Acceptable only for a true MVP with a single, well-known internal consumer and manual monitoring — not for general `callback_url` support |
-| Treating "runs on internal network" as implicit auth | Skips auth middleware plumbing | Silent full-access bypass the moment network boundaries shift (Pitfall 5) | Never |
-| Logging full request/response bodies for webhook delivery debugging | Easier troubleshooting | Leaks signing secrets or client payload data into log aggregation | Only with signature/secret fields explicitly redacted before logging |
+| Reuse `ENGINE_TIMEOUT`'s attempt-scoped `context.WithTimeout` pattern in `process()` verbatim for `DOCUMENT_ENGINE_TIMEOUT` without re-deriving a document-specific `asynq.Unique` TTL (i.e., copy `ImageUniqueTTL`'s constant/shape instead of computing a genuine `DocumentUniqueTTL(maxRetry, DOCUMENT_ENGINE_TIMEOUT)`) | Saves writing/testing a second derived-TTL function | If `DOCUMENT_ENGINE_TIMEOUT` is meaningfully larger than `ENGINE_TIMEOUT` (which the milestone explicitly says it will be) and the unique-lock TTL is not derived to match, a single long-running LibreOffice attempt can outlive its own dedupe lock while still legitimately in progress, letting the reconciler spawn a second concurrent task for the same job (the exact T-03-10 double-processing race the image path was already hardened against) | Never — this is a straightforward, already-proven pattern (`ImageUniqueTTL`) to replicate with the right constants; there is no good reason to skip it |
+| Run the document converter inside the same worker binary/container/`WORKER_CONCURRENCY` pool as image conversions, sharing the existing 2 CPU/1 GiB `docker-compose.yml` resource limits | No new Dockerfile/compose service, fastest to ship | A single heavy or malicious document conversion can starve/OOM the shared container, degrading or failing concurrent image jobs that have nothing to do with the document engine — directly contradicting this project's own documented "engine-class queue routing... so worker pools can scale independently per engine" architectural intent | Acceptable only as an explicit, time-boxed MVP decision for a first internal-only rollout with a known single low-volume consumer (per PROJECT.md's stated context of one concrete internal service needing this now) — should be revisited before any second consumer/higher volume onboards |
+| Ship the LibreOffice converter with only `terminalVipsSignatures`-style stderr matching for terminal/transient classification, without an output-file sanity check | Matches the existing `isTerminal` pattern with minimal new code | Silent "success" on empty/corrupted PDFs (Pitfall 2) ships to production and is only discovered when a client complains about an unusable file | Never acceptable as the shipped state — the output-sanity check is cheap and closes a real correctness gap, not a hypothetical one |
+| Skip a per-job unique `-env:UserInstallation` profile directory and rely on a single shared LibreOffice profile per worker process | Slightly simpler `Convert()` implementation | A single stuck/killed conversion can leave a stale lock that blocks every subsequent document conversion until manual intervention (Pitfall 3) — a full outage from one bad file | Never — the per-job profile dir is a one-argument addition with no real downside |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
-|-------------|-----------------|-------------------|
-| asynq (Redis) | Treating `MaxRetry` config as sufficient without handler-level error classification | Combine `IsFailure` predicate + explicit terminal/transient error taxonomy in the handler (Pitfall 1) |
-| asynq (Redis) | Reconciler re-enqueues without checking asynq's own queue/archive state first | Use the asynq inspector API to check task existence/state before re-enqueueing; use `asynq.TaskID`/unique options to make re-enqueue idempotent at the broker level |
-| Postgres (job state machine) | State transition guards only permit forward-only transitions (`queued->active->done/failed`), blocking legitimate retry re-entry | Add an explicit re-entrant path (`active->active` no-op, or a retry-count-aware transition) rather than loosening the guard entirely |
-| MinIO/S3 (webhook payload) | Presigned download URL embedded in the webhook payload generated against an internal-only hostname unreachable by the receiving service (the exact `minio:9000` issue already flagged in CONCERNS.md for the polling API) | Generate the presigned URL used in webhook payloads against the same externally-reachable endpoint config as `GET /v1/jobs/{id}`, and add a smoke test that fetches the URL from outside the internal network |
-| Internal HTTP clients receiving webhooks | Assumed to always implement retry/backoff/idempotency correctly with no contract given | Publish an explicit webhook contract doc (headers, signature scheme, delivery-ID semantics, expected response codes) so internal teams don't each reinvent handling |
+|--------------|------------------|--------------------|
+| Existing `runCommand` hardened-exec wrapper (`internal/convert/exec.go`) | Assuming its process-group-kill guarantee, written speculatively with LibreOffice in mind but never tested against it, actually holds for the specific LibreOffice package/launcher chosen | Explicitly verify (Pitfall 4) via an integration test that spawns a hung `soffice --headless` call and confirms zero surviving processes after the timeout fires, on the exact base image used in `Dockerfile.worker` |
+| Existing `isTerminal()` classifier (`internal/worker/worker.go`) | Reusing `terminalVipsSignatures` string list or assuming LibreOffice's failure vocabulary/exit-code semantics match libvips' (always-non-zero-exit) behavior | Build a separate, LibreOffice-specific terminal-signature list from real observed stderr text, and add the generic output-sanity check (Pitfall 2) that does not depend on exit code or stderr text at all |
+| Existing reconciler (`internal/reconciler/reconciler.go`) | Leaving `enqueuer`/`FindStale` hardcoded to the image queue when adding the document queue | Make the reconciler engine/format-aware (Pitfall 1) before the document queue goes live — this is not a "nice to have," it is an existing production component that will act on document jobs immediately |
+| Existing `asynq.Unique` TTL derivation (`internal/queue/queue.go`'s `ImageUniqueTTL`) | Hardcoding or copy-pasting the image TTL constant instead of computing `DocumentUniqueTTL` from `DOCUMENT_MAX_RETRY`/`DOCUMENT_ENGINE_TIMEOUT` following the exact same derivation formula | Write `DocumentUniqueTTL` (and a matching `DocumentRetryDelay`/schedule if document retry semantics should differ from image's fast 2s/5s/15s schedule — LibreOffice failures are less likely to be quick network blips and may warrant a slower backoff) |
+| Docker base image (`Dockerfile.worker`) | Installing a LibreOffice package without also setting `HOME`, pre-building the fontconfig cache as root, and installing at least one font package | Add `HOME` env / per-job profile dir, `RUN fc-cache -f` in the build/runtime stage as root before dropping to `USER nobody`, and install `fonts-liberation`/`fonts-dejavu-core` explicitly (Pitfall 5, Pitfall 7) |
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|-----------------|
-| Reconciler sweep runs a full-table scan over `jobs` on every tick | Sweep latency grows with total historical job count, not just the stuck subset | Index/partial-index on `status` (or a partial index `WHERE status IN ('queued','active')`), and bound the sweep to a reasonable lookback window | Once job history grows past tens of thousands of rows without an index |
-| Webhook delivery sent synchronously from the worker's job-completion path | Worker slot blocked on a slow/unresponsive receiver, reducing effective conversion concurrency (echoes the existing "no timeout on storage/DB calls" issue in CONCERNS.md) | Enqueue webhook delivery as its own asynq task (or outbox row processed by a separate dispatcher), decoupled from the conversion worker's critical path | As soon as any single internal consumer has non-trivial latency or intermittent slowness |
-| Rate limiter backed by an in-memory counter per API instance | Effective limit is `configured_limit * replica_count`, silently far looser than intended once the API scales horizontally | Use a shared store (Redis, already in the stack via asynq) for rate-limit counters, not per-process memory | The moment the API runs more than one replica |
+| Shared worker container/goroutine pool for image + document engines | Image job latency/timeouts spike specifically when a large document conversion is also in flight; container memory usage correlates with document job concurrency, not just image job volume | Give the document engine class its own container/deployment (separate `cmd/worker`-style binary or a config flag selecting which queues a given worker process serves) with its own resource limits, matching the project's stated engine-class-isolation intent | Breaks as soon as document conversion volume/size is non-trivial relative to image volume — likely visible even at modest internal usage given LibreOffice's much heavier per-conversion footprint vs. libvips |
+| Cold-start cost per conversion (no long-lived LibreOffice listener process) | Every document conversion pays LibreOffice's multi-second startup cost (loading UNO components, building font metrics) on top of actual conversion time | Accept this cost deliberately (it is the safe, well-supported pattern — see Pitfall 3's warning against a shared listener process) rather than "optimizing" toward a persistent `--accept=` daemon that reintroduces shared-state instability | Becomes a real UX/throughput problem only at high sustained document-conversion request rates — for this project's "one internal consumer, real need now" scope, likely acceptable as-is; revisit if volume grows enough to justify a properly-designed worker-pool-of-N-isolated-instances architecture (what Gotenberg itself does) |
+| Unbounded per-job profile directories under `/tmp` if a job hangs long enough to be killed by the reconciler rather than the engine timeout | Disk usage on the worker grows if `os.RemoveAll(workDir)` cleanup is ever skipped on a code path (e.g., a panic before the `defer` registers, or a process crash) | Rely on the existing `defer os.RemoveAll(workDir)` pattern already in `process()` (correct as written) but add a periodic sweep/cleanup of orphaned `octoconv-*` temp directories older than some threshold as a defense-in-depth measure, given LibreOffice's higher crash/kill likelihood than libvips | Only manifests after repeated worker crashes/OOM-kills over time — low urgency, but cheap to add alongside the LibreOffice work while the failure mode is fresh in mind |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Reusing the client's inbound API key as the webhook HMAC signing secret | A leaked API key compromises both inbound auth and the receiver's ability to trust webhooks; also complicates independent rotation | Separate `webhook_secret` per client, rotatable independently of the API key |
-| No constant-time comparison when validating any HMAC/signature server-side | Timing side-channel could theoretically assist forgery over many attempts | Use `hmac.Equal` (Go stdlib) or equivalent constant-time compare, never `==`/`bytes.Equal` on secret-derived values |
-| Returning `403` instead of `404` for jobs belonging to another client | Confirms job-ID existence/enumeration to an unauthorized caller | Return `404` uniformly for "doesn't exist" and "exists but not yours" |
-| Presigned S3 URLs with long/default expiry embedded in webhook payloads that may sit in a receiver's logs indefinitely | A logged webhook payload becomes a long-lived, unauthenticated download link to the client's converted file | Use short presigned URL expiry (minutes, not the S3 default which can be much longer) and consider requiring the receiver to call back to `GET /v1/jobs/{id}` for a fresh URL rather than embedding a long-lived one |
-
-## UX Pitfalls
-
-| Pitfall | User Impact | Better Approach |
-|---------|--------------|-------------------|
-| Client has no way to know whether webhook delivery ever succeeded, only whether polling shows job `done` | Internal teams silently fall back to polling anyway, defeating the point of adding webhooks | Expose delivery status/history via `GET /v1/jobs/{id}` (e.g. embed the latest `webhook_deliveries` status) so clients can debug their own integration without DB access |
-| Rate-limit rejection returns a bare `429` with no guidance | Internal teams hardcode arbitrary retry delays or hammer the endpoint | Always include `Retry-After` and a machine-readable reason in the 429 body |
-| Reconciler-recovered jobs are indistinguishable from normally-processed jobs in the API response | Hard to debug "why did my job take 10x longer than usual" | Record reconciler intervention in `job_events` (an append-only log already exists per PROJECT.md) so it's visible via the same audit trail as other transitions |
+| Treating office documents as "just another file format" with the same threat model already covered by magic-byte validation (Phase 7 of v1.0) | OOXML/ODF documents are ZIP containers of XML — magic-byte + declared-size checks (built for flat raster image formats) do not address ZIP-based resource-exhaustion vectors (nested/repetitive compression, huge shared-string tables) at all; a format-pair check passing does not mean the document is safe to hand to LibreOffice | Add a document-specific pre-check layer (Pitfall 6) distinct from the existing image magic-byte validator — do not assume the prior phase's protections generalize to this format family |
+| Allowing LibreOffice to process documents containing macros or external references (remote image/OLE links, DDE fields) without disabling them | LibreOffice headless conversion of a document with macros or a remote-reference field could, depending on configuration, attempt outbound network calls or execute embedded code during "just" a format conversion — a document-borne SSRF/RCE surface this project has no prior experience defending against (the existing SSRF hardening was built entirely around `callback_url` webhook delivery, not document content) | Explicitly invoke LibreOffice with macro execution disabled (`--headless` alone does not guarantee this on all versions — verify the exact CLI flags/registry modifications needed to lock down macro security level via the per-job user profile) and treat this as a launch-blocking security review item, not an afterthought |
+| Leaving a stale LibreOffice profile/lock directory world-readable/writable under a shared `/tmp` on a multi-tenant-ish worker container | If profile directories are not job-scoped and cleaned up, one client's converted-document metadata/temp artifacts could theoretically be visible to a subsequent job's LibreOffice process reusing the same profile path | The same per-job unique `UserInstallation` + `os.MkdirTemp` + `defer os.RemoveAll` pattern already recommended for Pitfall 3 also closes this cross-job data-exposure angle as a side effect |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Retry-safety fix:** Often missing a test that actually forces a transient failure and asserts the job succeeds on a subsequent asynq redelivery — verify by writing a test that injects one failing then one succeeding storage/DB call and confirms the job reaches `done`, not just that the code compiles against the new error taxonomy.
-- [ ] **Webhook delivery:** Often missing signature verification documentation/reference implementation for consumers — verify a sample verifier script/snippet exists and was tested against a real delivered payload, not just that signing code exists on the sender side.
-- [ ] **Reconciler:** Often missing a test for the "job is legitimately still processing, slowly" case — verify by writing a test where the reconciler runs mid-flight against an `active` job with a fresh heartbeat and asserts it does NOT re-enqueue.
-- [ ] **API-key auth:** Often missing coverage on *every* route, not just the primary ones — verify by asserting `/healthz` (or documented public routes) plus every `/v1/*` route's auth-enforcement in a single test that iterates the router's registered routes, so a newly added route can't silently ship unauthenticated.
-- [ ] **Rate limiting:** Often missing the per-client concurrent-jobs dimension, only implementing per-request rate — verify by asserting a burst of large jobs from one client is throttled even while under the requests/sec limit.
-- [ ] **Magic-bytes validation:** Often missing an actual reject path — verify with a test that uploads a `.png`-named file containing non-image bytes and asserts a 422, not just that sniffing code runs.
-- [ ] **S3 lifecycle TTL:** Often set only on `results/` and forgotten on `uploads/` (or vice versa) — verify both prefixes have lifecycle rules, and that `job_outputs.expires_at` (already in the schema per CONCERNS.md) is either actually written/enforced or explicitly deprecated in favor of the bucket-level rule.
-- [ ] **Observability:** Often missing metrics for the *failure* paths specifically (webhook exhausted-retry count, reconciler recovery count, auth-rejection count) — verify dashboards/alerts exist for these, not just for happy-path throughput.
+- [ ] **LibreOffice converter registered in `convert.Default`:** Often missing the per-job unique `-env:UserInstallation` argument — verify by grepping the `Convert()` implementation for a per-job temp profile path, not a shared/default one.
+- [ ] **Terminal/transient error classification for documents:** Often missing an output-file sanity check (non-zero size, `%PDF-` magic bytes) entirely, relying only on exit code/stderr like the image path — verify with a test that feeds a "successful but empty output" scenario (can be simulated by wrapping/stubbing the engine call in a test) and asserts the job is NOT marked `done`.
+- [ ] **Reconciler support for the document queue:** Often missing entirely on a first pass — verify `internal/reconciler/reconciler.go`'s `enqueuer` interface has an `EnqueueDocumentConvert` method and `sweep()` actually calls it for document-format stale jobs, with a live/e2e test analogous to the existing RECON-04/RECON-05 verification.
+- [ ] **`DocumentUniqueTTL`/retry schedule:** Often copy-pasted from the image constants instead of independently derived from `DOCUMENT_ENGINE_TIMEOUT`/`DOCUMENT_MAX_RETRY` — verify a dedicated derivation function exists and is unit-tested for monotonicity, mirroring `TestImageUniqueTTL`.
+- [ ] **`Dockerfile.worker` environment for LibreOffice under `USER nobody`:** Often missing `HOME`, a pre-built fontconfig cache, and font packages — verify by running the actual built worker image's document conversion path in CI/staging, not just locally as a non-`nobody` developer user (permission and cache issues frequently only reproduce under the real unprivileged runtime user).
+- [ ] **Hardened-exec timeout kill actually terminates LibreOffice's real worker process:** Often assumed true by inheritance from the doc comment already in `exec.go` without ever being empirically verified against the real LibreOffice binary — verify with an explicit "kill a hung soffice and check `ps` after" test (Pitfall 4).
+- [ ] **Container resource isolation between engine classes:** Often deferred/shared "for now" — verify the roadmap makes an explicit, documented decision (separate container vs. shared) rather than silently inheriting the image worker's existing resource limits.
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
-|---------|-----------------|-------------------|
-| Retrofit retry-safety shipped without full error classification, transient errors still marked terminal | LOW | Add missing error-taxonomy cases incrementally; no schema change needed if the state-machine re-entry path was built correctly the first time |
-| Reconciler double-processes a job (Pitfall 7) in production | MEDIUM | Make the worker handler idempotent (check output-exists-in-storage short-circuit) as a fast mitigation; add asynq-unique-task-ID enforcement as the durable fix; audit `job_events` to find affected jobs |
-| Webhook signing secret leaked | MEDIUM | Rotate `webhook_secret` per affected client (requires the dual-secret schema from Pitfall 6/2 analog); notify affected internal consumers to re-verify against the new secret |
-| API key stored in plaintext discovered post-launch | HIGH | Requires a coordinated rotation of every client's key (forces the "grace period, dual key" mechanism to exist retroactively if it wasn't built in) plus a migration to hash the column and purge plaintext from backups/WAL |
-| Retry storm from an unbounded webhook retry loop degrades a receiver | LOW | Circuit-break: pause deliveries to the affected `callback_url` (flag on the client or endpoint), drain `webhook_deliveries` backlog with backoff once the receiver recovers |
+|---------|-----------------|------------------|
+| Stale profile lock poisoning the document queue (Pitfall 3) discovered in production without the per-job-profile fix already in place | LOW (once diagnosed) | Manually `find`/delete stale `.~lock*` files and any orphaned `soffice.bin` processes on the affected worker container; restart the worker; then ship the per-job `UserInstallation` fix so this cannot recur |
+| Reconciler misrouting document jobs onto the image queue (Pitfall 1) already shipped and has failed some real jobs as `engine_error` | MEDIUM | Query `job_events` for `engine_error` failures with `detail.engine_stderr` containing `no converter for` on document-format jobs; these are false failures — manually re-run/re-enqueue them onto the correct document queue after the reconciler fix ships; notify the affected internal consumer if a webhook already fired a false failure |
+| Silent empty/corrupted PDF already delivered to a client via webhook before the output-sanity check (Pitfall 2) shipped | MEDIUM | Cross-reference `job_outputs.size_bytes` for anomalously small `done` document jobs in the affected time window, proactively contact the affected internal consumer, and backfill the validation check before re-processing |
+| Worker container OOM-killed by a resource-heavy document (Pitfall 6), taking down concurrent image jobs | LOW (operationally, once observed) | The existing transient-error/asynq-retry + reconciler machinery already recovers jobs stranded by a worker crash without code changes — but treat repeated OOM-kills as a signal to expedite the memory-ceiling/isolation fix rather than relying indefinitely on crash-recovery as the safety net |
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
 |---------|-------------------|----------------|
-| 1. Retry-safety retrofit without error classification | Retry-safety / reliability phase (before reconciler) | Test: inject one transient failure + one success, assert job reaches `done` via asynq redelivery, not a second manual attempt |
-| 2. Webhook idempotency key missing | Webhook delivery phase | Payload/header includes a stable delivery ID unchanged across retries; documented in webhook contract |
-| 3. Webhook signature verification missing/broken | Webhook delivery phase | HMAC over raw body + timestamp, per-client secret distinct from API key; sample verifier tested against a real delivery |
-| 4. Webhook retry storm | Webhook delivery phase (logic) + Observability phase (alerting) | Backoff+cap implemented; metric for exhausted/in-flight deliveries exists |
-| 5. Auth trusting network position | Auth phase (first hardening priority) | Route-iteration test asserts every non-public route requires a valid key; `client_id` scoping enforced on read, not just write |
-| 6. API key storage/rotation | Auth phase | Hash-only storage verified; dual-key column present even if rotation tooling is deferred |
-| 7. Reconciler double-processing | Reconciler phase (after retry-safety phase) | Test: reconciler run against a legitimately slow `active` job with fresh heartbeat does not re-enqueue; asynq-unique-task-ID enforced |
-| 8. Reconciler vs. asynq retry ownership conflict | Reconciler phase (explicit dependency on retry-safety phase's design) | Documented ownership split; reconciler checks asynq queue/archive state before acting |
-| 9. Rate limiting on wrong identity/dimension | Rate limiting phase (after auth phase) | Limiter keyed on `client_id`; concurrent-jobs-per-client cap tested independent of request-rate cap |
-| 10. Magic-bytes validation without reject path | Magic-bytes validation phase | Test: mismatched magic bytes vs. declared format returns 422; sniff reads bounded header only |
+| 1. Reconciler hardcoded to image queue | Core LibreOffice-Converter implementation phase (launch-blocking) | Live e2e test: strand a document job, confirm reconciler recovers it via the document queue, not image |
+| 2. Exit-0-but-corrupt output / no output validation | Core LibreOffice-Converter implementation phase (launch-blocking) | Unit/integration test asserting a job is NOT marked `done` when the engine writes a 0-byte or non-PDF-magic output |
+| 3. Profile-lock concurrency + SIGKILL interaction | Core LibreOffice-Converter implementation phase (launch-blocking) | Concurrency test: two simultaneous document conversions on the same worker succeed independently; a killed/timed-out conversion does not block a subsequent one |
+| 4. Process-group kill may not catch `soffice.bin` | Core LibreOffice-Converter implementation phase, explicit verification step (launch-blocking) | Integration test: spawn a hung conversion, let the timeout fire, assert zero surviving `soffice*` processes via `ps`/`pgrep` |
+| 5. Unprivileged-user `$HOME`/font-cache provisioning | Core LibreOffice-Converter implementation phase, `Dockerfile.worker` changes (launch-blocking) | Build and run the actual worker image as `nobody` in CI, execute a real document conversion, confirm no permission/cache errors on a cold container |
+| 6. Resource-exhaustion / DoS via crafted documents | Explicit roadmap decision required in the core phase: either ship a mitigation (memory ceiling + input-complexity pre-check) or formally document as accepted residual risk in `.planning/PROJECT.md`'s Out of Scope, mirroring CAD/HTML->PDF | If deferred: documented and dated; if addressed: load test with a deliberately pathological spreadsheet/document confirming the worker container survives (OOM-kills the conversion, not the whole node) |
+| 7. Font-substitution / version-skew output variance | Can be a documented accepted-limitation for v1.2 — not launch-blocking, but must be communicated to the internal consumer | Documented in release notes / API docs that PDF pagination/layout fidelity depends on the container's installed font set, not guaranteed to pixel-match the original authoring application |
+| Shared worker container/resource contention between engine classes | Should be an explicit decision in the core phase's design, even if the MVP choice is "share for now" | Roadmap or `.planning/PROJECT.md` Key Decisions entry explicitly recording the choice and its tradeoff, so it isn't accidentally load-bearing/permanent by default |
+| Derived `DocumentUniqueTTL`/retry schedule (Technical Debt row) | Core LibreOffice-Converter implementation phase | Unit test mirroring `TestImageUniqueTTL`'s monotonicity/determinism assertions for a new `DocumentUniqueTTL` function |
+
+## Pitfall 7 (non-blocking): Version-Skew and Font-Substitution Output Variance
+
+**What goes wrong:** LibreOffice's rendering/layout engine is not guaranteed to be pixel- or even page-count-stable across minor versions, and — independent of version — a document referencing a font not installed in the conversion environment will be silently substituted with a different font (LibreOffice's own documentation acknowledges font substitution "might result in a broken layout... with unintended line- and page-breaks"). Since the worker container controls exactly which fonts exist (per Pitfall 5, likely a minimal set like `fonts-liberation`/`fonts-dejavu-core`, not the original Microsoft "ClearType"/"Core Fonts for the Web" family many real-world `.docx` files assume), pagination and line-wrapping in the output PDF are very unlikely to exactly match what the document looks like in the client's original authoring application (Word/LibreOffice on their own machine).
+
+**Why it happens:** This is an inherent, structural property of cross-application/cross-environment document rendering, not a bug introduced by this project — every LibreOffice-based conversion service in the ecosystem has this limitation, and none of the wrapper projects surveyed claim to have solved it, only to have installed a broader font set to reduce (not eliminate) the mismatch rate.
+
+**How to avoid / accept:** Install a reasonably broad, redistributable font set (`fonts-liberation` specifically provides metric-compatible substitutes for the most common Microsoft core fonts — Arial/Times New Roman/Courier New equivalents — which meaningfully reduces, though does not eliminate, layout drift) and **pin the LibreOffice package version** in the Dockerfile (not `apt-get install libreoffice` floating-latest) so output does not silently drift across unrelated worker redeploys. Communicate to internal consumers that pixel-perfect layout fidelity to the original authoring application is not guaranteed — this is worth an explicit line in API documentation, not a silent gap.
+
+**Detection:** Not something a warning sign will catch at runtime (it won't throw an error) — the only mitigation is proactive: a small fixed set of "golden" test documents (using common real-world fonts) converted on every LibreOffice version bump, with output page-count/rough-visual diffed against a checked-in baseline, to catch version-upgrade-induced drift before it reaches production.
+
+**Phase to address:** Acceptable as a documented, accepted limitation for v1.2 rather than an engineering problem to solve — but the roadmap should explicitly record the decision (font package chosen, version-pinning policy) in `.planning/PROJECT.md`'s Key Decisions, the same way HTML->PDF and CAD were explicitly scoped out with a documented reason, so it reads as a deliberate choice rather than an oversight discovered later.
 
 ## Sources
 
-- [Task Retry — hibiken/asynq Wiki](https://github.com/hibiken/asynq/wiki/Task-Retry) — `SkipRetry` and `IsFailure` semantics (MEDIUM-HIGH confidence, official project wiki)
-- [asynq package docs — pkg.go.dev](https://pkg.go.dev/github.com/hibiken/asynq) — API reference for retry/unique-task configuration
-- [Webhook Architecture: Retries, Idempotency, and the ... — birjob.com](https://www.birjob.com/blog/webhook-architecture)
-- [Common Mistakes with Outbound Webhooks (And How to Avoid Them) — Hookdeck](https://hookdeck.com/outpost/guides/common-outbound-webhook-mistakes)
-- [Building Reliable Webhook Delivery: Retries, Signatures, and Failure Handling — DEV Community](https://dev.to/young_gao/building-reliable-webhook-delivery-retries-signatures-and-failure-handling-40ff)
-- [Handling Payment Webhooks Reliably (Idempotency, Retries, Validation) — Medium](https://medium.com/@sohail_saifii/handling-payment-webhooks-reliably-idempotency-retries-validation-69b762720bf5)
-- [Best practice for securely validating GitHub webhook payloads — GitHub Community Discussion #182735](https://github.com/orgs/community/discussions/182735)
-- [Webhook HMAC Verification Checklist Guide — ClientOps Devtools](https://clientops.dev/guides/webhook-hmac-verification-checklist/)
-- [API Key Management Best Practices for Secure Services — OneUptime](https://oneuptime.com/blog/post/2026-02-20-api-key-management-best-practices/view)
-- [Credential Rotation Guide — OLOID](https://www.oloid.com/blog/credential-rotation)
-- [Transactional Outbox Pattern — Microservices.io](https://microservices.io/patterns/data/transactional-outbox.html)
-- [Transactional outbox pattern — AWS Prescriptive Guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
-- `.planning/codebase/CONCERNS.md` — first-party source for existing, verified bugs (single-attempt processing, no reconciler, no auth, no webhook delivery, presign hostname mismatch) — HIGH confidence, direct code review
-- `.planning/PROJECT.md` — milestone scope and constraints (auth priority, internal-clients-still-need-auth constraint)
+- LibreOffice bugzilla #52125 — "libreoffice --headless should return 0 on successful conversion" (exit-code-0-on-failure history): https://bugs.documentfoundation.org/show_bug.cgi?id=52125
+- LibreOffice bugzilla #106134 — "headless mode does not allow concurrent jobs": https://www.mail-archive.com/libreoffice-bugs@lists.freedesktop.org/msg397604.html
+- LibreOffice bugzilla #82775 — "libreoffice in headless mode crashes when serving multiple concurrent requests": https://libreoffice-bugs.freedesktop.narkive.com/MddL6PYa/bug-82775-new-libreoffice-in-headless-mode-crashes-when-serving-multiple-concurrent-requests
+- LibreOffice bugzilla #95843 — "Headless mode leaves zombie process": https://bugs.documentfoundation.org/show_bug.cgi?id=95843
+- Ask LibreOffice — "How can i run multiple instances of soffice.bin at a time" (profile-lock / `-env:UserInstallation` workaround): https://ask.libreoffice.org/en/question/42975/how-can-i-run-multiple-instances-of-sofficebin-at-a-time/
+- Ask LibreOffice — "Headless LibreOffice fails with zero status code?": https://ask.libreoffice.org/t/headless-libreoffice-fails-with-zero-status-code/49388
+- Ask LibreOffice — "Converting docx in headless mode hangs" (hang on corrupted input, high CPU): https://ask.libreoffice.org/t/converting-docx-in-headless-mode-hangs/37502
+- Gotenberg — "Libreoffice Concurrence" issue #94 (single-instance stateful lock, no parallel operations): https://github.com/thecodingmachine/gotenberg/issues/94
+- Gotenberg troubleshooting docs (start-timeout, queue-under-load behavior, fixed-in-8.32.0 clean-state-on-failed-launch): https://gotenberg.dev/docs/troubleshooting
+- Gotenberg issue #1023 — "Shutdown LibreOffice when idle" (soffice.bin lingers forever without an external timeout mechanism): https://github.com/gotenberg/gotenberg/issues/1023
+- jdhao's digital space — "Serving Concurrent Requests for LibreOffice Service" (horizontal-scaling-over-single-instance-parallelism recommendation): https://jdhao.github.io/2021/06/11/libreoffice_concurrent_requests/
+- LibreOffice dev mailing list — "killing soffice.bin from oosplash" (launcher-forks-child signal-forwarding hazard): https://listarchives.libreoffice.org/global/dev/2012/msg07032.html
+- The Document Foundation Design Blog — "Dealing with Missing Fonts" (font substitution breaking layout): https://design.blog.documentfoundation.org/2016/10/21/dealing-with-missing-fonts/
+- The Document Foundation Blog — "LibreOffice Tips & Tricks: Replacing Microsoft Fonts" (fonts-liberation-style metric-compatible substitutes): https://blog.documentfoundation.org/blog/2020/09/08/libreoffice-tt-replacing-microsoft-fonts/
+- BigBlueButton issue #13388 — "Installed fonts not fully available in LibreOffice docker container" (container font-availability gap): https://github.com/bigbluebutton/bigbluebutton/issues/13388
+- Codebase-derived findings (HIGH confidence, direct source read): `internal/reconciler/reconciler.go`, `internal/queue/queue.go`, `internal/worker/worker.go`, `internal/convert/exec.go`, `internal/convert/convert.go`, `internal/convert/libvips.go`, `cmd/worker/main.go`, `Dockerfile.worker`, `.planning/PROJECT.md`
 
 ---
-*Pitfalls research for: internal async job-processing service hardening (auth, webhooks, reconciliation, retry-safety)*
-*Researched: 2026-07-02*
+*Pitfalls research for: OctoConv v1.2 (Document Engine Class — LibreOffice)*
+*Researched: 2026-07-09*
