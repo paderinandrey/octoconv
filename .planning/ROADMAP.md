@@ -24,7 +24,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 **Milestone Goal:** Close the tech debt surfaced by the v1.0 milestone audit — no new capabilities, purely hardening the hardening.
 
 - [x] **Phase 5: Webhook SSRF Private-IP Opt-Out** - Operators on internal private networks can enable webhook delivery to RFC1918 `callback_url` targets via explicit opt-in (loopback/link-local stay blocked) (completed 2026-07-08)
-- [ ] **Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test** - Reconciler also recovers done/failed jobs whose webhook silently never fired, and queued/active staleness recovery is proven under real wall-clock conditions
+- [x] **Phase 6: Reconciler Webhook-Gap Sweep & Staleness Soak Test** - Reconciler also recovers done/failed jobs whose webhook silently never fired, and queued/active staleness recovery is proven under real wall-clock conditions (completed 2026-07-08)
 - [ ] **Phase 7: Image Dimension Limit (Decompression-Bomb Protection)** - API rejects uploads whose declared pixel dimensions exceed a configured limit, before conversion or storage
 
 ## Phase Details
@@ -54,7 +54,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 - [x] 06-01-PLAN.md — Webhook queue asynq.Unique lock + derived jitter-inflated WebhookUniqueTTL (D-01, D-02)
 - [x] 06-02-PLAN.md — FindWebhookGaps NOT EXISTS anti-join + RecordWebhookGapRecovered + supporting index migration (RECON-04, D-04/D-05/D-06)
 - [x] 06-03-PLAN.md — Reconciler second sweep loop (enqueue-first gap recovery) + unit tests + metric label (D-03, D-06)
-- [ ] 06-04-PLAN.md — Real wall-clock soak test: stranded-job recovery + cap exhaustion (RECON-05, D-07/D-08)
+- [x] 06-04-PLAN.md — Real wall-clock soak test: stranded-job recovery + cap exhaustion (RECON-05, D-07/D-08)
 
 ### Phase 7: Image Dimension Limit (Decompression-Bomb Protection)
 **Goal**: Operators are protected from decompression-bomb uploads — the API rejects images whose declared pixel dimensions exceed a configured limit before any conversion work begins.
@@ -79,6 +79,6 @@ Phases execute in numeric order: 5 → 6 → 7
 | 3. Retry-Safety & Reconciler | v1.0 | 3/3 | Complete | 2026-07-06 |
 | 4. Content Validation, Storage Lifecycle & Observability | v1.0 | 5/5 | Complete | 2026-07-07 |
 | 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete   | 2026-07-08 |
-| 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 3/4 | In Progress|  |
+| 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete   | 2026-07-08 |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 0/? | Not started | - |
 </content>
