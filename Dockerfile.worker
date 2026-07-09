@@ -11,6 +11,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
+      tini \
       libvips-tools \
       libreoffice-writer-nogui \
       libreoffice-calc-nogui \
@@ -22,4 +23,8 @@ RUN apt-get update \
 COPY --from=build /out/worker /usr/local/bin/worker
 # Run unprivileged: the worker shells out to untrusted-input engines.
 USER nobody
-ENTRYPOINT ["/usr/local/bin/worker"]
+# tini is PID 1 so orphaned grandchildren (e.g. LibreOffice's oosplash forking
+# soffice.bin) get reaped after a group SIGKILL, instead of persisting as
+# permanent zombies — confirmed live (09-02) that without an init/reaper, a
+# killed soffice.bin reparents to PID 1 and is never waited on.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/worker"]
