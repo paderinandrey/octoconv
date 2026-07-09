@@ -493,22 +493,25 @@ if detected == "" {
 | A2 | Microsoft-Office-generated and Google-Docs-exported docx/xlsx/pptx files also place their root parts at exactly `word/document.xml` / `xl/workbook.xml` / `ppt/presentation.xml` (this session only empirically verified `pandoc`-generated and one Excel-tool-generated fixture, not genuine MS Office or Google Docs output) | Architecture Pattern 1 | If wrong for some real producer, a legitimate document from that producer would 422 as "unrecognized content" — a false rejection, not a security gap; the fix would be adding the actual observed root-part name, discoverable immediately from the first real support ticket |
 | A3 | The `xlsxwriter`-documented `word/xl/ppt/vbaProject.bin` literal path convention is universal across Microsoft Office, LibreOffice, and OpenXML-SDK-based tools for macro-enabled variants (not independently verified against a real `.docm`/`.xlsm`/`.pptm` sample in this session — no macro-enabled sample could be generated without LibreOffice/MS Office, unavailable in this environment) | Pattern 4 | If a tool ever places the VBA project part elsewhere, macro-carrying content from that tool would slip through — a security-relevant miss, though D-05's decision is presence-based and this is the documented universal convention across every source consulted |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Does an empty/never-populated ODF Basic library scaffold produce a false-positive macro rejection?**
+1. **Does an empty/never-populated ODF Basic library scaffold produce a false-positive macro rejection? (RESOLVED)**
    - What we know: LibreOffice creates the `Basic/` directory structure only when a macro is added (per the corroborating secondary source); this strongly suggests no false positives for genuinely macro-free documents.
    - What's unclear: Whether opening-then-not-using the Basic IDE (without ever adding actual code) leaves a vestigial `Basic/Standard/script-lb.xml` with zero `<script:module>` content, which the presence-only check (D-05's locked scope) would still reject.
    - Recommendation: Ship the presence-only check as locked by D-05; if real-world false positives surface, a follow-up could parse `script-lb.xml` for actual module content — explicitly out of scope for this phase per the locked decision's wording.
+   - Resolution: Planner accepted the recommendation — Plan 08-01 implements the presence-only check per D-05, no scope change.
 
-2. **Root-part naming across producers not tested in this session (genuine MS Office, Google Docs export).**
+2. **Root-part naming across producers not tested in this session (genuine MS Office, Google Docs export). (RESOLVED)**
    - What we know: Two independent tools (`pandoc`, and an Excel-tool-produced `.xlsx` fixture) both use the conventional root-part names; this matches near-universal training-data knowledge and the ECMA-376 SDK's own defaults.
    - What's unclear: No LibreOffice, no genuine Microsoft Office, and no Google Docs export was available in this research environment to test directly.
    - Recommendation: Treat as MEDIUM-HIGH confidence per the Assumptions Log (A2); if the phase's test plan can source a genuine MS-Office-generated or Google-Docs-exported sample during execution, add it as an additional fixture — low cost, meaningfully raises confidence.
+   - Resolution: Accepted as MEDIUM-HIGH confidence per Assumptions Log A2; no additional fixture sourced this phase (environment constraint unchanged) — tracked as a residual assumption, not a blocker.
 
-3. **Exact insertion point/refactor shape in `handleCreateJob` for the new container check.**
+3. **Exact insertion point/refactor shape in `handleCreateJob` for the new container check. (RESOLVED)**
    - What we know: The check must run after `Sniff` returns `""`, before the pair-check, dimension-check, and any storage write; must read from the original `multipart.File` + `header.Size`, not `Sniff`'s `rest`.
    - What's unclear: Whether the planner prefers a helper that fully replaces the `detected == ""` handling (folding the PK-prefix check into a single combined function) versus the more minimal-diff sketch shown in Code Examples above.
    - Recommendation: Either is correct; the Code Examples sketch is illustrative, not prescriptive about exact function boundaries — planner's call, informed by minimizing diff to the well-tested existing image path.
+   - Resolution: Plan 08-02 chose the minimal-diff inline branch (Task 2's action), not a combined-helper refactor — matches the Code Examples sketch.
 
 ## Environment Availability
 
