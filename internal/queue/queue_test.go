@@ -90,6 +90,7 @@ func TestImageRetryDelaySchedule(t *testing.T) {
 func TestRetryDelayFuncDispatch(t *testing.T) {
 	imageTask := asynq.NewTask(TypeImageConvert, nil)
 	webhookTask := asynq.NewTask(TypeWebhookDeliver, nil)
+	documentTask := asynq.NewTask(TypeDocumentConvert, nil)
 	otherTask := asynq.NewTask("some:other-type", nil)
 
 	if got, want := RetryDelayFunc(0, nil, imageTask), 2*time.Second; got != want {
@@ -97,6 +98,13 @@ func TestRetryDelayFuncDispatch(t *testing.T) {
 	}
 	if got, want := RetryDelayFunc(2, nil, imageTask), 15*time.Second; got != want {
 		t.Errorf("RetryDelayFunc(image, 2) = %v, want %v", got, want)
+	}
+
+	if got, want := RetryDelayFunc(0, nil, documentTask), 5*time.Second; got != want {
+		t.Errorf("RetryDelayFunc(document, 0) = %v, want %v", got, want)
+	}
+	if got, want := RetryDelayFunc(2, nil, documentTask), 30*time.Second; got != want {
+		t.Errorf("RetryDelayFunc(document, 2) = %v, want %v", got, want)
 	}
 
 	base := 30 * time.Second
@@ -192,6 +200,77 @@ func TestWebhookUniqueTTL(t *testing.T) {
 	// Determinism: no jittered call leaked into the derivation.
 	if got2 := WebhookUniqueTTL(maxRetry, perAttemptTimeout); got2 != got {
 		t.Errorf("WebhookUniqueTTL is not deterministic: %v != %v", got2, got)
+	}
+}
+
+// TestDocumentConvertTaskRoundTrip asserts NewDocumentConvertTask builds a
+// task routed to TypeDocumentConvert whose payload round-trips through
+// ParseConvertPayload back to the same job id — mirrors
+// TestConvertPayloadRoundTrip's shape for the document engine class.
+func TestDocumentConvertTaskRoundTrip(t *testing.T) {
+	id := uuid.New()
+	task, err := NewDocumentConvertTask(id, 3, DocumentUniqueTTL(3, 300*time.Second))
+	if err != nil {
+		t.Fatalf("NewDocumentConvertTask: %v", err)
+	}
+	if task.Type() != TypeDocumentConvert {
+		t.Errorf("task type = %q, want %q", task.Type(), TypeDocumentConvert)
+	}
+	p, err := ParseConvertPayload(task.Payload())
+	if err != nil {
+		t.Fatalf("ParseConvertPayload: %v", err)
+	}
+	if p.JobID != id {
+		t.Errorf("job id = %s, want %s", p.JobID, id)
+	}
+}
+
+// TestDocumentRetryDelaySchedule asserts DocumentRetryDelay returns the exact
+// 5s/15s/30s schedule (no jitter, mirrors ImageRetryDelay's shape) and clamps
+// on both ends.
+func TestDocumentRetryDelaySchedule(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{n: -1, want: 5 * time.Second}, // clamps to first entry
+		{n: 0, want: 5 * time.Second},
+		{n: 1, want: 15 * time.Second},
+		{n: 2, want: 30 * time.Second},
+		{n: 99, want: 30 * time.Second}, // clamps past the end of the schedule
+	}
+	for _, tc := range cases {
+		got := DocumentRetryDelay(tc.n, nil, nil)
+		if got != tc.want {
+			t.Errorf("DocumentRetryDelay(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestDocumentUniqueTTL asserts DocumentUniqueTTL derives its result from the
+// corrected worst-case retry lifetime ((maxRetry+1) executions) exactly like
+// ImageUniqueTTL, evaluates to exactly 1370s for (3, 300s), and is
+// monotonic in both arguments.
+func TestDocumentUniqueTTL(t *testing.T) {
+	maxRetry := 3
+	engineTimeout := 300 * time.Second
+	backoffSum := 5*time.Second + 15*time.Second + 30*time.Second // i=0..2
+
+	want := time.Duration(maxRetry+1)*engineTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := DocumentUniqueTTL(maxRetry, engineTimeout)
+	if got != want {
+		t.Errorf("DocumentUniqueTTL(%d, %v) = %v, want %v", maxRetry, engineTimeout, got, want)
+	}
+	if want != 1370*time.Second {
+		t.Errorf("expected worked example want = 1370s, got %v", want)
+	}
+
+	// Monotonicity: raising either argument must never shrink the TTL.
+	if DocumentUniqueTTL(maxRetry+1, engineTimeout) <= DocumentUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("DocumentUniqueTTL must grow monotonically with maxRetry")
+	}
+	if DocumentUniqueTTL(maxRetry, engineTimeout+time.Second) <= DocumentUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("DocumentUniqueTTL must grow monotonically with engineTimeout")
 	}
 }
 
