@@ -15,9 +15,9 @@
 
 ### LibreOffice Converter Engine
 
-- [ ] **DOC-04**: Воркер конвертирует принятые документы в PDF через LibreOffice headless с изолированным per-job профилем (`-env:UserInstallation`), исключающим коллизии lock-файла при параллельных job'ах
-- [ ] **DOC-05**: Воркер проверяет результат конвертации (ненулевой размер, валидные `%PDF-` magic bytes) перед пометкой задачи `done`; невалидный вывод — terminal-ошибка, задача не помечается успешной
-- [ ] **DOC-06**: Хардened process-exec (`Setpgid`+SIGKILL по таймауту) гарантированно завершает реальный `soffice`/`soffice.bin` процесс — подтверждено интеграционным тестом, а не предположением
+- [x] **DOC-04**: Воркер конвертирует принятые документы в PDF через LibreOffice headless с изолированным per-job профилем (`-env:UserInstallation`), исключающим коллизии lock-файла при параллельных job'ах
+- [x] **DOC-05**: Воркер проверяет результат конвертации (ненулевой размер, валидные `%PDF-` magic bytes) перед пометкой задачи `done`; невалидный вывод — terminal-ошибка, задача не помечается успешной
+- [x] **DOC-06**: Хардened process-exec (`Setpgid`+SIGKILL по таймауту) гарантированно завершает реальный `soffice`/`soffice.bin` процесс — подтверждено интеграционным тестом, а не предположением
 
 ### Queue, Worker & Reconciler Integration
 
@@ -63,9 +63,9 @@
 | DOC-01 | Phase 8 | Done |
 | DOC-02 | Phase 8 | Done |
 | DOC-03 | Phase 8 | Done |
-| DOC-04 | Phase 9 | Pending |
-| DOC-05 | Phase 9 | Pending |
-| DOC-06 | Phase 9 | Pending |
+| DOC-04 | Phase 9 | Done |
+| DOC-05 | Phase 9 | Done |
+| DOC-06 | Phase 9 | Done |
 | DOC-07 | Phase 10 | Pending |
 | DOC-08 | Phase 10 | Pending |
 | DOC-09 | Phase 10 | Pending |
