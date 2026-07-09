@@ -69,10 +69,18 @@ func (f *fakeStorage) PresignGet(_ context.Context, _ string, _ time.Duration) (
 	return f.presigned, nil
 }
 
-type fakeQueue struct{ enqueued uuid.UUID }
+type fakeQueue struct {
+	enqueuedImage    uuid.UUID
+	enqueuedDocument uuid.UUID
+}
 
 func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
-	f.enqueued = id
+	f.enqueuedImage = id
+	return nil
+}
+
+func (f *fakeQueue) EnqueueDocumentConvert(_ context.Context, id uuid.UUID) error {
+	f.enqueuedDocument = id
 	return nil
 }
 
@@ -334,8 +342,11 @@ func TestCreateJob_OK(t *testing.T) {
 	if repo.created == nil || repo.created.ClientID != resolver.client.ID {
 		t.Errorf("expected CreateParams.ClientID = %s, got %+v", resolver.client.ID, repo.created)
 	}
-	if q.enqueued != repo.createdID {
-		t.Errorf("enqueued %s, want %s", q.enqueued, repo.createdID)
+	if q.enqueuedImage != repo.createdID {
+		t.Errorf("enqueuedImage = %s, want %s", q.enqueuedImage, repo.createdID)
+	}
+	if q.enqueuedDocument != uuid.Nil {
+		t.Errorf("enqueuedDocument = %s, want uuid.Nil (image upload must never touch the document queue)", q.enqueuedDocument)
 	}
 }
 
@@ -497,18 +508,10 @@ func TestCreateJob_DimensionsUnknown(t *testing.T) {
 	}
 }
 
-// TestCreateJob_DocumentDetectedAndAccepted verifies DOC-01: a well-formed
-// docx is structurally detected before any storage write and passes the
-// pair-check. As of Phase 9, LibreOfficeConverter is registered in the
-// shared convert.Default registry, so docx->pdf is genuinely Supported and
-// the job is accepted (202) and enqueued -- via the existing, still-single
-// EnqueueImageConvert call, since handleCreateJob does not yet branch by
-// engine class. This is expected TRANSITIONAL behavior: document-specific
-// queue routing (its own queue, its own DOCUMENT_ENGINE_TIMEOUT, resource
-// isolation from the image worker) is Phase 10/11's job, not yet built.
-// Until then, an accepted document job runs through the image queue/worker
-// under the general ENGINE_TIMEOUT. This test intentionally proves the
-// CURRENT real behavior, not the eventual target state.
+// TestCreateJob_DocumentDetectedAndAccepted verifies DOC-01/D-01/D-02: a
+// well-formed docx is structurally detected before any storage write, passes
+// the pair-check, and is routed to the document queue with Engine="document"
+// -- never the image queue.
 func TestCreateJob_DocumentDetectedAndAccepted(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
@@ -534,15 +537,20 @@ func TestCreateJob_DocumentDetectedAndAccepted(t *testing.T) {
 	if repo.created.SourceFormat != "docx" || repo.created.TargetFormat != "pdf" {
 		t.Errorf("job format = %s -> %s, want docx -> pdf", repo.created.SourceFormat, repo.created.TargetFormat)
 	}
-	if queue.enqueued != repo.createdID {
-		t.Error("must enqueue the created job (via the existing single EnqueueImageConvert path -- document-specific queue routing is Phase 10/11)")
+	if repo.created.Engine != "document" {
+		t.Errorf("job Engine = %q, want document", repo.created.Engine)
+	}
+	if queue.enqueuedDocument != repo.createdID {
+		t.Errorf("enqueuedDocument = %s, want %s", queue.enqueuedDocument, repo.createdID)
+	}
+	if queue.enqueuedImage != uuid.Nil {
+		t.Errorf("enqueuedImage = %s, want uuid.Nil (document upload must never touch the image queue)", queue.enqueuedImage)
 	}
 }
 
 // TestCreateJob_ODFDetectedAndAccepted proves the ODF disambiguation path
 // (index-0 mimetype check) is reached and produces the same
-// detected-and-accepted outcome as OOXML, for the same Phase 9/10/11
-// transitional reasons documented on TestCreateJob_DocumentDetectedAndAccepted.
+// detected-and-accepted, document-queue-routed outcome as OOXML.
 func TestCreateJob_ODFDetectedAndAccepted(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
@@ -568,8 +576,36 @@ func TestCreateJob_ODFDetectedAndAccepted(t *testing.T) {
 	if repo.created.SourceFormat != "odt" || repo.created.TargetFormat != "pdf" {
 		t.Errorf("job format = %s -> %s, want odt -> pdf", repo.created.SourceFormat, repo.created.TargetFormat)
 	}
-	if queue.enqueued != repo.createdID {
-		t.Error("must enqueue the created job (via the existing single EnqueueImageConvert path -- document-specific queue routing is Phase 10/11)")
+	if repo.created.Engine != "document" {
+		t.Errorf("job Engine = %q, want document", repo.created.Engine)
+	}
+	if queue.enqueuedDocument != repo.createdID {
+		t.Errorf("enqueuedDocument = %s, want %s", queue.enqueuedDocument, repo.createdID)
+	}
+	if queue.enqueuedImage != uuid.Nil {
+		t.Errorf("enqueuedImage = %s, want uuid.Nil (document upload must never touch the image queue)", queue.enqueuedImage)
+	}
+}
+
+// TestCreateJob_DocumentSkipsDimensionCheck verifies D-06: HasDimensionLimit
+// scopes the pixel-dimension check to image formats only, so a document
+// upload is accepted even under a MaxImagePixels limit that would reject any
+// real image (proving the image-only check is never reached for documents).
+func TestCreateJob_DocumentSkipsDimensionCheck(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1})
+
+	body, ct := multipartBody(t, "in.docx", "pdf", docxFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (documents must skip the pixel-dimension check); body=%s", rec.Code, rec.Body.String())
 	}
 }
 
