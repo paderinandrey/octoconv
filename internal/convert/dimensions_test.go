@@ -423,6 +423,38 @@ func TestDimensionsWalkBoxes_ExtendedSize(t *testing.T) {
 	}
 }
 
+func TestHasDimensionLimit_Images(t *testing.T) {
+	for _, format := range []string{"png", "jpg", "webp", "heic", "tiff"} {
+		if !HasDimensionLimit(format) {
+			t.Errorf("HasDimensionLimit(%q) = false, want true", format)
+		}
+	}
+}
+
+func TestHasDimensionLimit_Aliases(t *testing.T) {
+	for _, format := range []string{"jpeg", "tif"} {
+		if !HasDimensionLimit(format) {
+			t.Errorf("HasDimensionLimit(%q) = false, want true (NormalizeFormat alias)", format)
+		}
+	}
+}
+
+func TestHasDimensionLimit_Documents(t *testing.T) {
+	for _, format := range []string{"docx", "xlsx", "pptx", "odt", "ods", "odp"} {
+		if HasDimensionLimit(format) {
+			t.Errorf("HasDimensionLimit(%q) = true, want false", format)
+		}
+	}
+}
+
+func TestHasDimensionLimit_Unknown(t *testing.T) {
+	for _, format := range []string{"", "bogus"} {
+		if HasDimensionLimit(format) {
+			t.Errorf("HasDimensionLimit(%q) = true, want false", format)
+		}
+	}
+}
+
 func TestDimensionsFullSuiteReturnsErrDimensionsUnknownForFailClosedFixtures(t *testing.T) {
 	cases := map[string][]byte{
 		"tiff-ifd-beyond-window": func() []byte {
