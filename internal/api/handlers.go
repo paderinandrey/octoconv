@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,6 +124,40 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if detected == "" {
+		// Sniff's prefix table doesn't disambiguate ZIP-based office formats
+		// (docx/xlsx/pptx/odt/ods/odp share PK\x03\x04 with each other and a
+		// bare .zip) — structurally inspect the ZIP central directory instead
+		// (D-01). Read from the original file (io.ReaderAt), NOT rest (an
+		// io.MultiReader that does not implement ReaderAt); ReadAt never
+		// disturbs Sniff's sequential cursor, so rest remains valid below.
+		var prefix [4]byte
+		if n, _ := file.ReadAt(prefix[:], 0); n == 4 && bytes.Equal(prefix[:], []byte{'P', 'K', 3, 4}) {
+			cr, cerr := convert.SniffContainer(file, header.Size)
+			if cerr == nil && cr.Format != "" && !cr.DuplicateRootPart {
+				detected = cr.Format
+				// D-02/D-04: reject a zip-bomb-shaped declared uncompressed
+				// total before any storage write or decompression.
+				if cr.TotalUncompressed > s.maxDocumentUncompressedBytes {
+					log.Printf("content validation rejected: client_id=%s filename=%q reason=zip_bomb declared_uncompressed=%d limit=%d", client.ID, filename, cr.TotalUncompressed, s.maxDocumentUncompressedBytes)
+					writeError(w, http.StatusUnprocessableEntity,
+						"declared uncompressed size exceeds configured limit")
+					return
+				}
+				// D-05: unconditional macro rejection, no operator opt-out —
+				// macro code never executes as part of producing a PDF output.
+				if cr.HasMacro {
+					log.Printf("content validation rejected: client_id=%s filename=%q reason=macro_detected", client.ID, filename)
+					writeError(w, http.StatusUnprocessableEntity,
+						"macro-carrying documents are not accepted")
+					return
+				}
+			}
+			// A DuplicateRootPart result, ErrNotAZip, or Format=="" leaves
+			// detected empty intentionally — fail closed to the unrecognized-
+			// content rejection below rather than accept an ambiguous archive.
+		}
+	}
+	if detected == "" {
 		// D-02: no known signature matches — reject rather than let the
 		// (untrustworthy) extension win. D-08: scoped internal/* logging
 		// exception for this rejection, tagged with the resolved client.
@@ -153,20 +188,26 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// dimensions exceeding the configured limit) before any storage write.
 	// convert.Dimensions re-stitches its own bounded peek onto rest, so the
 	// full original stream still reaches s.storage.Upload below unmodified.
-	width, height, dimRest, err := convert.Dimensions(detected, rest)
-	if err != nil {
-		log.Printf("content validation rejected: client_id=%s filename=%q reason=dimensions_unknown", client.ID, filename)
-		writeError(w, http.StatusUnprocessableEntity,
-			"cannot determine declared image dimensions for "+filename)
-		return
-	}
-	rest = dimRest
-	totalPixels := uint64(width) * uint64(height)
-	if totalPixels > s.maxImagePixels {
-		log.Printf("content validation rejected: client_id=%s filename=%q reason=dimension_limit width=%d height=%d limit=%d", client.ID, filename, width, height, s.maxImagePixels)
-		writeError(w, http.StatusUnprocessableEntity,
-			"declared image dimensions exceed configured limit")
-		return
+	// HasDimensionLimit scopes this to image formats only — pixel dimensions
+	// are not a document concept, so documents skip the block entirely
+	// (fixes the confirmed regression where Dimensions() unconditionally
+	// 422'd every document upload, RESEARCH.md Pitfall 5).
+	if convert.HasDimensionLimit(detected) {
+		width, height, dimRest, err := convert.Dimensions(detected, rest)
+		if err != nil {
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=dimensions_unknown", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity,
+				"cannot determine declared image dimensions for "+filename)
+			return
+		}
+		rest = dimRest
+		totalPixels := uint64(width) * uint64(height)
+		if totalPixels > s.maxImagePixels {
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=dimension_limit width=%d height=%d limit=%d", client.ID, filename, width, height, s.maxImagePixels)
+			writeError(w, http.StatusUnprocessableEntity,
+				"declared image dimensions exceed configured limit")
+			return
+		}
 	}
 
 	// callback_url is optional (per-job, D-02); an empty value leaves the

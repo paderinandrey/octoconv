@@ -59,18 +59,24 @@ type Server struct {
 	// declared dimensions (Pitfall 1); an adversarial max-uint32 x max-uint32
 	// product must not wrap or misbehave under signed/narrower arithmetic.
 	maxImagePixels uint64
-	presignTTL     time.Duration
-	ipRateRPM      int
-	clientRateRPM  int
+	// maxDocumentUncompressedBytes is the zip-bomb guard ceiling (D-04):
+	// the max total declared uncompressed size summed across every ZIP
+	// central-directory entry in an office document, compared against
+	// ContainerResult.TotalUncompressed (also uint64).
+	maxDocumentUncompressedBytes uint64
+	presignTTL                   time.Duration
+	ipRateRPM                    int
+	clientRateRPM                int
 }
 
 // Config configures a Server.
 type Config struct {
-	MaxUploadBytes     int64
-	MaxImagePixels     uint64
-	PresignTTL         time.Duration
-	IPRateLimitRPM     int
-	ClientRateLimitRPM int
+	MaxUploadBytes               int64
+	MaxImagePixels               uint64
+	MaxDocumentUncompressedBytes uint64
+	PresignTTL                   time.Duration
+	IPRateLimitRPM               int
+	ClientRateLimitRPM           int
 }
 
 // NewServer builds an API server. resolver authenticates every /v1 request
@@ -87,6 +93,9 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 	if cfg.MaxImagePixels == 0 {
 		cfg.MaxImagePixels = 100_000_000 // D-05: 100 megapixels default
 	}
+	if cfg.MaxDocumentUncompressedBytes == 0 {
+		cfg.MaxDocumentUncompressedBytes = 500 << 20 // D-04: 500 MiB default
+	}
 	if cfg.IPRateLimitRPM == 0 {
 		cfg.IPRateLimitRPM = 60 // coarse pre-auth flood guard, conservative default
 	}
@@ -94,15 +103,16 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 		cfg.ClientRateLimitRPM = 120 // per-client, conservative for internal batch + interactive usage
 	}
 	return &Server{
-		repo:           repo,
-		storage:        storage,
-		queue:          queue,
-		resolver:       resolver,
-		health:         health,
-		maxUploadByte:  cfg.MaxUploadBytes,
-		maxImagePixels: cfg.MaxImagePixels,
-		presignTTL:     cfg.PresignTTL,
-		ipRateRPM:      cfg.IPRateLimitRPM,
-		clientRateRPM:  cfg.ClientRateLimitRPM,
+		repo:                         repo,
+		storage:                      storage,
+		queue:                        queue,
+		resolver:                     resolver,
+		health:                       health,
+		maxUploadByte:                cfg.MaxUploadBytes,
+		maxImagePixels:               cfg.MaxImagePixels,
+		maxDocumentUncompressedBytes: cfg.MaxDocumentUncompressedBytes,
+		presignTTL:                   cfg.PresignTTL,
+		ipRateRPM:                    cfg.IPRateLimitRPM,
+		clientRateRPM:                cfg.ClientRateLimitRPM,
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -148,6 +149,127 @@ func truncatedIHDRPNGFixture() []byte {
 // detects as "jpg".
 func jpegBytesFixture() []byte {
 	return []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01}
+}
+
+// --- document container fixture helpers (mirror internal/convert/docsniff_test.go) ---
+
+// mustWriteZipEntry adds a single deflate-compressed entry to zw, failing
+// the test on any write error.
+func mustWriteZipEntry(t *testing.T, zw *zip.Writer, name, content string) {
+	t.Helper()
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Deflate})
+	if err != nil {
+		t.Fatalf("CreateHeader(%q): %v", name, err)
+	}
+	if _, err := w.Write([]byte(content)); err != nil {
+		t.Fatalf("Write(%q): %v", name, err)
+	}
+}
+
+// docxFixture returns a minimal, valid-shaped docx built via archive/zip.Writer
+// (word/document.xml root part present) so convert.SniffContainer detects it.
+func docxFixture(t *testing.T) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	mustWriteZipEntry(t, zw, "[Content_Types].xml", "<Types/>")
+	mustWriteZipEntry(t, zw, "word/document.xml", "root part content")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// odtFixture returns a minimal odt: first entry "mimetype", Method=Store,
+// payload "application/vnd.oasis.opendocument.text".
+func odtFixture(t *testing.T) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	fw, err := zw.CreateHeader(&zip.FileHeader{Name: "mimetype", Method: zip.Store})
+	if err != nil {
+		t.Fatalf("CreateHeader(mimetype): %v", err)
+	}
+	if _, err := fw.Write([]byte("application/vnd.oasis.opendocument.text")); err != nil {
+		t.Fatalf("Write(mimetype): %v", err)
+	}
+	mustWriteZipEntry(t, zw, "META-INF/manifest.xml", "<manifest/>")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// zipBombDocxFixture returns a docx-shaped zip whose declared
+// UncompressedSize64 equals declaredSize, written from real (highly
+// compressible, all-zero) content so the physical multipart body stays tiny
+// while the declared total exceeds a small test MaxDocumentUncompressedBytes.
+func zipBombDocxFixture(t *testing.T, declaredSize uint64) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "word/document.xml", Method: zip.Deflate})
+	if err != nil {
+		t.Fatalf("CreateHeader: %v", err)
+	}
+	chunk := make([]byte, 1<<20) // 1 MiB of zeros, reused per write
+	var written uint64
+	for written < declaredSize {
+		n := declaredSize - written
+		if n > uint64(len(chunk)) {
+			n = uint64(len(chunk))
+		}
+		if _, err := w.Write(chunk[:n]); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		written += n
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// macroDocxFixture is a valid docx PLUS a word/vbaProject.bin entry.
+func macroDocxFixture(t *testing.T) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	mustWriteZipEntry(t, zw, "word/document.xml", "root part content")
+	mustWriteZipEntry(t, zw, "word/vbaProject.bin", "macro content")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// duplicateRootPartDocxFixture is a zip with two entries named
+// word/document.xml -- SniffContainer's fail-closed guard must leave this
+// unrecognized rather than accept an ambiguous archive.
+func duplicateRootPartDocxFixture(t *testing.T) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	mustWriteZipEntry(t, zw, "word/document.xml", "first copy")
+	mustWriteZipEntry(t, zw, "word/document.xml", "second copy, different content")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// bareZipFixture is a plain .zip with no office root parts -- PK-prefixed
+// but SniffContainer.Format stays "", so it must fall through to the
+// existing unrecognized-content 422.
+func bareZipFixture(t *testing.T) []byte {
+	t.Helper()
+	buf := new(bytes.Buffer)
+	zw := zip.NewWriter(buf)
+	mustWriteZipEntry(t, zw, "readme.txt", "hello")
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zw.Close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.Buffer, string) {
@@ -372,6 +494,178 @@ func TestCreateJob_DimensionsUnknown(t *testing.T) {
 	}
 	if repo.created != nil {
 		t.Error("must not create job when declared dimensions cannot be determined")
+	}
+}
+
+// TestCreateJob_DocumentDetectedButUnsupported verifies DOC-01: a well-formed
+// docx is structurally detected before any storage write, then correctly
+// 422s at the existing pair-check since no document Converter is registered
+// this phase (Phase 9) -- proving detection integrates without prematurely
+// enabling conversion.
+func TestCreateJob_DocumentDetectedButUnsupported(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.docx", "pdf", docxFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "unsupported conversion: docx -> pdf") {
+		t.Errorf("error = %q, want unsupported-conversion message naming docx -> pdf", resp["error"])
+	}
+	if store.uploaded {
+		t.Error("must not upload before the pair-check")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an unsupported document pair")
+	}
+}
+
+// TestCreateJob_ODFDetectedButUnsupported proves the ODF disambiguation path
+// (index-0 mimetype check) is reached and produces the same
+// detected-but-unsupported outcome as OOXML.
+func TestCreateJob_ODFDetectedButUnsupported(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.odt", "pdf", odtFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "unsupported conversion: odt -> pdf") {
+		t.Errorf("error = %q, want unsupported-conversion message naming odt -> pdf", resp["error"])
+	}
+	if store.uploaded {
+		t.Error("must not upload before the pair-check")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an unsupported document pair")
+	}
+}
+
+// TestCreateJob_ZipBombRejected verifies DOC-02/D-04: a docx-shaped upload
+// whose declared uncompressed total exceeds the configured
+// MaxDocumentUncompressedBytes limit is rejected 422 before any storage
+// write, even though the actual compressed bytes transmitted are tiny.
+func TestCreateJob_ZipBombRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{
+		MaxUploadBytes:               1 << 20,
+		MaxDocumentUncompressedBytes: 1 << 20, // 1 MiB test limit
+	})
+
+	body, ct := multipartBody(t, "in.docx", "pdf", zipBombDocxFixture(t, 2<<20)) // declares 2 MiB uncompressed
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload a zip-bomb-shaped document before the size check")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a zip-bomb-shaped document")
+	}
+}
+
+// TestCreateJob_MacroRejected verifies DOC-03/D-05: a docx containing a
+// macro part is rejected 422, unconditionally, before any storage write.
+func TestCreateJob_MacroRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.docx", "pdf", macroDocxFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload a macro-carrying document")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a macro-carrying document")
+	}
+}
+
+// TestCreateJob_DuplicateRootPartRejected verifies the fail-closed guard: a
+// docx-shaped zip with two word/document.xml entries is NOT accepted as
+// docx -- it falls through to the existing unrecognized-content 422.
+func TestCreateJob_DuplicateRootPartRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.docx", "pdf", duplicateRootPartDocxFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload a duplicate-root-part document")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a duplicate-root-part document")
+	}
+}
+
+// TestCreateJob_BareZipUnrecognized verifies T-08-07: a plain .zip with no
+// office root parts is PK-prefixed but must still 422 as unrecognized
+// content, never silently accepted.
+func TestCreateJob_BareZipUnrecognized(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.zip", "pdf", bareZipFixture(t))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload a bare zip with no office root parts")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a bare zip with no office root parts")
 	}
 }
 
