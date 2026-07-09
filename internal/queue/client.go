@@ -31,11 +31,24 @@ type Client struct {
 	// derivation this TTL must always exceed. Unlike imageUniqueTTL, its
 	// inputs are not env-configurable (D-05/Phase 2 fixed them).
 	webhookUniqueTTL time.Duration
+	// documentMaxRetry is the per-task MaxRetry budget for document
+	// conversion tasks (DOCUMENT_MAX_RETRY, default 3 — bounded lower than
+	// image's 4, since each document attempt is expensive at up to
+	// DOCUMENT_ENGINE_TIMEOUT seconds and DOC-08 requires documents not be
+	// retried forever).
+	documentMaxRetry int
+	// documentUniqueTTL is the per-job asynq.Unique lock TTL for document
+	// conversion tasks, derived once at construction from documentMaxRetry
+	// and DOCUMENT_ENGINE_TIMEOUT via DocumentUniqueTTL — see its doc
+	// comment for the worst-case-lifetime derivation this TTL must always
+	// exceed.
+	documentUniqueTTL time.Duration
 }
 
 // NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
-// 4), and ENGINE_TIMEOUT (default 120s — same env var the worker reads to
-// bound a conversion attempt).
+// 4), ENGINE_TIMEOUT (default 120s — same env var the worker reads to bound
+// a conversion attempt), DOCUMENT_MAX_RETRY (default 3), and
+// DOCUMENT_ENGINE_TIMEOUT (default 300s — Phase 9 D-01).
 func NewClient() (*Client, error) {
 	opt, err := RedisOpt()
 	if err != nil {
@@ -43,11 +56,15 @@ func NewClient() (*Client, error) {
 	}
 	imageMaxRetry := envInt("IMAGE_MAX_RETRY", 4)
 	engineTimeout := envDuration("ENGINE_TIMEOUT", 120*time.Second)
+	documentMaxRetry := envInt("DOCUMENT_MAX_RETRY", 3)
+	documentEngineTimeout := envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second)
 	return &Client{
-		c:                asynq.NewClient(opt),
-		imageMaxRetry:    imageMaxRetry,
-		imageUniqueTTL:   ImageUniqueTTL(imageMaxRetry, engineTimeout),
-		webhookUniqueTTL: WebhookUniqueTTL(webhookMaxRetry, webhookPerAttemptTimeout),
+		c:                 asynq.NewClient(opt),
+		imageMaxRetry:     imageMaxRetry,
+		imageUniqueTTL:    ImageUniqueTTL(imageMaxRetry, engineTimeout),
+		webhookUniqueTTL:  WebhookUniqueTTL(webhookMaxRetry, webhookPerAttemptTimeout),
+		documentMaxRetry:  documentMaxRetry,
+		documentUniqueTTL: DocumentUniqueTTL(documentMaxRetry, documentEngineTimeout),
 	}, nil
 }
 
@@ -74,6 +91,19 @@ func (c *Client) EnqueueWebhookDeliver(ctx context.Context, jobID uuid.UUID) err
 	}
 	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
 		return fmt.Errorf("enqueue webhook deliver %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// EnqueueDocumentConvert puts a document conversion job onto the document
+// queue.
+func (c *Client) EnqueueDocumentConvert(ctx context.Context, jobID uuid.UUID) error {
+	task, err := NewDocumentConvertTask(jobID, c.documentMaxRetry, c.documentUniqueTTL)
+	if err != nil {
+		return err
+	}
+	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
+		return fmt.Errorf("enqueue document convert %s: %w", jobID, err)
 	}
 	return nil
 }
