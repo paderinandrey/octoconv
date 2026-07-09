@@ -123,3 +123,7 @@ None - no external service configuration required. Zero new runtime dependencies
 ---
 *Phase: 08-document-content-safety-format-detection*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All created/modified files verified present on disk; all 6 referenced commit hashes (`9817016`, `1f00c66`, `e23803f`, `be375c7`, `c1064dc`, `d48cf72`) verified present in `git log --oneline --all`.
