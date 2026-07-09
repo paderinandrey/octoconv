@@ -42,7 +42,7 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
 **Milestone Goal:** Внутренние сервисы могут конвертировать офисные документы (docx/xlsx/pptx/odt/ods/odp) в PDF через новый класс движков на LibreOffice, поверх уже готовой production-инфраструктуры (auth, rate limiting, webhook-доставка, reconciler, observability).
 
 - [x] **Phase 8: Document Content Safety & Format Detection** - Stdlib-only ZIP/ODF/OOXML disambiguation, zip-bomb guard, and macro rejection gate office uploads before they reach storage or the engine (completed 2026-07-09)
-- [ ] **Phase 9: LibreOffice Converter Engine** - `LibreOfficeConverter` with per-job profile isolation, output validation, and a verified process-kill guarantee
+- [x] **Phase 9: LibreOffice Converter Engine** - `LibreOfficeConverter` with per-job profile isolation, output validation, and a verified process-kill guarantee (completed 2026-07-09)
 - [ ] **Phase 10: Document Worker & Reconciler Integration** - Separate `cmd/document-worker` binary, `DOCUMENT_ENGINE_TIMEOUT`, and engine-aware reconciler recovery
 - [ ] **Phase 11: API Routing & End-to-End Document Conversion** - `handleCreateJob` routes documents to the document engine and the full pipeline is live-verified across all 6 format pairs
 
@@ -71,7 +71,7 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
   3. An integration test proves that when a conversion is killed on timeout, the real `soffice`/`soffice.bin` process and any children are actually terminated — zero surviving processes, not an assumption inherited from the image engine's exec wrapper.
 **Plans**: 2 plans
   - [x] 09-01-PLAN.md — LibreOfficeConverter (Pairs/Convert, per-job -env:UserInstallation isolation, %PDF- output validation), registry wiring, and unit + soffice-gated live tests
-  - [ ] 09-02-PLAN.md — Dockerfile.worker LibreOffice provisioning + Dockerfile.worker-test harness; live DOC-06 process-kill proof (zero survivors) run inside the LibreOffice image
+  - [x] 09-02-PLAN.md — Dockerfile.worker LibreOffice provisioning + Dockerfile.worker-test harness; live DOC-06 process-kill proof (zero survivors) run inside the LibreOffice image
 
 ### Phase 10: Document Worker & Reconciler Integration
 **Goal**: Document conversions run in their own resource-isolated process, respect their own timeout budget, and are recovered correctly if they get stranded.
@@ -109,6 +109,6 @@ Phases execute in numeric order: 8 → 9 → 10 → 11
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete | 2026-07-08 |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 2/2 | Complete | 2026-07-08 |
 | 8. Document Content Safety & Format Detection | v1.2 | 2/2 | Complete   | 2026-07-09 |
-| 9. LibreOffice Converter Engine | v1.2 | 1/2 | In Progress|  |
+| 9. LibreOffice Converter Engine | v1.2 | 2/2 | Complete   | 2026-07-09 |
 | 10. Document Worker & Reconciler Integration | v1.2 | 0/TBD | Not started | - |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 0/TBD | Not started | - |
