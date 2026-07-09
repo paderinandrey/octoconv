@@ -35,9 +35,29 @@ var terminalVipsSignatures = []string{
 	"jpeg datastream contains no image",
 }
 
+// terminalLibreOfficeSignatures are lowercased error-message substrings that
+// indicate a deterministically-unrecoverable document conversion: LibreOffice's
+// validatePDF guard against its documented "exit 0 but empty/corrupt output"
+// failure mode ("output is empty", "output missing %pdf- magic bytes",
+// internal/convert/libreoffice.go's validatePDF) and filterFor's unsupported-
+// source-extension error ("no pdf export filter for"). No retry can fix any
+// of these — a corrupt document always fails validatePDF again.
+var terminalLibreOfficeSignatures = []string{
+	"output missing %pdf- magic bytes",
+	"output is empty",
+	"no pdf export filter for",
+}
+
 // isTerminal classifies a process() error as terminal (no retry can help:
 // bad input, unsupported pair, missing storage object) vs. transient
 // (network/S3/engine-timeout/Postgres blip — broad-retry default, D-01).
+// This is the SHARED classifier used by both HandleImageConvert and (via
+// isDocumentTerminal) HandleDocumentConvert. It deliberately has NO
+// context.DeadlineExceeded arm — a timeout must keep classifying as
+// transient here so the image path (HandleImageConvert) continues to retry
+// engine timeouts; the document engine's divergent timeout-is-terminal
+// behavior (DOC-08) lives in the engine-scoped isDocumentTerminal below, not
+// here.
 func isTerminal(err error) bool {
 	if err == nil {
 		return false
@@ -62,7 +82,44 @@ func isTerminal(err error) bool {
 			return true
 		}
 	}
+	for _, sig := range terminalLibreOfficeSignatures {
+		if strings.Contains(msg, sig) {
+			// D-01 (document analog): LibreOffice reports a deterministically
+			// bad/unsupported document.
+			return true
+		}
+	}
 	return false
+}
+
+// isDocumentTerminal is the document engine's engine-scoped terminal
+// classifier — DOC-08's deliberate divergence from the image engine. Unlike
+// isTerminal (which keeps treating a timeout as transient so the image path
+// retries it), a DOCUMENT_ENGINE_TIMEOUT expiry IS classified terminal here:
+// LibreOffice's documented hang-on-bad-input behavior means a retry cannot
+// help, so an immediate terminal failure (MarkFailed + SkipRetry, no asynq
+// retry) is the only reliable backstop. Without this, a stuck soffice would
+// be retried up to DOCUMENT_MAX_RETRY times, each burning up to
+// DOCUMENT_ENGINE_TIMEOUT (300s default) before finally being dropped.
+//
+// A DOCUMENT_ENGINE_TIMEOUT expiry surfaces as a wrapped context.
+// DeadlineExceeded: exec.go's process-group kill produces
+// fmt.Errorf("%s killed: %w", name, ctx.Err()), preserved through
+// libreoffice.go's fmt.Errorf("libreoffice: %w", err) and process()'s
+// fmt.Errorf("convert: %w", err) — so errors.Is(err, context.DeadlineExceeded)
+// stays true all the way up to this handler.
+//
+// Every non-timeout error is classified identically to the image path by
+// delegating to isTerminal — no document-specific duplication of the
+// no-converter/minio.NoSuchKey/LibreOffice-signature checks.
+func isDocumentTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return isTerminal(err)
 }
 
 // Handler processes image conversion tasks end to end.
@@ -149,6 +206,69 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	metrics.RecordJobOutcome(queue.QueueImage, jobs.StatusDone, time.Since(start))
+	// Postgres-first: MarkDone already committed inside process(), so a
+	// failed enqueue must not fail the conversion — best-effort only.
+	if job.CallbackURL != "" {
+		_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+	}
+	return nil
+}
+
+// HandleDocumentConvert runs one document conversion: load job -> mark
+// active -> download input -> run LibreOffice (via the engine-agnostic
+// process(), which reuses registry.Lookup — the LibreOfficeConverter
+// registered in convert.Default handles the actual conversion) -> upload
+// output -> record output -> mark done. Structurally identical to
+// HandleImageConvert with exactly two differences (DOC-07/DOC-08): (1) the
+// terminal-classification branch calls isDocumentTerminal instead of
+// isTerminal, so a DOCUMENT_ENGINE_TIMEOUT expiry takes the terminal path
+// (MarkFailed + SkipRetry, no asynq retry) — a deliberate divergence from
+// the image engine, which treats the same timeout as transient; (2) both
+// metrics.RecordJobOutcome calls are tagged queue.QueueDocument. Non-timeout
+// transient failures (S3/Postgres blips) still fall through
+// isDocumentTerminal -> isTerminal -> false and are returned unwrapped so
+// asynq retries them, bounded by DOCUMENT_MAX_RETRY.
+func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) error {
+	payload, err := queue.ParseConvertPayload(t.Payload())
+	if err != nil {
+		// Unparseable payload: nothing we can retry into success.
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	jobID := payload.JobID
+
+	job, err := h.repo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("load job %s: %w", jobID, err)
+	}
+
+	if err := h.repo.MarkActive(ctx, jobID); err != nil {
+		// Already active/done/canceled — let asynq drop it rather than loop.
+		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
+	}
+
+	start := time.Now()
+	if err := h.process(ctx, job); err != nil {
+		if isDocumentTerminal(err) {
+			// Sanitized message only in error_message (exposed via GET
+			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
+			// (which contains local temp paths) is kept in job_events.detail
+			// for internal diagnostics only.
+			_ = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			metrics.RecordJobOutcome(queue.QueueDocument, jobs.StatusFailed, time.Since(start))
+			// Postgres-first: the failed status is already committed above, so a
+			// failed enqueue must not fail the conversion — best-effort only.
+			if job.CallbackURL != "" {
+				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+			}
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		}
+		// Transient: do NOT mark failed — the job stays active so asynq's own
+		// retry/backoff (DocumentRetryDelay/DOCUMENT_MAX_RETRY, Plan 01) applies.
+		// Not a terminal outcome, so it is NOT recorded in the job-outcome
+		// metric (Pitfall 6 — one asynq retry must not double-count).
+		return err
+	}
+	metrics.RecordJobOutcome(queue.QueueDocument, jobs.StatusDone, time.Since(start))
 	// Postgres-first: MarkDone already committed inside process(), so a
 	// failed enqueue must not fail the conversion — best-effort only.
 	if job.CallbackURL != "" {

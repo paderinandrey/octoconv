@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -48,6 +49,65 @@ func TestIsTerminalTransientDefault(t *testing.T) {
 	for _, err := range cases {
 		if isTerminal(err) {
 			t.Fatalf("expected isTerminal(%v) = false (broad-retry default, D-01)", err)
+		}
+	}
+}
+
+func TestIsTerminalLibreOfficeSignatures(t *testing.T) {
+	cases := []string{
+		"convert: libreoffice: output missing %PDF- magic bytes",
+		"convert: libreoffice: output is empty",
+		"convert: libreoffice: no pdf export filter for \".xyz\"",
+	}
+	for _, msg := range cases {
+		if !isTerminal(errors.New(msg)) {
+			t.Fatalf("expected isTerminal(%q) = true", msg)
+		}
+	}
+}
+
+// TestIsTerminalTimeoutUnchanged asserts that a wrapped context.DeadlineExceeded
+// (the shape a document/image engine timeout actually surfaces as) is STILL
+// transient under the shared isTerminal — the image path (HandleImageConvert)
+// must keep retrying its timeouts. Only the engine-scoped isDocumentTerminal
+// diverges from this.
+func TestIsTerminalTimeoutUnchanged(t *testing.T) {
+	wrapped := fmt.Errorf("convert: %w", fmt.Errorf("soffice killed: %w", context.DeadlineExceeded))
+	if isTerminal(wrapped) {
+		t.Fatal("expected isTerminal(wrapped context.DeadlineExceeded) = false — image path must keep retrying timeouts")
+	}
+}
+
+func TestIsDocumentTerminal(t *testing.T) {
+	// A DOCUMENT_ENGINE_TIMEOUT expiry (exec.go's process-group-kill shape,
+	// preserved through libreoffice.go and process()'s %w wrapping) IS
+	// terminal for the document engine — DOC-08's deliberate divergence.
+	timeoutErr := fmt.Errorf("convert: %w", fmt.Errorf("soffice killed: %w", context.DeadlineExceeded))
+	if !isDocumentTerminal(timeoutErr) {
+		t.Fatal("expected isDocumentTerminal(wrapped context.DeadlineExceeded) = true (DOC-08)")
+	}
+
+	// Delegates to isTerminal for every non-timeout signature.
+	terminalCases := []error{
+		fmt.Errorf("no converter for %s -> %s", "docx", "png"),
+		errors.New("convert: libreoffice: output is empty"),
+		errors.New("convert: libreoffice: output missing %PDF- magic bytes"),
+		errors.New("convert: libreoffice: no pdf export filter for \".xyz\""),
+		fmt.Errorf("download %q: %w", "uploads/x/0-in.docx", minio.ErrorResponse{Code: minio.NoSuchKey}),
+	}
+	for _, err := range terminalCases {
+		if !isDocumentTerminal(err) {
+			t.Fatalf("expected isDocumentTerminal(%v) = true", err)
+		}
+	}
+
+	transientCases := []error{
+		errors.New("dial tcp: connection refused"),
+		nil,
+	}
+	for _, err := range transientCases {
+		if isDocumentTerminal(err) {
+			t.Fatalf("expected isDocumentTerminal(%v) = false", err)
 		}
 	}
 }
