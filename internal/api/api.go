@@ -26,9 +26,10 @@ type Storage interface {
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
-// Enqueuer dispatches image conversion work.
+// Enqueuer dispatches conversion work to the appropriate engine-class queue.
 type Enqueuer interface {
 	EnqueueImageConvert(ctx context.Context, jobID uuid.UUID) error
+	EnqueueDocumentConvert(ctx context.Context, jobID uuid.UUID) error
 }
 
 // Pinger is a narrow, read-only reachability probe for a single dependency,

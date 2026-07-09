@@ -22,6 +22,10 @@ type Converter interface {
 	Pairs() []Pair
 	// Convert reads inPath and writes the converted result to outPath.
 	Convert(ctx context.Context, inPath, outPath string, opts map[string]any) error
+	// Engine reports the engine class this converter belongs to (e.g.
+	// "image", "document") -- the single source of truth for engine-class
+	// routing (D-01).
+	Engine() string
 }
 
 // NormalizeFormat lowercases a format/extension and folds common aliases so the
@@ -66,6 +70,16 @@ func (r *Registry) Lookup(from, to string) (Converter, bool) {
 func (r *Registry) Supports(from, to string) bool {
 	_, ok := r.Lookup(from, to)
 	return ok
+}
+
+// EngineFor reports the engine class that handles a (from, to) pair (D-02),
+// or ("", false) if the pair is unsupported.
+func (r *Registry) EngineFor(from, to string) (string, bool) {
+	c, ok := r.Lookup(from, to)
+	if !ok {
+		return "", false
+	}
+	return c.Engine(), true
 }
 
 // Default is the process-wide registry populated by converters.go.

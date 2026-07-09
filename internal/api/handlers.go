@@ -25,6 +25,7 @@ const (
 	formFieldTarget      = "target"
 	formFieldCallbackURL = "callback_url"
 	engineImage          = "image"
+	engineDocument       = "document"
 	operationConv        = "convert"
 )
 
@@ -175,10 +176,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate the conversion pair BEFORE writing anything to storage. The
-	// DETECTED format (not the extension-derived one) is the source of truth
-	// fed into the pair-check (D-05).
-	if !convert.Default.Supports(detected, target) {
+	// Validate the conversion pair BEFORE writing anything to storage, and
+	// derive the engine class in the same step (D-01/D-02). The DETECTED
+	// format (not the extension-derived one) is the source of truth fed into
+	// the pair-check (D-05).
+	engine, ok := convert.Default.EngineFor(detected, target)
+	if !ok {
 		writeError(w, http.StatusUnprocessableEntity,
 			"unsupported conversion: "+detected+" -> "+target)
 		return
@@ -238,7 +241,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		ID:           jobID,
 		ClientID:     client.ID,
 		Operation:    operationConv,
-		Engine:       engineImage,
+		Engine:       engine,
 		SourceFormat: detected,
 		TargetFormat: target,
 		CallbackURL:  callbackURL,
@@ -256,8 +259,24 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.queue.EnqueueImageConvert(ctx, createdID); err != nil {
-		// The row stays in 'queued'; a reconciler (next steps) will recover it.
+	// Route to the matching engine-class queue (mirrors reconciler.go's
+	// engine switch). The row stays in 'queued' on any enqueue failure; a
+	// reconciler will recover it.
+	var enqueueErr error
+	switch engine {
+	case engineImage:
+		enqueueErr = s.queue.EnqueueImageConvert(ctx, createdID)
+	case engineDocument:
+		enqueueErr = s.queue.EnqueueDocumentConvert(ctx, createdID)
+	default:
+		// Fail closed: an engine class with no known queue must never be
+		// silently dropped (T-11-02). EngineFor above only ever returns a
+		// value produced by a registered Converter.Engine(), so this branch
+		// signals a registry/routing bug, not a client input.
+		writeError(w, http.StatusInternalServerError, "failed to enqueue job")
+		return
+	}
+	if enqueueErr != nil {
 		writeError(w, http.StatusInternalServerError, "failed to enqueue job")
 		return
 	}

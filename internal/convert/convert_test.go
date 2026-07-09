@@ -43,6 +43,39 @@ func TestRegistryLibvipsPairs(t *testing.T) {
 	}
 }
 
+func TestConverterEngine(t *testing.T) {
+	if got := (LibvipsConverter{}).Engine(); got != "image" {
+		t.Errorf("LibvipsConverter{}.Engine() = %q, want image", got)
+	}
+	if got := (LibreOfficeConverter{}).Engine(); got != "document" {
+		t.Errorf("LibreOfficeConverter{}.Engine() = %q, want document", got)
+	}
+}
+
+func TestRegistryEngineFor(t *testing.T) {
+	// Default registry is populated by converters.go init().
+	if engine, ok := Default.EngineFor("png", "webp"); !ok || engine != "image" {
+		t.Errorf("EngineFor(png, webp) = (%q, %v), want (image, true)", engine, ok)
+	}
+	if engine, ok := Default.EngineFor("docx", "pdf"); !ok || engine != "document" {
+		t.Errorf("EngineFor(docx, pdf) = (%q, %v), want (document, true)", engine, ok)
+	}
+	// Alias normalization via Lookup.
+	if engine, ok := Default.EngineFor("jpeg", "webp"); !ok || engine != "image" {
+		t.Errorf("EngineFor(jpeg, webp) = (%q, %v), want (image, true)", engine, ok)
+	}
+	// Unsupported pair: zero-value string, false.
+	if engine, ok := Default.EngineFor("png", "mp3"); ok || engine != "" {
+		t.Errorf("EngineFor(png, mp3) = (%q, %v), want (\"\", false)", engine, ok)
+	}
+	// All 6 document source formats -> ("document", true).
+	for _, from := range []string{"docx", "xlsx", "pptx", "odt", "ods", "odp"} {
+		if engine, ok := Default.EngineFor(from, "pdf"); !ok || engine != "document" {
+			t.Errorf("EngineFor(%s, pdf) = (%q, %v), want (document, true)", from, engine, ok)
+		}
+	}
+}
+
 // TestRunCommandTimeout verifies the hardened exec kills a long-running child
 // when the context deadline fires, and returns the context error.
 func TestRunCommandTimeout(t *testing.T) {
