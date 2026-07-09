@@ -54,11 +54,11 @@ var ooxmlMacroParts = map[string]bool{
 // SniffContainer inspects a ZIP-shaped upload's central directory to
 // disambiguate the six supported office formats (D-01), sum declared
 // uncompressed size across every entry for the zip-bomb guard (D-02/D-03),
-// and detect macro-carrying parts (D-03/D-05) -- all in a single
-// archive/zip.NewReader pass (RESEARCH.md Pitfall 4: never re-parse the
-// central directory more than once per upload). r must be the original,
+// and detect macro-carrying parts (D-03/D-05) -- all in a single pass over
+// the archive/zip central directory (RESEARCH.md Pitfall 4: never re-parse
+// the central directory more than once per upload). r must be the original,
 // unconsumed upload source (e.g. multipart.File), not a re-stitched
-// io.Reader -- zip.NewReader requires positional access.
+// io.Reader -- the archive/zip package requires positional access.
 func SniffContainer(r io.ReaderAt, size int64) (ContainerResult, error) {
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
