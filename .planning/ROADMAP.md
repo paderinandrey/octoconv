@@ -69,7 +69,9 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
   1. Worker converts docx/xlsx/pptx/odt/ods/odp to PDF through LibreOffice headless, with each job running against its own isolated `-env:UserInstallation` profile so concurrent jobs never collide on a shared lock file.
   2. Worker validates the conversion output (non-zero size, valid `%PDF-` magic bytes) before marking a job `done`; invalid output is a terminal failure, not a false success.
   3. An integration test proves that when a conversion is killed on timeout, the real `soffice`/`soffice.bin` process and any children are actually terminated — zero surviving processes, not an assumption inherited from the image engine's exec wrapper.
-**Plans**: TBD
+**Plans**: 2 plans
+  - [ ] 09-01-PLAN.md — LibreOfficeConverter (Pairs/Convert, per-job -env:UserInstallation isolation, %PDF- output validation), registry wiring, and unit + soffice-gated live tests
+  - [ ] 09-02-PLAN.md — Dockerfile.worker LibreOffice provisioning + Dockerfile.worker-test harness; live DOC-06 process-kill proof (zero survivors) run inside the LibreOffice image
 
 ### Phase 10: Document Worker & Reconciler Integration
 **Goal**: Document conversions run in their own resource-isolated process, respect their own timeout budget, and are recovered correctly if they get stranded.
@@ -107,6 +109,6 @@ Phases execute in numeric order: 8 → 9 → 10 → 11
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete | 2026-07-08 |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 2/2 | Complete | 2026-07-08 |
 | 8. Document Content Safety & Format Detection | v1.2 | 2/2 | Complete   | 2026-07-09 |
-| 9. LibreOffice Converter Engine | v1.2 | 0/TBD | Not started | - |
+| 9. LibreOffice Converter Engine | v1.2 | 0/2 | Planned | - |
 | 10. Document Worker & Reconciler Integration | v1.2 | 0/TBD | Not started | - |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 0/TBD | Not started | - |
