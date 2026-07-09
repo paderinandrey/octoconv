@@ -435,17 +435,19 @@ ps -eo pid,ppid,pgid,comm --no-headers | grep -iE 'soffice|oosplash' && echo "SU
 
 **If this table is empty:** N/A — see rows above. All *functional/mechanical* claims (process topology, filter names, output validation, concurrency behavior, package installability, CVE status) were empirically verified this session and are not flagged here.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Exact `DOCUMENT_ENGINE_TIMEOUT` value for real internal documents**
+1. **Exact `DOCUMENT_ENGINE_TIMEOUT` value for real internal documents (RESOLVED)**
    - What we know: 300s is CONTEXT.md's locked default, reasoned from milestone research's derivation (2.5x a generous cold-start + large-document budget); this session's live tests did not stress-test pathological documents (deeply nested spreadsheets, embedded video, etc.)
    - What's unclear: whether 300s is too tight or too generous against the internal consumer's actual worst-case document corpus
    - Recommendation: ship 300s as planned (already locked); do not attempt to re-derive it in this phase — flag for revisit once real production documents are observed, exactly as D-01 already states
+   - Resolution: RESOLVED — accepted as-is. The env-var wiring for `DOCUMENT_ENGINE_TIMEOUT` is out of this phase's scope entirely (Phase 10/DOC-08); Phase 9's `Convert` relies on the caller-supplied `ctx` timeout. No further action needed this phase.
 
-2. **Whether to set `HOME` per-invocation given it's not strictly required for correctness**
+2. **Whether to set `HOME` per-invocation given it's not strictly required for correctness (RESOLVED)**
    - What we know: omitting it produces correct output with benign stderr noise; setting it to the per-job `workDir` eliminates the noise and avoids a redundant font-cache rebuild per invocation
    - What's unclear: the exact magnitude of the font-cache-rebuild latency cost (not isolated/measured separately from overall conversion time in this session's tests)
    - Recommendation: set it anyway — it's a one-line `cmd.Env` addition with no downside, purely for log cleanliness and marginal performance; do not treat it as launch-blocking if a planner chooses to defer it
+   - Resolution: RESOLVED — planner deferred it (09-01-PLAN.md's `Convert` implementation does not set `HOME`), consistent with the recommendation's explicit "not launch-blocking if deferred" framing. No functional gap.
 
 ## Environment Availability
 
