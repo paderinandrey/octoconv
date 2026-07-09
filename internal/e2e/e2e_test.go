@@ -37,6 +37,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -45,6 +47,7 @@ import (
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/db"
+	"github.com/apaderin/octoconv/internal/webhook"
 )
 
 // e2eConfig carries the per-run environment the helpers below need.
@@ -250,6 +253,133 @@ func startWebhookReceiver(t *testing.T, webhookHost string) (string, <-chan webh
 	}
 	callbackURL := fmt.Sprintf("http://%s/webhook", net.JoinHostPort(webhookHost, port))
 	return callbackURL, received
+}
+
+// TestDocumentConversionE2E drives all 6 document format pairs
+// (docx/xlsx/pptx/odt/ods/odp -> pdf) through the LIVE pipeline: multipart
+// upload -> poll to done -> presigned download -> %PDF- magic-byte check
+// (D-04, SC#2/SC#4). Exactly one pair (docx) additionally registers a
+// callback_url at the in-test webhook receiver and asserts a signed webhook
+// payload arrives (D-05, SC#3); the other 5 pairs poll only.
+func TestDocumentConversionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	fixtures := []string{
+		"sample.docx", // the one webhook-asserting pair (D-05)
+		"sample.xlsx",
+		"sample.pptx",
+		"sample.odt",
+		"sample.ods",
+		"sample.odp",
+	}
+
+	for _, filename := range fixtures {
+		t.Run(filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", filename))
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", filename, err)
+			}
+
+			// D-05: exactly one pair also exercises webhook delivery.
+			var callbackURL string
+			var received <-chan webhookHit
+			if filename == "sample.docx" {
+				callbackURL, received = startWebhookReceiver(t, cfg.webhookHost)
+			}
+
+			jobID := postJob(t, cfg.baseURL, apiKey, filename, data, "pdf", callbackURL)
+
+			// Generous bound: LibreOffice cold start in a fresh container is
+			// slow, and the document queue may serialize the 6 jobs.
+			body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+
+			downloadURL, _ := body["download_url"].(string)
+			if downloadURL == "" {
+				t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+			}
+			assertDownloadIsPDF(t, downloadURL)
+
+			if received != nil {
+				assertSignedWebhook(t, received, jobID)
+			}
+		})
+	}
+}
+
+// assertDownloadIsPDF fetches the presigned URL (no auth header — the URL is
+// self-authorizing) and asserts the response body begins with the %PDF-
+// magic bytes (D-04).
+func assertDownloadIsPDF(t *testing.T, downloadURL string) {
+	t.Helper()
+	resp, err := downloadClient().Get(downloadURL)
+	if err != nil {
+		t.Fatalf("GET download_url: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		t.Fatalf("GET download_url status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	head := make([]byte, 5)
+	if _, err := io.ReadFull(resp.Body, head); err != nil {
+		t.Fatalf("read download head: %v", err)
+	}
+	if string(head) != "%PDF-" {
+		t.Fatalf("download head = %q, want %%PDF-", head)
+	}
+}
+
+// assertSignedWebhook blocks (bounded) on the receiver channel and asserts a
+// webhook actually arrived with a non-empty X-OctoConv-Signature, a body
+// whose job_id matches the created job, and a terminal status (D-05). When
+// WEBHOOK_SIGNING_SECRET is set (the compose worker's known dev secret), the
+// signature is fully HMAC-verified against internal/webhook's scheme.
+func assertSignedWebhook(t *testing.T, received <-chan webhookHit, jobID string) {
+	t.Helper()
+	var hit webhookHit
+	select {
+	case hit = <-received:
+	case <-time.After(90 * time.Second):
+		t.Fatal("webhook for job did not arrive within 90s")
+	}
+
+	if hit.signature == "" {
+		t.Error("webhook X-OctoConv-Signature header is empty")
+	}
+	if hit.timestamp == "" {
+		t.Error("webhook X-OctoConv-Timestamp header is empty")
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(hit.body, &payload); err != nil {
+		t.Fatalf("decode webhook body: %v; body=%s", err, hit.body)
+	}
+	if got := payload["job_id"]; got != jobID {
+		t.Errorf("webhook job_id = %v, want %s", got, jobID)
+	}
+	status, _ := payload["status"].(string)
+	if status != "done" && status != "failed" {
+		t.Errorf("webhook status = %q, want a terminal status", status)
+	}
+	if status == "done" {
+		if u, _ := payload["download_url"].(string); u == "" {
+			t.Error("webhook body for a done job is missing download_url")
+		}
+	}
+
+	// Full HMAC verification when the stack's signing secret is known
+	// (docker-compose.yml worker: dev-only-change-me-in-real-deploys).
+	if secret := os.Getenv("WEBHOOK_SIGNING_SECRET"); secret != "" {
+		ts, err := strconv.ParseInt(hit.timestamp, 10, 64)
+		if err != nil {
+			t.Fatalf("parse webhook timestamp %q: %v", hit.timestamp, err)
+		}
+		want := webhook.SignPayload([]byte(secret), ts, hit.body)
+		if hit.signature != want {
+			t.Errorf("webhook signature = %s, want %s (HMAC over %d.%s)", hit.signature, want, ts, hit.body)
+		}
+	}
 }
 
 // downloadClient returns the HTTP client for fetching the presigned
