@@ -67,6 +67,17 @@ func Dimensions(format string, r io.Reader) (width, height uint32, rest io.Reade
 	return w, h, rest, nil
 }
 
+// HasDimensionLimit reports whether format has a registered dimension
+// parser (i.e. is an image format subject to the declared-pixel-dimension
+// ceiling). Document formats (docx/xlsx/pptx/odt/ods/odp) have no pixel-
+// dimension concept and must skip the check entirely — this predicate is
+// the scope guard for the confirmed regression (RESEARCH.md Pitfall 5),
+// not a new document-specific dimension check.
+func HasDimensionLimit(format string) bool {
+	_, ok := dimensionParsers[NormalizeFormat(format)]
+	return ok
+}
+
 // pngDimensions reads the IHDR chunk's width/height fields.
 // Source: https://www.w3.org/TR/png-3/#11IHDR (IHDR chunk layout)
 func pngDimensions(b []byte) (uint32, uint32, bool) {
