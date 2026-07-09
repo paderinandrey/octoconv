@@ -1,0 +1,25 @@
+# Dockerfile.worker-test exists solely to run the soffice-gated internal/convert
+# tests live (DOC-06 per CONTEXT.md D-03: a real Docker-based integration test
+# against a real installed LibreOffice, not a unit test with a mocked process).
+# It is not a deployment artifact — it bundles a Go toolchain, LibreOffice, and
+# procps (for the survivor-check `ps` invocation) in a single repeatable image.
+FROM golang:1.26-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libvips-tools \
+      libreoffice-writer-nogui \
+      libreoffice-calc-nogui \
+      libreoffice-impress-nogui \
+      fonts-crosextra-carlito \
+      fonts-crosextra-caladea \
+      fonts-liberation2 \
+      procps \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+CMD ["go", "test", "./internal/convert/", "-v"]

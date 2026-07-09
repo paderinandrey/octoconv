@@ -6,10 +6,18 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 
-# Runtime stage: image engine needs the libvips CLI.
+# Runtime stage: image engine needs the libvips CLI; document engine needs LibreOffice (soffice).
 FROM debian:bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates libvips-tools \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libvips-tools \
+      libreoffice-writer-nogui \
+      libreoffice-calc-nogui \
+      libreoffice-impress-nogui \
+      fonts-crosextra-carlito \
+      fonts-crosextra-caladea \
+      fonts-liberation2 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/worker /usr/local/bin/worker
 # Run unprivileged: the worker shells out to untrusted-input engines.
