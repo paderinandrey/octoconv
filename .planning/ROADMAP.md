@@ -41,7 +41,7 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
 
 **Milestone Goal:** Внутренние сервисы могут конвертировать офисные документы (docx/xlsx/pptx/odt/ods/odp) в PDF через новый класс движков на LibreOffice, поверх уже готовой production-инфраструктуры (auth, rate limiting, webhook-доставка, reconciler, observability).
 
-- [ ] **Phase 8: Document Content Safety & Format Detection** - Stdlib-only ZIP/ODF/OOXML disambiguation, zip-bomb guard, and macro rejection gate office uploads before they reach storage or the engine
+- [x] **Phase 8: Document Content Safety & Format Detection** - Stdlib-only ZIP/ODF/OOXML disambiguation, zip-bomb guard, and macro rejection gate office uploads before they reach storage or the engine (completed 2026-07-09)
 - [ ] **Phase 9: LibreOffice Converter Engine** - `LibreOfficeConverter` with per-job profile isolation, output validation, and a verified process-kill guarantee
 - [ ] **Phase 10: Document Worker & Reconciler Integration** - Separate `cmd/document-worker` binary, `DOCUMENT_ENGINE_TIMEOUT`, and engine-aware reconciler recovery
 - [ ] **Phase 11: API Routing & End-to-End Document Conversion** - `handleCreateJob` routes documents to the document engine and the full pipeline is live-verified across all 6 format pairs
@@ -59,7 +59,7 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
   4. API rejects with 422 an office document containing macro parts (`vbaProject.bin` / Basic-script manifest).
 **Plans**: 2 plans
   - [x] 08-01-PLAN.md — internal/convert detection layer: SniffContainer (OOXML/ODF disambiguation, zip-bomb size sum, macro + duplicate-root-part scan) + HasDimensionLimit regression-fix predicate
-  - [ ] 08-02-PLAN.md — handleCreateJob integration: SniffContainer branch, zip-bomb/macro 422 rejections, dimension-check guard, MAX_DOCUMENT_UNCOMPRESSED_BYTES config wiring
+  - [x] 08-02-PLAN.md — handleCreateJob integration: SniffContainer branch, zip-bomb/macro 422 rejections, dimension-check guard, MAX_DOCUMENT_UNCOMPRESSED_BYTES config wiring
 
 ### Phase 9: LibreOffice Converter Engine
 **Goal**: The worker can turn an accepted office document into a trustworthy PDF via LibreOffice headless, and never leaves an orphaned `soffice` process behind.
@@ -106,7 +106,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11
 | 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete | 2026-07-08 |
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete | 2026-07-08 |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 2/2 | Complete | 2026-07-08 |
-| 8. Document Content Safety & Format Detection | v1.2 | 1/2 | In Progress|  |
+| 8. Document Content Safety & Format Detection | v1.2 | 2/2 | Complete   | 2026-07-09 |
 | 9. LibreOffice Converter Engine | v1.2 | 0/TBD | Not started | - |
 | 10. Document Worker & Reconciler Integration | v1.2 | 0/TBD | Not started | - |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 0/TBD | Not started | - |
