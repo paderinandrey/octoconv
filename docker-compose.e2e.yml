@@ -1,0 +1,30 @@
+# docker-compose.e2e.yml — E2E-ONLY compose override for Phase 11 Plan 02/03.
+#
+# This file exists SOLELY to support the live end-to-end test harness
+# (internal/e2e/e2e_test.go) and MUST NEVER be used in production. It
+# deliberately relaxes the webhook SSRF guard (WEBHOOK_ALLOW_PRIVATE_IPS,
+# WEBHOOK_ALLOW_INSECURE_HTTP) so the E2E suite's httptest-based webhook
+# receiver, reachable at host.docker.internal from inside the compose
+# network, can accept a plain-http callback_url pointing at a private
+# host-gateway address (T-11-04). Always run it layered on top of the base
+# file, never standalone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+#
+# The production docker-compose.yml keeps the SSRF guard fully engaged;
+# nothing in this override file is copied there.
+services:
+  api:
+    environment:
+      WEBHOOK_ALLOW_PRIVATE_IPS: "true"
+      WEBHOOK_ALLOW_INSECURE_HTTP: "true"
+
+  # worker delivers webhooks (HandleWebhookDeliver) — it is the process that
+  # actually dials the E2E test's host-bound receiver.
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  document-worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
