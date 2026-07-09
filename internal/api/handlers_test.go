@@ -497,15 +497,23 @@ func TestCreateJob_DimensionsUnknown(t *testing.T) {
 	}
 }
 
-// TestCreateJob_DocumentDetectedButUnsupported verifies DOC-01: a well-formed
-// docx is structurally detected before any storage write, then correctly
-// 422s at the existing pair-check since no document Converter is registered
-// this phase (Phase 9) -- proving detection integrates without prematurely
-// enabling conversion.
-func TestCreateJob_DocumentDetectedButUnsupported(t *testing.T) {
+// TestCreateJob_DocumentDetectedAndAccepted verifies DOC-01: a well-formed
+// docx is structurally detected before any storage write and passes the
+// pair-check. As of Phase 9, LibreOfficeConverter is registered in the
+// shared convert.Default registry, so docx->pdf is genuinely Supported and
+// the job is accepted (202) and enqueued -- via the existing, still-single
+// EnqueueImageConvert call, since handleCreateJob does not yet branch by
+// engine class. This is expected TRANSITIONAL behavior: document-specific
+// queue routing (its own queue, its own DOCUMENT_ENGINE_TIMEOUT, resource
+// isolation from the image worker) is Phase 10/11's job, not yet built.
+// Until then, an accepted document job runs through the image queue/worker
+// under the general ENGINE_TIMEOUT. This test intentionally proves the
+// CURRENT real behavior, not the eventual target state.
+func TestCreateJob_DocumentDetectedAndAccepted(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
-	srv, _ := newTestServer(repo, store, &fakeQueue{})
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
 
 	body, ct := multipartBody(t, "in.docx", "pdf", docxFixture(t))
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -514,29 +522,32 @@ func TestCreateJob_DocumentDetectedButUnsupported(t *testing.T) {
 
 	srv.Routes().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "unsupported conversion: docx -> pdf") {
-		t.Errorf("error = %q, want unsupported-conversion message naming docx -> pdf", resp["error"])
+	if !store.uploaded {
+		t.Error("must upload a supported document pair")
 	}
-	if store.uploaded {
-		t.Error("must not upload before the pair-check")
+	if repo.created == nil {
+		t.Fatal("must create job for a supported document pair")
 	}
-	if repo.created != nil {
-		t.Error("must not create job for an unsupported document pair")
+	if repo.created.SourceFormat != "docx" || repo.created.TargetFormat != "pdf" {
+		t.Errorf("job format = %s -> %s, want docx -> pdf", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if queue.enqueued != repo.createdID {
+		t.Error("must enqueue the created job (via the existing single EnqueueImageConvert path -- document-specific queue routing is Phase 10/11)")
 	}
 }
 
-// TestCreateJob_ODFDetectedButUnsupported proves the ODF disambiguation path
+// TestCreateJob_ODFDetectedAndAccepted proves the ODF disambiguation path
 // (index-0 mimetype check) is reached and produces the same
-// detected-but-unsupported outcome as OOXML.
-func TestCreateJob_ODFDetectedButUnsupported(t *testing.T) {
+// detected-and-accepted outcome as OOXML, for the same Phase 9/10/11
+// transitional reasons documented on TestCreateJob_DocumentDetectedAndAccepted.
+func TestCreateJob_ODFDetectedAndAccepted(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
-	srv, _ := newTestServer(repo, store, &fakeQueue{})
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
 
 	body, ct := multipartBody(t, "in.odt", "pdf", odtFixture(t))
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -545,19 +556,20 @@ func TestCreateJob_ODFDetectedButUnsupported(t *testing.T) {
 
 	srv.Routes().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "unsupported conversion: odt -> pdf") {
-		t.Errorf("error = %q, want unsupported-conversion message naming odt -> pdf", resp["error"])
+	if !store.uploaded {
+		t.Error("must upload a supported document pair")
 	}
-	if store.uploaded {
-		t.Error("must not upload before the pair-check")
+	if repo.created == nil {
+		t.Fatal("must create job for a supported document pair")
 	}
-	if repo.created != nil {
-		t.Error("must not create job for an unsupported document pair")
+	if repo.created.SourceFormat != "odt" || repo.created.TargetFormat != "pdf" {
+		t.Errorf("job format = %s -> %s, want odt -> pdf", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if queue.enqueued != repo.createdID {
+		t.Error("must enqueue the created job (via the existing single EnqueueImageConvert path -- document-specific queue routing is Phase 10/11)")
 	}
 }
 
