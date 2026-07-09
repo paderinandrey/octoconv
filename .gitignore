@@ -3,3 +3,4 @@
 *.test
 .DS_Store
 frontend/node_modules
+/.planning/
