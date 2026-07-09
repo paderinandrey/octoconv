@@ -6,25 +6,17 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/worker ./cmd/worker
 
-# Runtime stage: image engine needs the libvips CLI; document engine needs LibreOffice (soffice).
+# Runtime stage: image engine needs only the libvips CLI.
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
-      tini \
       libvips-tools \
-      libreoffice-writer-nogui \
-      libreoffice-calc-nogui \
-      libreoffice-impress-nogui \
-      fonts-crosextra-carlito \
-      fonts-crosextra-caladea \
-      fonts-liberation2 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/worker /usr/local/bin/worker
 # Run unprivileged: the worker shells out to untrusted-input engines.
 USER nobody
-# tini is PID 1 so orphaned grandchildren (e.g. LibreOffice's oosplash forking
-# soffice.bin) get reaped after a group SIGKILL, instead of persisting as
-# permanent zombies — confirmed live (09-02) that without an init/reaper, a
-# killed soffice.bin reparents to PID 1 and is never waited on.
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/worker"]
+# The image engine is a single synchronous libvips CLI invocation (no forking
+# daemon like LibreOffice's oosplash->soffice.bin), so there is no orphaned-
+# grandchild risk here and no init/reaper is needed as PID 1.
+ENTRYPOINT ["/usr/local/bin/worker"]

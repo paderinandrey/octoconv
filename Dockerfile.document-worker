@@ -1,0 +1,29 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/document-worker ./cmd/document-worker
+
+# Runtime stage: document engine needs LibreOffice (soffice) headless conversion.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      tini \
+      libreoffice-writer-nogui \
+      libreoffice-calc-nogui \
+      libreoffice-impress-nogui \
+      fonts-crosextra-carlito \
+      fonts-crosextra-caladea \
+      fonts-liberation2 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/document-worker /usr/local/bin/document-worker
+# Run unprivileged: the worker shells out to untrusted-input engines.
+USER nobody
+# tini is PID 1 so orphaned grandchildren (e.g. LibreOffice's oosplash forking
+# soffice.bin) get reaped after a group SIGKILL, instead of persisting as
+# permanent zombies — confirmed live (09-02) that without an init/reaper, a
+# killed soffice.bin reparents to PID 1 and is never waited on.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/document-worker"]
