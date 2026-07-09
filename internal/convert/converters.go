@@ -4,7 +4,7 @@ package convert
 // a new engine or format pair, register it here with a single line.
 func init() {
 	Default.Register(LibvipsConverter{})
+	Default.Register(LibreOfficeConverter{})
 	// Future engines (one line each):
-	// Default.Register(LibreOfficeConverter{})
 	// Default.Register(FFmpegConverter{})
 }
