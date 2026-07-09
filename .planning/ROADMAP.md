@@ -57,7 +57,9 @@ Full details: `.planning/milestones/v1.1-ROADMAP.md`
   2. API rejects with 422, before any S3 write, an upload whose structural content doesn't match its claimed office format.
   3. API rejects with 422 an office document whose declared uncompressed ZIP size exceeds a configurable limit (zip-bomb guard), before conversion.
   4. API rejects with 422 an office document containing macro parts (`vbaProject.bin` / Basic-script manifest).
-**Plans**: TBD
+**Plans**: 2 plans
+  - [ ] 08-01-PLAN.md — internal/convert detection layer: SniffContainer (OOXML/ODF disambiguation, zip-bomb size sum, macro + duplicate-root-part scan) + HasDimensionLimit regression-fix predicate
+  - [ ] 08-02-PLAN.md — handleCreateJob integration: SniffContainer branch, zip-bomb/macro 422 rejections, dimension-check guard, MAX_DOCUMENT_UNCOMPRESSED_BYTES config wiring
 
 ### Phase 9: LibreOffice Converter Engine
 **Goal**: The worker can turn an accepted office document into a trustworthy PDF via LibreOffice headless, and never leaves an orphaned `soffice` process behind.
@@ -104,7 +106,7 @@ Phases execute in numeric order: 8 → 9 → 10 → 11
 | 5. Webhook SSRF Private-IP Opt-Out | v1.1 | 1/1 | Complete | 2026-07-08 |
 | 6. Reconciler Webhook-Gap Sweep & Staleness Soak Test | v1.1 | 4/4 | Complete | 2026-07-08 |
 | 7. Image Dimension Limit (Decompression-Bomb Protection) | v1.1 | 2/2 | Complete | 2026-07-08 |
-| 8. Document Content Safety & Format Detection | v1.2 | 0/TBD | Not started | - |
+| 8. Document Content Safety & Format Detection | v1.2 | 0/2 | Not started | - |
 | 9. LibreOffice Converter Engine | v1.2 | 0/TBD | Not started | - |
 | 10. Document Worker & Reconciler Integration | v1.2 | 0/TBD | Not started | - |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 0/TBD | Not started | - |
