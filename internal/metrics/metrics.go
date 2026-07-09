@@ -28,7 +28,7 @@ var (
 
 	reconcilerActions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "octoconv_reconciler_actions_total",
-		Help: "Total number of reconciler actions, labeled by action (recovered/exhausted/webhook_gap_recovered).",
+		Help: "Total number of reconciler actions, labeled by action (recovered/exhausted/webhook_gap_recovered/unroutable_engine).",
 	}, []string{"action"})
 )
 
@@ -50,7 +50,8 @@ func RecordWebhookDelivery(success bool) {
 }
 
 // RecordReconcilerAction increments the reconciler-action counter for the
-// given action ("recovered", "exhausted", or "webhook_gap_recovered").
+// given action ("recovered", "exhausted", "webhook_gap_recovered", or
+// "unroutable_engine").
 func RecordReconcilerAction(action string) {
 	reconcilerActions.WithLabelValues(action).Inc()
 }

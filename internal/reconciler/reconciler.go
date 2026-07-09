@@ -42,6 +42,7 @@ type jobStore interface {
 type enqueuer interface {
 	EnqueueImageConvert(ctx context.Context, id uuid.UUID) error
 	EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) error
+	EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error
 }
 
 // Sweeper periodically scans for stale jobs and recovers or exhausts them.
@@ -123,9 +124,31 @@ func (s *Sweeper) sweep(ctx context.Context) {
 		// lock (Plan 01) decides whether a task is genuinely needed. Only a
 		// successful, non-duplicate enqueue proves the job is actually
 		// stranded (no live task/lock) rather than merely backlogged or
-		// still being retried by asynq.
-		if err := s.enq.EnqueueImageConvert(ctx, j.ID); err != nil {
-			if errors.Is(err, asynq.ErrDuplicateTask) {
+		// still being retried by asynq. Which queue to recover onto is
+		// decided by the job's engine class (DOC-09, D-04) — never
+		// hardcoded to image, so a document job is never misrouted onto the
+		// image queue.
+		var enqueueErr error
+		switch j.Engine {
+		case "image":
+			enqueueErr = s.enq.EnqueueImageConvert(ctx, j.ID)
+		case "document":
+			enqueueErr = s.enq.EnqueueDocumentConvert(ctx, j.ID)
+		default:
+			// Fail closed (T-10-03): av/cad/archive/probe are out of scope
+			// this milestone and a corrupted/unrecognized engine value must
+			// never be guessed at. Do NOT enqueue and do NOT RequeueStale —
+			// either would risk running the job through the wrong engine's
+			// worker or silently losing it from the recovery cap accounting.
+			// A future engine must add its own case here rather than fall
+			// through to a default route. This is a clear, non-fatal,
+			// metric-visible skip, not a crash — the job stays stranded and
+			// is re-evaluated (unrecovered) on the next sweep tick.
+			metrics.RecordReconcilerAction("unroutable_engine")
+			continue
+		}
+		if enqueueErr != nil {
+			if errors.Is(enqueueErr, asynq.ErrDuplicateTask) {
 				// A live task/lock for this job already exists — the job is
 				// backlogged or asynq is still retrying it, NOT stranded.
 				// This is the expected, safe case: no status change, no

@@ -33,10 +33,12 @@ const detailActionWebhookGapRecovered = "webhook_gap_recovered"
 
 // StaleJob is a lightweight row returned by FindStale: just enough for the
 // reconciler to decide how to recover the job (id + the status it was found
-// stranded in).
+// stranded in). Engine drives the reconciler's engine-aware recovery routing
+// (D-04) — it must never be misrouted onto the wrong engine-class queue.
 type StaleJob struct {
 	ID     uuid.UUID
 	Status string
+	Engine string
 }
 
 // WebhookGapJob is a lightweight row returned by FindWebhookGaps: enough for
@@ -191,7 +193,7 @@ func (r *Repo) FindStale(ctx context.Context, queuedStaleAfter, activeStaleAfter
 	activeCutoff := now.Add(-activeStaleAfter)
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, status FROM jobs
+		SELECT id, status, engine FROM jobs
 		WHERE (status = 'queued' AND created_at < $1)
 		   OR (status = 'active' AND started_at < $2)`,
 		queuedCutoff, activeCutoff,
@@ -204,7 +206,7 @@ func (r *Repo) FindStale(ctx context.Context, queuedStaleAfter, activeStaleAfter
 	var out []StaleJob
 	for rows.Next() {
 		var j StaleJob
-		if err := rows.Scan(&j.ID, &j.Status); err != nil {
+		if err := rows.Scan(&j.ID, &j.Status, &j.Engine); err != nil {
 			return nil, fmt.Errorf("scan stale job: %w", err)
 		}
 		out = append(out, j)

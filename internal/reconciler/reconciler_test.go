@@ -80,10 +80,12 @@ func (f *fakeStore) RecordWebhookGapRecovered(ctx context.Context, id uuid.UUID,
 
 // fakeEnqueuer is an in-memory enqueuer implementation for unit tests.
 type fakeEnqueuer struct {
-	enqueueImageErr   error
-	imageCalls        []uuid.UUID
-	webhookCalls      []uuid.UUID
-	enqueueWebhookErr error
+	enqueueImageErr    error
+	imageCalls         []uuid.UUID
+	webhookCalls       []uuid.UUID
+	enqueueWebhookErr  error
+	enqueueDocumentErr error
+	documentCalls      []uuid.UUID
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
@@ -94,6 +96,11 @@ func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) er
 func (f *fakeEnqueuer) EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) error {
 	f.webhookCalls = append(f.webhookCalls, id)
 	return f.enqueueWebhookErr
+}
+
+func (f *fakeEnqueuer) EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error {
+	f.documentCalls = append(f.documentCalls, id)
+	return f.enqueueDocumentErr
 }
 
 func testConfig() Config {
@@ -108,7 +115,7 @@ func testConfig() Config {
 func TestSweepRecoversUnderCap(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "image"}},
 		recoveryCount: map[uuid.UUID]int{id: 0},
 	}
 	enq := &fakeEnqueuer{}
@@ -119,8 +126,61 @@ func TestSweepRecoversUnderCap(t *testing.T) {
 	if len(enq.imageCalls) != 1 {
 		t.Fatalf("EnqueueImageConvert calls = %d, want 1", len(enq.imageCalls))
 	}
+	if len(enq.documentCalls) != 0 {
+		t.Fatalf("EnqueueDocumentConvert should not be called for an image job, got %d calls", len(enq.documentCalls))
+	}
 	if store.requeueStaleCalls != 1 {
 		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
+	}
+	if len(store.markFailedCalls) != 0 {
+		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+func TestSweepRoutesDocumentJobsToDocumentQueue(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "document"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.documentCalls) != 1 || enq.documentCalls[0] != id {
+		t.Fatalf("EnqueueDocumentConvert calls = %+v, want [%s]", enq.documentCalls, id)
+	}
+	if len(enq.imageCalls) != 0 {
+		t.Fatalf("EnqueueImageConvert should not be called for a document job, got %d calls", len(enq.imageCalls))
+	}
+	if store.requeueStaleCalls != 1 {
+		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
+	}
+	if len(store.markFailedCalls) != 0 {
+		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+func TestSweepSkipsUnknownEngine(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "av"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.imageCalls) != 0 {
+		t.Fatalf("EnqueueImageConvert should not be called for an unrecognized engine, got %d calls", len(enq.imageCalls))
+	}
+	if len(enq.documentCalls) != 0 {
+		t.Fatalf("EnqueueDocumentConvert should not be called for an unrecognized engine, got %d calls", len(enq.documentCalls))
+	}
+	if store.requeueStaleCalls != 0 {
+		t.Fatalf("RequeueStale should not be called for an unrecognized engine, got %d calls", store.requeueStaleCalls)
 	}
 	if len(store.markFailedCalls) != 0 {
 		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
@@ -130,7 +190,7 @@ func TestSweepRecoversUnderCap(t *testing.T) {
 func TestSweepSkipsDuplicateEnqueue(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusQueued}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusQueued, Engine: "image"}},
 		recoveryCount: map[uuid.UUID]int{id: 0},
 	}
 	enq := &fakeEnqueuer{enqueueImageErr: asynq.ErrDuplicateTask}
@@ -155,7 +215,7 @@ func TestSweepSkipsDuplicateEnqueue(t *testing.T) {
 func TestSweepRequeueStaleRetriedOnce(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:            []jobs.StaleJob{{ID: id, Status: jobs.StatusActive}},
+		stale:            []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "image"}},
 		recoveryCount:    map[uuid.UUID]int{id: 0},
 		requeueStaleErrs: []error{errors.New("transient write failure"), nil},
 	}
@@ -175,7 +235,7 @@ func TestSweepRequeueStaleRetriedOnce(t *testing.T) {
 func TestSweepRequeueStaleBoundedRetry(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "image"}},
 		recoveryCount: map[uuid.UUID]int{id: 0},
 		requeueStaleErrs: []error{
 			errors.New("transient write failure"),
@@ -207,7 +267,7 @@ func TestSweepRequeueStaleBoundedRetry(t *testing.T) {
 func TestSweepExhaustsAtCap(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "image"}},
 		recoveryCount: map[uuid.UUID]int{id: 3},
 		jobs:          map[uuid.UUID]*jobs.Job{id: {ID: id, CallbackURL: "https://example.test/hook"}},
 	}
@@ -230,7 +290,7 @@ func TestSweepExhaustsAtCap(t *testing.T) {
 func TestSweepExhaustNoCallbackNoWebhook(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "image"}},
 		recoveryCount: map[uuid.UUID]int{id: 3},
 		jobs:          map[uuid.UUID]*jobs.Job{id: {ID: id, CallbackURL: ""}},
 	}
