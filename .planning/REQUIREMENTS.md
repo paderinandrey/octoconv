@@ -9,9 +9,9 @@
 
 ### Document Content Validation
 
-- [ ] **DOC-01**: API принимает docx/xlsx/pptx/odt/ods/odp через существующий `POST /v1/jobs` и отклоняет несоответствие содержимого заявленному формату (структурный ZIP/OOXML/ODF sniff) с 422, до записи в S3 — по аналогии с magic-byte валидацией изображений (Phase 4)
-- [ ] **DOC-02**: API отклоняет документ, чей заявленный несжатый размер ZIP-контейнера превышает настраиваемый лимит (защита от zip-bomb), до конвертации
-- [ ] **DOC-03**: API отклоняет документ, содержащий части макросов (`vbaProject.bin` / Basic-script манифест), с 422
+- [x] **DOC-01**: API принимает docx/xlsx/pptx/odt/ods/odp через существующий `POST /v1/jobs` и отклоняет несоответствие содержимого заявленному формату (структурный ZIP/OOXML/ODF sniff) с 422, до записи в S3 — по аналогии с magic-byte валидацией изображений (Phase 4)
+- [x] **DOC-02**: API отклоняет документ, чей заявленный несжатый размер ZIP-контейнера превышает настраиваемый лимит (защита от zip-bomb), до конвертации
+- [x] **DOC-03**: API отклоняет документ, содержащий части макросов (`vbaProject.bin` / Basic-script манифест), с 422
 
 ### LibreOffice Converter Engine
 
@@ -60,9 +60,9 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DOC-01 | Phase 8 | Pending |
-| DOC-02 | Phase 8 | Pending |
-| DOC-03 | Phase 8 | Pending |
+| DOC-01 | Phase 8 | Done |
+| DOC-02 | Phase 8 | Done |
+| DOC-03 | Phase 8 | Done |
 | DOC-04 | Phase 9 | Pending |
 | DOC-05 | Phase 9 | Pending |
 | DOC-06 | Phase 9 | Pending |
