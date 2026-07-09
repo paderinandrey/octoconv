@@ -15,15 +15,17 @@ import (
 
 // Task type names. One asynq task type per engine class operation.
 const (
-	TypeImageConvert   = "image:convert"
-	TypeWebhookDeliver = "webhook:deliver"
+	TypeImageConvert    = "image:convert"
+	TypeWebhookDeliver  = "webhook:deliver"
+	TypeDocumentConvert = "document:convert"
 )
 
 // Queue names. asynq routes tasks to a queue per engine class so workers and
 // autoscaling can be scoped to a single class.
 const (
-	QueueImage   = "image"
-	QueueWebhook = "webhook"
+	QueueImage    = "image"
+	QueueWebhook  = "webhook"
+	QueueDocument = "document"
 )
 
 // ConvertPayload is the task payload. It carries only the job id — all task
@@ -67,6 +69,28 @@ func ParseConvertPayload(b []byte) (ConvertPayload, error) {
 		return p, fmt.Errorf("unmarshal convert payload: %w", err)
 	}
 	return p, nil
+}
+
+// NewDocumentConvertTask builds an asynq task for a document conversion job,
+// routed to the document queue, bounded to maxRetry (DOCUMENT_MAX_RETRY —
+// a bounded budget lower than image's, since each document attempt is
+// expensive at up to DOCUMENT_ENGINE_TIMEOUT seconds), and carrying a
+// per-job asynq.Unique lock (uniqueTTL, see DocumentUniqueTTL) so a second
+// enqueue for the same jobID while the first task/lock is still live
+// collides on the same uniqueness key and returns asynq.ErrDuplicateTask
+// instead of creating a second concurrent task — mirrors
+// NewImageConvertTask exactly; reuses ConvertPayload/ParseConvertPayload
+// (no new payload type needed, all job detail is re-read from Postgres).
+func NewDocumentConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) (*asynq.Task, error) {
+	b, err := json.Marshal(ConvertPayload{JobID: jobID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal convert payload: %w", err)
+	}
+	return asynq.NewTask(TypeDocumentConvert, b,
+		asynq.Queue(QueueDocument),
+		asynq.MaxRetry(maxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
 }
 
 // NewWebhookDeliverTask builds an asynq task for a single webhook delivery
@@ -165,6 +189,35 @@ func ImageRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 	return imageRetrySchedule[idx]
 }
 
+// documentRetrySchedule is the backoff schedule for document conversion
+// retries: 5s, 15s, 30s — no jitter, mirroring imageRetrySchedule's shape
+// exactly but scaled up proportionally to DOCUMENT_ENGINE_TIMEOUT being
+// ~2.5x ENGINE_TIMEOUT (300s vs 120s), since a transient document conversion
+// failure (LibreOffice engine hiccup, storage blip) should still be retried
+// a few times quickly, just on a slightly longer cadence than image's
+// 2s/5s/15s given the heavier per-attempt cost.
+var documentRetrySchedule = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+}
+
+// DocumentRetryDelay is an asynq RetryDelayFunc for the document queue.
+// Mirrors ImageRetryDelay's clamp-index-to-schedule-length shape exactly —
+// NOT WebhookRetryDelay's jittered shape — since document retries don't need
+// jitter to avoid thundering-herding a shared external endpoint the way
+// webhook deliveries do.
+func DocumentRetryDelay(n int, e error, t *asynq.Task) time.Duration {
+	idx := n
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(documentRetrySchedule) {
+		idx = len(documentRetrySchedule) - 1
+	}
+	return documentRetrySchedule[idx]
+}
+
 // RetryDelayFunc dispatches to a per-queue retry delay function based on the
 // task type. It fixes the confirmed defect where every queue silently
 // inherited WebhookRetryDelay via a single server-wide
@@ -178,6 +231,8 @@ func RetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 		return ImageRetryDelay(n, e, t)
 	case TypeWebhookDeliver:
 		return WebhookRetryDelay(n, e, t)
+	case TypeDocumentConvert:
+		return DocumentRetryDelay(n, e, t)
 	default:
 		return asynq.DefaultRetryDelayFunc(n, e, t)
 	}
@@ -234,6 +289,43 @@ func imageBackoffSum(maxRetry int) time.Duration {
 // let one attempt exceed engineTimeout and silently outlive this lock.
 func ImageUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + imageBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
+// documentBackoffSum sums DocumentRetryDelay(i) for i in [0, maxRetry) — the
+// total backoff time asynq spends waiting before each of maxRetry retries,
+// clamped to the last schedule entry once i reaches
+// len(documentRetrySchedule). This mirrors imageBackoffSum and deliberately
+// does NOT follow webhookBackoffSum's jitter-ceiling shape: calling
+// DocumentRetryDelay directly here is safe because DocumentRetryDelay — like
+// ImageRetryDelay — has no jitter, so there is no random sample to
+// accidentally bake into the derivation.
+func documentBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		sum += DocumentRetryDelay(i, nil, nil)
+	}
+	return sum
+}
+
+// DocumentUniqueTTL derives the per-job asynq.Unique lock TTL for document
+// conversion tasks from the actual retry budget (maxRetry, normally
+// DOCUMENT_MAX_RETRY) and the per-attempt bound (engineTimeout, normally
+// DOCUMENT_ENGINE_TIMEOUT), mirroring ImageUniqueTTL's derivation exactly so
+// the lock can never silently drift under asynq's true worst-case retry
+// lifetime if either env var changes later.
+//
+// Worst-case formula: (maxRetry+1) * engineTimeout + documentBackoffSum(maxRetry) + margin.
+// Same "(maxRetry+1) executions, not maxRetry" correction as ImageUniqueTTL
+// applies here (asynq's archive condition is checked AFTER each failed
+// attempt). REUSES the shared uniqueTTLSafetyMargin const verbatim — no
+// document-specific margin constant.
+//
+// The TTL is DERIVED rather than a hardcoded constant deliberately: if
+// DOCUMENT_MAX_RETRY or DOCUMENT_ENGINE_TIMEOUT are later changed via env,
+// the margin scales with them automatically and cannot fall behind the real
+// retry lifetime.
+func DocumentUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*engineTimeout + documentBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
 // webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter
