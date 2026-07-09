@@ -531,6 +531,9 @@ func TestCreateJob_DocumentDetectedAndAccepted(t *testing.T) {
 	if !store.uploaded {
 		t.Error("must upload a supported document pair")
 	}
+	if store.contentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		t.Errorf("contentType = %q, want the canonical docx MIME type (D-06 parity with image jobs)", store.contentType)
+	}
 	if repo.created == nil {
 		t.Fatal("must create job for a supported document pair")
 	}
@@ -569,6 +572,9 @@ func TestCreateJob_ODFDetectedAndAccepted(t *testing.T) {
 	}
 	if !store.uploaded {
 		t.Error("must upload a supported document pair")
+	}
+	if store.contentType != "application/vnd.oasis.opendocument.text" {
+		t.Errorf("contentType = %q, want the canonical odt MIME type (D-06 parity with image jobs)", store.contentType)
 	}
 	if repo.created == nil {
 		t.Fatal("must create job for a supported document pair")

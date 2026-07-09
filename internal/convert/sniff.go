@@ -95,7 +95,10 @@ func Sniff(r io.Reader) (detected string, rest io.Reader, err error) {
 // MIMEType returns the canonical MIME type for a registered format, or
 // "application/octet-stream" for anything unrecognized. This is the single
 // home for format->MIME mapping shared by internal/api (stored Content-Type,
-// D-06) and internal/worker (output Content-Type).
+// D-06) and internal/worker (output Content-Type). Covers both image formats
+// (libvips) and document formats + their pdf conversion target (LibreOffice),
+// so a document job's presigned download is served with the same Content-Type
+// correctness guarantee as an image job's.
 func MIMEType(format string) string {
 	switch NormalizeFormat(format) {
 	case "png":
@@ -108,6 +111,20 @@ func MIMEType(format string) string {
 		return "image/heic"
 	case "tiff":
 		return "image/tiff"
+	case "pdf":
+		return "application/pdf"
+	case "docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "odt":
+		return "application/vnd.oasis.opendocument.text"
+	case "ods":
+		return "application/vnd.oasis.opendocument.spreadsheet"
+	case "odp":
+		return "application/vnd.oasis.opendocument.presentation"
 	default:
 		return "application/octet-stream"
 	}
