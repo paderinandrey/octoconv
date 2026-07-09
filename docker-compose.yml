@@ -123,6 +123,36 @@ services:
           cpus: "2.0"
           memory: 1g
 
+  document-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.document-worker
+    container_name: octoconv-document-worker
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://octo:octo-pass@postgres:5432/octo_db
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: octoconv
+      S3_USE_SSL: "false"
+      DOCUMENT_WORKER_CONCURRENCY: "2"
+      DOCUMENT_ENGINE_TIMEOUT: "300s"
+      METRICS_ADDR: "127.0.0.1:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
   # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
   # only, never 0.0.0.0 — no auth layer needed since it's unreachable outside
   # the host, matching the internal-only trust model (D-18/T-04-14). Image
