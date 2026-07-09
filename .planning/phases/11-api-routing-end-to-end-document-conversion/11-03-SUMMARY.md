@@ -49,7 +49,7 @@ completed: 2026-07-09
 - **Duration:** ~5 min (stack rebuild + healthcheck + test run)
 - **Started:** 2026-07-09T21:17:00Z (approx)
 - **Completed:** 2026-07-09T21:22:51Z
-- **Tasks:** 1 of 2 (Task 2 is a human-verify checkpoint, not yet approved)
+- **Tasks:** 2 of 2 (Task 2 human-verify checkpoint approved by operator on 2026-07-10)
 - **Files modified:** 0 (operational plan — no source changes)
 
 ## Accomplishments
@@ -117,7 +117,7 @@ None.
 
 ## User Setup Required
 
-None to run this plan. For the pending checkpoint: a human must review this SUMMARY's per-pair matrix and webhook result (and may optionally re-run the suite against the still-running stack) before approving.
+None. The human-verify checkpoint was approved by the operator on 2026-07-10 after reviewing the per-pair matrix and webhook result.
 
 ## Known Stubs
 
@@ -125,7 +125,7 @@ None.
 
 ## Next Phase Readiness
 
-- Live E2E run complete and passing across all 6 pairs plus the signed webhook — the only remaining item for DOC-10 / v1.2 milestone closure is the human-verify checkpoint (Task 2 of this plan).
+- Live E2E run complete and passing across all 6 pairs plus the signed webhook; the human-verify checkpoint (Task 2) is approved — DOC-10 / v1.2 milestone acceptance gate is closed.
 - The stack is left running (`docker compose -f docker-compose.yml -f docker-compose.e2e.yml ps` shows api/worker/document-worker/postgres/redis/minio/asynqmon all up) for the human to optionally re-verify before approving. Teardown command: `docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v`.
 
 ## Self-Check: PASSED
