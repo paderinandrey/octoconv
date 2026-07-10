@@ -109,3 +109,7 @@ None - no external service configuration required. All changes are code/config h
 - `gofmt -l .`, `go vet ./...`, and `go build ./...` are all clean; `go test ./...` passes in full (E2E self-skips offline as designed).
 - `docker compose config` (base) and `docker compose -f docker-compose.yml -f docker-compose.e2e.yml config` (merged) both render successfully; the merged config confirms `api.extra_hosts` now includes `host.docker.internal=host-gateway`.
 - No blockers for Phase 13 (passworded/legacy document detection) — this plan touched no document-parsing or validation code paths.
+
+## Self-Check: PASSED
+
+All 10 modified/created files verified present on disk; all 3 task commits (805c692, ed29167, e3016a2) plus this SUMMARY's own commit (fd622d0) verified present in `git log --oneline --all`.
