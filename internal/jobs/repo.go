@@ -70,7 +70,11 @@ type CreateParams struct {
 	SourceFormat string
 	TargetFormat string
 	CallbackURL  string
-	Input        Input
+	// Opts carries the server-normalized, already-validated conversion options
+	// serialized to/from the jobs.options jsonb column (never raw client JSON,
+	// per D-08).
+	Opts  map[string]any
+	Input Input
 }
 
 // Create inserts a job (status=queued), its input row, and the initial
