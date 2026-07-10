@@ -55,7 +55,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 **Goal:** Документный класс перестаёт быть «только → PDF»: кросс-конвертация внутри класса, чёткие отказы для legacy/encrypted-форматов, архивный PDF/A через validated opts, новый chromium-based HTML→PDF движок (третий engine-class) — и webhook-доставка, переживающая деплой/падение любого подмножества engine-воркеров.
 
 - [x] **Phase 12: Tech Debt Cleanup** - Закрыть унаследованный advisory tech debt v1.0–v1.2 перед новой движковой работой (completed 2026-07-10)
-- [ ] **Phase 13: Cross-Format Conversion & Input Safety** - Кросс-конвертация внутри документного класса + структурная валидация выхода + отказ OLE-CFB входов
+- [x] **Phase 13: Cross-Format Conversion & Input Safety** - Кросс-конвертация внутри документного класса + структурная валидация выхода + отказ OLE-CFB входов (completed 2026-07-10)
 - [ ] **Phase 14: Validated Conversion Options & PDF/A Export** - Closed-allowlist `opts` механизм + PDF/A-архивный экспорт как первый реальный потребитель
 - [ ] **Phase 15: HTML→PDF Chromium Engine** - Третий engine-class: chromium-based HTML→PDF с офлайн-рендерингом (SSRF-safe)
 - [ ] **Phase 16: Webhook Delivery Decoupling** - Webhook-доставка переживает отсутствие/падение любого одного engine-воркера
@@ -84,9 +84,9 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   2. A corrupted/truncated non-PDF conversion output is detected structurally (container-level check against the expected target format) before the job is marked `done` — the job is instead marked `failed` (terminal), never a false success.
   3. Uploading a file with the OLE-CFB signature (`D0 CF 11 E0 A1 B1 1A E1` — legacy binary doc/xls/ppt, or password-protected OOXML) is rejected with 422 before any S3 write, verified live against real fixture files of both sub-cases.
 **Plans**: 3 plans
-- [ ] 13-01-PLAN.md — Generalize LibreOfficeConverter to intra-family cross pairs + structural output validation (CONV-01, CONV-02)
-- [ ] 13-02-PLAN.md — OLE-CFB fail-closed input rejection before S3 write (SAFE-01)
-- [ ] 13-03-PLAN.md — Live E2E: 6 cross pairs + real CFB 422 fixtures + acceptance run (CONV-01, CONV-02, SAFE-01)
+- [x] 13-01-PLAN.md — Generalize LibreOfficeConverter to intra-family cross pairs + structural output validation (CONV-01, CONV-02)
+- [x] 13-02-PLAN.md — OLE-CFB fail-closed input rejection before S3 write (SAFE-01)
+- [x] 13-03-PLAN.md — Live E2E: 6 cross pairs + real CFB 422 fixtures + acceptance run (CONV-01, CONV-02, SAFE-01)
 
 ### Phase 14: Validated Conversion Options & PDF/A Export
 **Goal**: Клиенты могут безопасно передавать опции конвертации через `opts` (закрытый allowlist, без сырого попадания в CLI/filter-JSON движка), и первый реальный потребитель этого механизма — PDF/A-архивный экспорт документов.
@@ -135,7 +135,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 10. Document Worker & Reconciler Integration | v1.2 | 4/4 | Complete | 2026-07-09 |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
-| 13. Cross-Format Conversion & Input Safety | v1.3 | 0/TBD | Not started | - |
+| 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 0/TBD | Not started | - |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |

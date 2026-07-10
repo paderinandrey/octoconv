@@ -17,12 +17,12 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Cross-Format Conversion
 
-- [ ] **CONV-01**: Клиент может конвертировать docx↔odt, xlsx↔ods, pptx↔odp через существующий `POST /v1/jobs` поток (upload → convert → download → webhook), тем же LibreOffice-движком
-- [ ] **CONV-02**: Невалидный/битый не-PDF выход конвертации детектится структурно (проверка контейнера по ожидаемому целевому формату) до пометки задачи `done` — terminal-ошибка, не ложный успех
+- [x] **CONV-01**: Клиент может конвертировать docx↔odt, xlsx↔ods, pptx↔odp через существующий `POST /v1/jobs` поток (upload → convert → download → webhook), тем же LibreOffice-движком
+- [x] **CONV-02**: Невалидный/битый не-PDF выход конвертации детектится структурно (проверка контейнера по ожидаемому целевому формату) до пометки задачи `done` — terminal-ошибка, не ложный успех
 
 ### Input Safety
 
-- [ ] **SAFE-01**: OLE-CFB файлы (сигнатура `D0 CF 11 E0 A1 B1 1A E1` — legacy doc/xls/ppt и запароленные OOXML) отклоняются с чётким 422 до записи в S3; различение legacy vs encrypted — вне скоупа (см. Out of Scope)
+- [x] **SAFE-01**: OLE-CFB файлы (сигнатура `D0 CF 11 E0 A1 B1 1A E1` — legacy doc/xls/ppt и запароленные OOXML) отклоняются с чётким 422 до записи в S3; различение legacy vs encrypted — вне скоупа (см. Out of Scope)
 
 ### Conversion Options
 
@@ -72,9 +72,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEBT-03 | Phase 12 | Complete |
 | DEBT-04 | Phase 12 | Complete |
 | DEBT-05 | Phase 12 | Complete |
-| CONV-01 | Phase 13 | Pending |
-| CONV-02 | Phase 13 | Pending |
-| SAFE-01 | Phase 13 | Pending |
+| CONV-01 | Phase 13 | Complete |
+| CONV-02 | Phase 13 | Complete |
+| SAFE-01 | Phase 13 | Complete |
 | OPTS-01 | Phase 14 | Pending |
 | OPTS-02 | Phase 14 | Pending |
 | HTML-01 | Phase 15 | Pending |
