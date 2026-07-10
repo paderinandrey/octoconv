@@ -29,6 +29,10 @@ type Job struct {
 	SourceFormat string
 	TargetFormat string
 	CallbackURL  string
+	// Opts carries the server-normalized, already-validated conversion options
+	// serialized to/from the jobs.options jsonb column (never raw client JSON,
+	// per D-08).
+	Opts         map[string]any
 	ErrorCode    string
 	ErrorMessage string
 	CreatedAt    time.Time
