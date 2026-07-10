@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+
+	"github.com/apaderin/octoconv/internal/convert"
 )
 
 // Task type names. One asynq task type per engine class operation.
@@ -21,11 +23,14 @@ const (
 )
 
 // Queue names. asynq routes tasks to a queue per engine class so workers and
-// autoscaling can be scoped to a single class.
+// autoscaling can be scoped to a single class. QueueImage/QueueDocument are
+// tied to convert.EngineImage/EngineDocument (the single source of truth for
+// engine-class literals, DEBT-02) so queue names cannot drift from the
+// engine-class identifiers.
 const (
-	QueueImage    = "image"
+	QueueImage    = convert.EngineImage
 	QueueWebhook  = "webhook"
-	QueueDocument = "document"
+	QueueDocument = convert.EngineDocument
 )
 
 // ConvertPayload is the task payload. It carries only the job id — all task

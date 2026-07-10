@@ -34,5 +34,5 @@ func (LibvipsConverter) Convert(ctx context.Context, inPath, outPath string, _ m
 	return nil
 }
 
-// Engine reports the "image" engine class (D-01).
-func (LibvipsConverter) Engine() string { return "image" }
+// Engine reports the image engine class (D-01).
+func (LibvipsConverter) Engine() string { return EngineImage }

@@ -50,6 +50,13 @@ import (
 	"github.com/apaderin/octoconv/internal/webhook"
 )
 
+// e2eHTTP is the shared client for the suite's API calls (postJob,
+// pollUntilDone). A hung endpoint must surface as a diagnosable per-request
+// client-timeout error, not a go-test binary-timeout panic (DEBT-03/WR-04);
+// 30s is comfortably above a healthy single request but well under
+// pollUntilDone's 5-minute between-poll deadline.
+var e2eHTTP = &http.Client{Timeout: 30 * time.Second}
+
 // e2eConfig carries the per-run environment the helpers below need.
 type e2eConfig struct {
 	baseURL     string
@@ -140,7 +147,7 @@ func postJob(t *testing.T, baseURL, apiKey, filename string, data []byte, target
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	req.Header.Set("Authorization", "ApiKey "+apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := e2eHTTP.Do(req)
 	if err != nil {
 		t.Fatalf("POST /v1/jobs: %v", err)
 	}
@@ -178,7 +185,7 @@ func pollUntilDone(t *testing.T, baseURL, apiKey, jobID string, timeout time.Dur
 			t.Fatalf("build GET /v1/jobs/%s request: %v", jobID, err)
 		}
 		req.Header.Set("Authorization", "ApiKey "+apiKey)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := e2eHTTP.Do(req)
 		if err != nil {
 			t.Fatalf("GET /v1/jobs/%s: %v", jobID, err)
 		}
@@ -382,18 +389,27 @@ func assertSignedWebhook(t *testing.T, received <-chan webhookHit, jobID string)
 	}
 }
 
+// downloadClientTimeout bounds the presigned-download request (DEBT-03/
+// WR-04): larger than the API-call timeout since it transfers a real file
+// body, but still well under pollUntilDone's 5-minute between-poll deadline
+// so a hung download surfaces as a diagnosable client-timeout error, not a
+// suite-wide go-test binary-timeout panic.
+const downloadClientTimeout = 60 * time.Second
+
 // downloadClient returns the HTTP client for fetching the presigned
 // download_url. When E2E_S3_DIAL_ADDR is set, every dial is redirected to
 // that address while the request URL (and Host header) stay untouched — the
 // presigned V4 signature covers the Host header, so rewriting the URL's host
 // (e.g. minio:9000 -> localhost:9100) would break the signature, but dialing
-// a different address under the original Host does not.
+// a different address under the original Host does not. Both branches carry
+// an explicit Timeout; only Transport/DialContext differ.
 func downloadClient() *http.Client {
 	dialAddr := os.Getenv("E2E_S3_DIAL_ADDR")
 	if dialAddr == "" {
-		return http.DefaultClient
+		return &http.Client{Timeout: downloadClientTimeout}
 	}
 	return &http.Client{
+		Timeout: downloadClientTimeout,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 				var d net.Dialer

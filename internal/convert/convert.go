@@ -7,6 +7,18 @@ import (
 	"strings"
 )
 
+// Engine-class identifiers (D-01/DEBT-02). This is the SINGLE compile-time
+// source of truth for engine-class string values -- referenced by
+// Converter.Engine implementations (LibvipsConverter, LibreOfficeConverter),
+// the API routing switch (internal/api/handlers.go), the reconciler
+// recovery-routing switch (internal/reconciler/reconciler.go), and the
+// queue-name constants (internal/queue/queue.go). No other file may hold a
+// raw "image"/"document" engine-class literal.
+const (
+	EngineImage    = "image"
+	EngineDocument = "document"
+)
+
 // Pair is an ordered (source, target) format pair, e.g. {"png", "webp"}.
 // Formats are always normalized (lowercase, canonical aliases).
 type Pair struct {
