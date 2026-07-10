@@ -56,7 +56,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 
 - [x] **Phase 12: Tech Debt Cleanup** - Закрыть унаследованный advisory tech debt v1.0–v1.2 перед новой движковой работой (completed 2026-07-10)
 - [x] **Phase 13: Cross-Format Conversion & Input Safety** - Кросс-конвертация внутри документного класса + структурная валидация выхода + отказ OLE-CFB входов (completed 2026-07-10)
-- [ ] **Phase 14: Validated Conversion Options & PDF/A Export** - Closed-allowlist `opts` механизм + PDF/A-архивный экспорт как первый реальный потребитель
+- [x] **Phase 14: Validated Conversion Options & PDF/A Export** - Closed-allowlist `opts` механизм + PDF/A-архивный экспорт как первый реальный потребитель (completed 2026-07-10)
 - [ ] **Phase 15: HTML→PDF Chromium Engine** - Третий engine-class: chromium-based HTML→PDF с офлайн-рендерингом (SSRF-safe)
 - [ ] **Phase 16: Webhook Delivery Decoupling** - Webhook-доставка переживает отсутствие/падение любого одного engine-воркера
 
@@ -99,7 +99,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 **Plans**: 3 plans
 - [x] 14-01-PLAN.md — Persist opts: Job.Opts field + jobs.options jsonb round-trip (OPTS-01)
 - [x] 14-02-PLAN.md — Closed DocOpts validation + server-constant PDF/A filter + OutputIntent check + worker threading + injection test (OPTS-01, OPTS-02)
-- [ ] 14-03-PLAN.md — API opts parse/validate/echo + live e2e acceptance (PDF/A export, 422s, no-opts regression) (OPTS-01, OPTS-02)
+- [x] 14-03-PLAN.md — API opts parse/validate/echo + live e2e acceptance (PDF/A export, 422s, no-opts regression) (OPTS-01, OPTS-02)
 
 ### Phase 15: HTML→PDF Chromium Engine
 **Goal**: HTML-файлы конвертируются в PDF через новый, полностью изолированный от сети (офлайн-рендеринг) третий engine-class, следующий паттерну engine-class из v1.2.
@@ -139,7 +139,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 14. Validated Conversion Options & PDF/A Export | v1.3 | 2/3 | In Progress|  |
+| 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete   | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
