@@ -58,6 +58,11 @@ var terminalLibreOfficeSignatures = []string{
 	// (D-05/D-06, phase 14): a mis-tagged output always fails the same
 	// check again, so it must never retry into a false "done".
 	"output missing pdf/a outputintent marker",
+	// pdf_profile persisted on a non-pdf target (Convert's argv-side
+	// invariant guard, internal/convert/libreoffice.go, WR-03): a corrupt
+	// or hand-inserted jobs.options row deterministically fails the same
+	// check on every delivery.
+	"pdf_profile requested for non-pdf target",
 }
 
 // isTerminal classifies a process() error as terminal (no retry can help:

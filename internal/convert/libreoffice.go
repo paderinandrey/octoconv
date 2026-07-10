@@ -72,6 +72,19 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 	suffix, isPDFA := PDFAFilterOptions(docOpts)
 
 	targetFormat := NormalizeFormat(filepath.Ext(outPath))
+	// The PDF/A suffix may only ever ride on a pdf export filter. The API's
+	// ValidateApplicability guarantees this at write time, but the worker
+	// deliberately skips the applicability re-check -- so enforce the
+	// invariant HERE, where the argv is assembled: a jobs.options row
+	// carrying pdf_profile on a non-pdf target (DB corruption, manual
+	// insert, a future write path) must fail terminally instead of handing
+	// a PDF-export filter-JSON to a non-PDF filter, or worse, silently
+	// reporting "done" with the archival profile unhonored (WR-03). The
+	// error string is coupled into terminalLibreOfficeSignatures
+	// (internal/worker/worker.go) -- a retry can never fix it.
+	if isPDFA && targetFormat != "pdf" {
+		return fmt.Errorf("libreoffice: pdf_profile requested for non-pdf target %q", targetFormat)
+	}
 	filter, err := filterFor(filepath.Ext(inPath), filepath.Ext(outPath))
 	if err != nil {
 		return fmt.Errorf("libreoffice: %w", err)

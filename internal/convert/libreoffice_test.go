@@ -235,6 +235,36 @@ func TestDocOptsInjectionResistance(t *testing.T) {
 	}
 }
 
+// TestConvertRejectsPDFAOnNonPDFTarget proves the "PDF/A suffix only ever
+// rides on a pdf export filter" invariant is enforced where the argv is
+// built, not only at the API layer (review WR-03): a persisted pdf_profile
+// on a non-pdf target (DB corruption, manual insert, a future write path)
+// must fail with the terminal-classified error, never reach soffice, and
+// never be reported "done" with the archival profile silently unhonored.
+// The guard fires before runCommand, so no soffice binary is needed.
+func TestConvertRejectsPDFAOnNonPDFTarget(t *testing.T) {
+	dir := t.TempDir()
+	inPath := filepath.Join(dir, "in.docx")
+	if err := os.WriteFile(inPath, []byte("stub"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(dir, "out.odt")
+
+	err := LibreOfficeConverter{}.Convert(context.Background(), inPath, outPath, map[string]any{"pdf_profile": "pdf/a-2b"})
+	if err == nil {
+		t.Fatal("Convert(pdf_profile on docx->odt) = nil, want error")
+	}
+	// The exact substring is coupled into terminalLibreOfficeSignatures
+	// (internal/worker/worker.go) -- a retry can never fix this.
+	if !strings.Contains(err.Error(), "pdf_profile requested for non-pdf target") {
+		t.Errorf("Convert error = %q, want it to contain the terminal signature %q", err, "pdf_profile requested for non-pdf target")
+	}
+	// The docx->pdf + pdf_profile positive path (guard must NOT fire) is
+	// covered by the live acceptance run against a real soffice (Plan
+	// 14-03); invoking Convert here would shell out when soffice is on
+	// PATH, so it is deliberately not exercised in this hermetic test.
+}
+
 // TestParseDocOptsStrictness proves the parser rejects the laxities
 // json.Decoder.Decode alone would accept (review WR-01): trailing data after
 // the first JSON value (a smuggled second object or plain garbage), a
