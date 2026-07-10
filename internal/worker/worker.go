@@ -36,16 +36,23 @@ var terminalVipsSignatures = []string{
 }
 
 // terminalLibreOfficeSignatures are lowercased error-message substrings that
-// indicate a deterministically-unrecoverable document conversion: LibreOffice's
-// validatePDF guard against its documented "exit 0 but empty/corrupt output"
-// failure mode ("output is empty", "output missing %pdf- magic bytes",
-// internal/convert/libreoffice.go's validatePDF) and filterFor's unsupported-
-// source-extension error ("no pdf export filter for"). No retry can fix any
-// of these — a corrupt document always fails validatePDF again.
+// indicate a deterministically-unrecoverable document conversion:
+// validateDocumentOutput's guard against LibreOffice's documented "exit 0 but
+// empty/corrupt/wrong-container output" failure mode ("output is empty",
+// "output missing %pdf- magic bytes" from validatePDF, and "output does not
+// match expected container format" from validateDocumentOutput's non-pdf
+// SniffContainer check, internal/convert/libreoffice.go), plus filterFor's
+// unsupported-(source,target)-pair error ("no export filter for"). No retry
+// can fix any of these — a corrupt or filter-confused document always fails
+// validateDocumentOutput/filterFor again (D-04): coupling the validator's
+// error string into this slice in the same commit that introduces it is what
+// keeps a mismatched cross-format output from being silently retried up to
+// DOCUMENT_MAX_RETRY times before finally failing (T-13-02).
 var terminalLibreOfficeSignatures = []string{
 	"output missing %pdf- magic bytes",
 	"output is empty",
-	"no pdf export filter for",
+	"no export filter for",
+	"output does not match expected container format",
 }
 
 // isTerminal classifies a process() error as terminal (no retry can help:

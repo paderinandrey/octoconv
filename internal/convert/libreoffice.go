@@ -13,24 +13,44 @@ import (
 // documentFormats are the office document formats LibreOffice converts to pdf.
 var documentFormats = []string{"docx", "odt", "xlsx", "ods", "pptx", "odp"}
 
-// LibreOfficeConverter converts office documents to PDF by shelling out to
-// the `soffice` CLI in headless mode.
+// crossPairs is the explicit, flat list of the 6 symmetric intra-family
+// cross-format pairs (D-01): docx<->odt, xlsx<->ods, pptx<->odp. Deliberately
+// NOT a cross-product of documentFormats -- that would also generate the
+// forbidden cross-family pairs (e.g. docx->ods). Each pair is listed by hand
+// so the supported surface is auditable at a glance.
+var crossPairs = []Pair{
+	{From: "docx", To: "odt"},
+	{From: "odt", To: "docx"},
+	{From: "xlsx", To: "ods"},
+	{From: "ods", To: "xlsx"},
+	{From: "pptx", To: "odp"},
+	{From: "odp", To: "pptx"},
+}
+
+// LibreOfficeConverter converts office documents to PDF, and between odt/odt-
+// family sibling formats, by shelling out to the `soffice` CLI in headless
+// mode.
 type LibreOfficeConverter struct{}
 
-// Pairs returns one {format, "pdf"} pair per supported source document format.
+// Pairs returns one {format, "pdf"} pair per supported source document format,
+// plus the 6 symmetric intra-family cross pairs in crossPairs (D-01).
 func (LibreOfficeConverter) Pairs() []Pair {
-	pairs := make([]Pair, 0, len(documentFormats))
+	pairs := make([]Pair, 0, len(documentFormats)+len(crossPairs))
 	for _, f := range documentFormats {
 		pairs = append(pairs, Pair{From: f, To: "pdf"})
 	}
+	pairs = append(pairs, crossPairs...)
 	return pairs
 }
 
-// Convert runs `soffice --headless --convert-to pdf:<filter>` against inPath,
-// isolating this invocation's LibreOffice profile inside a subdirectory of
-// filepath.Dir(outPath) (the caller's per-job workDir — already unique and
-// already cleaned up) so concurrent jobs never share a profile/lock. ctx must
-// carry the engine timeout.
+// Convert runs `soffice --headless --convert-to <target>:<filter>` against
+// inPath, isolating this invocation's LibreOffice profile inside a
+// subdirectory of filepath.Dir(outPath) (the caller's per-job workDir —
+// already unique and already cleaned up) so concurrent jobs never share a
+// profile/lock. The target format is derived from filepath.Ext(outPath) — the
+// worker builds outPath as "out."+job.TargetFormat (internal/worker/worker.go)
+// — so Convert is target-agnostic: it drives whichever pair Pairs()
+// advertised. ctx must carry the engine timeout.
 func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string, _ map[string]any) error {
 	workDir := filepath.Dir(outPath) // caller's per-job workDir; already unique, already cleaned up
 	profileDir := filepath.Join(workDir, "lo-profile")
@@ -38,7 +58,8 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		return fmt.Errorf("libreoffice: mkdir profile: %w", err)
 	}
 
-	filter, err := filterFor(filepath.Ext(inPath))
+	targetFormat := NormalizeFormat(filepath.Ext(outPath))
+	filter, err := filterFor(filepath.Ext(inPath), filepath.Ext(outPath))
 	if err != nil {
 		return fmt.Errorf("libreoffice: %w", err)
 	}
@@ -47,7 +68,7 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		"--headless", "--invisible", "--nocrashreport", "--nodefault",
 		"--nologo", "--nofirststartwizard", "--norestore",
 		"-env:UserInstallation=file://" + profileDir,
-		"--convert-to", "pdf:" + filter,
+		"--convert-to", targetFormat + ":" + filter,
 		"--outdir", workDir,
 		inPath,
 	}
@@ -55,35 +76,54 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		return fmt.Errorf("libreoffice: %w", err)
 	}
 
-	// soffice writes <input-basename>.pdf into --outdir; the worker's inPath
-	// convention (internal/worker/worker.go) is always "in.<sourceFormat>",
-	// so the produced file is deterministically workDir/in.pdf. Rename it to
-	// the caller's outPath.
-	producedPath := filepath.Join(workDir, strings.TrimSuffix(filepath.Base(inPath), filepath.Ext(inPath))+".pdf")
+	// soffice writes <input-basename>.<targetFormat> into --outdir; the
+	// worker's inPath convention (internal/worker/worker.go) is always
+	// "in.<sourceFormat>", so the produced file is deterministically
+	// workDir/in.<targetFormat>. Rename it to the caller's outPath.
+	producedPath := filepath.Join(workDir, strings.TrimSuffix(filepath.Base(inPath), filepath.Ext(inPath))+"."+targetFormat)
 	if err := os.Rename(producedPath, outPath); err != nil {
 		return fmt.Errorf("libreoffice: rename output: %w", err)
 	}
 
-	return validatePDF(outPath)
+	return validateDocumentOutput(outPath, targetFormat)
 }
 
 // Engine reports the document engine class (D-01).
 func (LibreOfficeConverter) Engine() string { return EngineDocument }
 
-// filterFor maps a source document extension to the LibreOffice PDF export
-// filter that produces the correct output for that document's application
-// (Writer/Calc/Impress).
-func filterFor(sourceExt string) (string, error) {
-	switch NormalizeFormat(sourceExt) {
-	case "docx", "odt":
-		return "writer_pdf_Export", nil
-	case "xlsx", "ods":
-		return "calc_pdf_Export", nil
-	case "pptx", "odp":
-		return "impress_pdf_Export", nil
-	default:
-		return "", fmt.Errorf("no pdf export filter for %q", sourceExt)
+// filterTable is the explicit (source, target) -> LibreOffice export filter
+// name table (D-02). There is deliberately no auto-derivation from extension:
+// every supported pair is listed here by hand, so an unsupported combination
+// is a hard "unsupported" error rather than a guessed filter name. The
+// researched LO 7.4 (bookworm) filter names below are the starting point,
+// live-confirmed against a real container in Plan 13-03.
+var filterTable = map[[2]string]string{
+	{"docx", "pdf"}: "writer_pdf_Export",
+	{"odt", "pdf"}:  "writer_pdf_Export",
+	{"xlsx", "pdf"}: "calc_pdf_Export",
+	{"ods", "pdf"}:  "calc_pdf_Export",
+	{"pptx", "pdf"}: "impress_pdf_Export",
+	{"odp", "pdf"}:  "impress_pdf_Export",
+
+	{"docx", "odt"}: "writer8",
+	{"odt", "docx"}: "MS Word 2007 XML",
+	{"xlsx", "ods"}: "calc8",
+	{"ods", "xlsx"}: "Calc MS Excel 2007 XML",
+	{"pptx", "odp"}: "impress8",
+	{"odp", "pptx"}: "Impress MS PowerPoint 2007 XML",
+}
+
+// filterFor maps a (source, target) document format pair to the LibreOffice
+// export filter that produces the correct output for that pair's application
+// (Writer/Calc/Impress). filterTable is the single source of truth (D-02); an
+// unsupported (source, target) combination returns "" and an error whose
+// message contains "no export filter for".
+func filterFor(sourceExt, targetFormat string) (string, error) {
+	key := [2]string{NormalizeFormat(sourceExt), NormalizeFormat(targetFormat)}
+	if filter, ok := filterTable[key]; ok {
+		return filter, nil
 	}
+	return "", fmt.Errorf("no export filter for %s -> %s", sourceExt, targetFormat)
 }
 
 // pdfMagic is the leading byte sequence every valid PDF file begins with.
@@ -112,6 +152,40 @@ func validatePDF(path string) error {
 	}
 	if !bytes.Equal(buf, pdfMagic) {
 		return fmt.Errorf("libreoffice: output missing %%PDF- magic bytes")
+	}
+	return nil
+}
+
+// validateDocumentOutput dispatches to the correct structural validator for
+// targetFormat (D-03): validatePDF (unchanged %PDF- magic check) for pdf
+// targets, or -- symmetric to the input-side guarantee -- output validated by
+// the same sniff (SniffContainer) that validates input, for every non-pdf
+// document target. A mismatched/wrong-container output (e.g. a docx handed
+// as target "odt") is treated identically to an empty/corrupt output: a
+// deterministic, unrecoverable failure that must never be marked "done"
+// (T-13-01).
+func validateDocumentOutput(path, targetFormat string) error {
+	target := NormalizeFormat(targetFormat)
+	if target == "pdf" {
+		return validatePDF(path)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("libreoffice: stat output: %w", err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("libreoffice: output is empty")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("libreoffice: open output: %w", err)
+	}
+	defer f.Close()
+
+	cr, serr := SniffContainer(f, fi.Size())
+	if serr != nil || cr.Format != target {
+		return fmt.Errorf("libreoffice: output does not match expected container format %s", targetFormat)
 	}
 	return nil
 }
