@@ -83,7 +83,10 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   1. Uploading a docx converts to a valid odt, and vice versa; same round-trip works for xlsx↔ods and pptx↔odp — through the existing `POST /v1/jobs` → poll/download → webhook flow, live e2e verified against a freshly built docker-compose stack.
   2. A corrupted/truncated non-PDF conversion output is detected structurally (container-level check against the expected target format) before the job is marked `done` — the job is instead marked `failed` (terminal), never a false success.
   3. Uploading a file with the OLE-CFB signature (`D0 CF 11 E0 A1 B1 1A E1` — legacy binary doc/xls/ppt, or password-protected OOXML) is rejected with 422 before any S3 write, verified live against real fixture files of both sub-cases.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 13-01-PLAN.md — Generalize LibreOfficeConverter to intra-family cross pairs + structural output validation (CONV-01, CONV-02)
+- [ ] 13-02-PLAN.md — OLE-CFB fail-closed input rejection before S3 write (SAFE-01)
+- [ ] 13-03-PLAN.md — Live E2E: 6 cross pairs + real CFB 422 fixtures + acceptance run (CONV-01, CONV-02, SAFE-01)
 
 ### Phase 14: Validated Conversion Options & PDF/A Export
 **Goal**: Клиенты могут безопасно передавать опции конвертации через `opts` (закрытый allowlist, без сырого попадания в CLI/filter-JSON движка), и первый реальный потребитель этого механизма — PDF/A-архивный экспорт документов.
