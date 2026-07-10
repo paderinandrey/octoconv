@@ -84,11 +84,25 @@ services:
       S3_USE_SSL: "false"
       API_ADDR: ":8090"
       MAX_UPLOAD_BYTES: "104857600"
+      MAX_IMAGE_PIXELS: "100000000"
+      MAX_DOCUMENT_UNCOMPRESSED_BYTES: "524288000"
       API_KEY_SALT: "dev-only-change-me-in-real-deploys"
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
+      # queue.NewClient() (constructed by cmd/api/main.go) reads these four
+      # vars UNCONDITIONALLY, even though the api process only enqueues (it
+      # never runs the engine) -- DEBT-05.
+      IMAGE_MAX_RETRY: "4"
+      ENGINE_TIMEOUT: "120s"
+      DOCUMENT_MAX_RETRY: "3"
+      DOCUMENT_ENGINE_TIMEOUT: "300s"
       STORAGE_TTL: "168h"
       METRICS_ADDR: "127.0.0.1:9090"
+      # WEBHOOK_ALLOW_PRIVATE_IPS / WEBHOOK_ALLOW_INSECURE_HTTP: deliberately
+      # omitted here. Both default to false (safe) when unset, and this is
+      # the production SSRF guard for callback_url -- it must stay
+      # default-off in base compose. Only docker-compose.e2e.yml is
+      # permitted to relax them, for the in-test webhook receiver (DEBT-05).
     ports:
       - "8090:8090"
 
@@ -115,7 +129,18 @@ services:
       S3_USE_SSL: "false"
       WORKER_CONCURRENCY: "4"
       ENGINE_TIMEOUT: "120s"
+      IMAGE_MAX_RETRY: "4"
+      # queue.NewClient() (constructed by cmd/worker/main.go) also reads the
+      # document-side retry/timeout vars unconditionally, even though this
+      # process only runs the image engine (DEBT-05).
+      DOCUMENT_MAX_RETRY: "3"
+      DOCUMENT_ENGINE_TIMEOUT: "300s"
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
+      WEBHOOK_PRESIGN_TTL: "6h"
+      RECONCILER_QUEUED_STALE_AFTER: "90s"
+      RECONCILER_ACTIVE_STALE_AFTER: "5m"
+      RECONCILER_SWEEP_INTERVAL: "1m"
+      RECONCILER_MAX_RECOVERIES: "3"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -146,6 +171,17 @@ services:
       S3_USE_SSL: "false"
       DOCUMENT_WORKER_CONCURRENCY: "2"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
+      # queue.NewClient() (constructed by cmd/document-worker/main.go) also
+      # reads the image-side retry/timeout vars and DOCUMENT_MAX_RETRY
+      # unconditionally, even though this process only runs the document
+      # engine (DEBT-05).
+      IMAGE_MAX_RETRY: "4"
+      ENGINE_TIMEOUT: "120s"
+      DOCUMENT_MAX_RETRY: "3"
+      # document-worker signs its own webhook callbacks (cmd/document-worker/
+      # main.go:54) -- it must not fall back to an empty secret (DEBT-05).
+      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
+      WEBHOOK_PRESIGN_TTL: "6h"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
