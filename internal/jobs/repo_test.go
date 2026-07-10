@@ -237,6 +237,52 @@ func TestMarkActiveIdempotentReentry(t *testing.T) {
 	}
 }
 
+func TestOptsRoundTrip(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "document", SourceFormat: "docx", TargetFormat: "pdf",
+		Opts:  map[string]any{"pdf_profile": "pdf/a-2b"},
+		Input: Input{ObjectKey: "uploads/opts1/0-in.docx", Filename: "in.docx", Format: "docx"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Opts["pdf_profile"] != "pdf/a-2b" {
+		t.Fatalf("Opts[\"pdf_profile\"] = %v, want %q", got.Opts["pdf_profile"], "pdf/a-2b")
+	}
+}
+
+func TestOptsRoundTripNilDefault(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:  createTestClient(t, r),
+		Operation: "convert", Engine: "document", SourceFormat: "docx", TargetFormat: "pdf",
+		Opts:  nil,
+		Input: Input{ObjectKey: "uploads/opts2/0-in.docx", Filename: "in.docx", Format: "docx"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Opts) != 0 {
+		t.Fatalf("Opts = %+v, want empty (inert {} default)", got.Opts)
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	r := newTestRepo(t)
 	if _, err := r.Get(context.Background(), uuid.New()); err != ErrNotFound {
