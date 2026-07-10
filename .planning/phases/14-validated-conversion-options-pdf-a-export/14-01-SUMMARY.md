@@ -96,3 +96,7 @@ None - no external service configuration required.
 ---
 *Phase: 14-validated-conversion-options-pdf-a-export*
 *Completed: 2026-07-11*
+
+## Self-Check: PASSED
+
+All created/modified files found on disk; all 4 task/summary commits (b51044e, 79a3f80, 66680f2, 2ee56c2) verified present in git log.
