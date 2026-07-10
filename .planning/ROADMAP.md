@@ -98,7 +98,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   3. Existing document→pdf jobs submitted without `opts` continue converting successfully with no regression — live e2e verified.
 **Plans**: 3 plans
 - [x] 14-01-PLAN.md — Persist opts: Job.Opts field + jobs.options jsonb round-trip (OPTS-01)
-- [ ] 14-02-PLAN.md — Closed DocOpts validation + server-constant PDF/A filter + OutputIntent check + worker threading + injection test (OPTS-01, OPTS-02)
+- [x] 14-02-PLAN.md — Closed DocOpts validation + server-constant PDF/A filter + OutputIntent check + worker threading + injection test (OPTS-01, OPTS-02)
 - [ ] 14-03-PLAN.md — API opts parse/validate/echo + live e2e acceptance (PDF/A export, 422s, no-opts regression) (OPTS-01, OPTS-02)
 
 ### Phase 15: HTML→PDF Chromium Engine
@@ -139,7 +139,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 14. Validated Conversion Options & PDF/A Export | v1.3 | 1/3 | In Progress|  |
+| 14. Validated Conversion Options & PDF/A Export | v1.3 | 2/3 | In Progress|  |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
