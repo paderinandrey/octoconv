@@ -19,7 +19,15 @@ findings:
   warning: 5
   info: 3
   total: 8
-status: issues_found
+status: resolved
+fixed: 2026-07-11
+fix_scope: critical_warning
+fix_commits:
+  WR-01: d72e7f7
+  WR-02: c895b5a
+  WR-03: 44be4ec
+  WR-04: c84c585
+  WR-05: 7c8fb07
 ---
 
 # Phase 14: Code Review Report
@@ -27,7 +35,7 @@ status: issues_found
 **Reviewed:** 2026-07-11T10:30:00Z
 **Depth:** standard
 **Files Reviewed:** 10
-**Status:** issues_found
+**Status:** resolved — all Critical+Warning findings fixed 2026-07-11 (Info findings out of fix scope, see per-finding Resolution lines)
 
 ## Summary
 
@@ -46,6 +54,8 @@ That said, the strict-parse contract is weaker than documented, two worker failu
 ## Warnings
 
 ### WR-01: `ParseDocOpts` is not actually strict — accepts trailing data, `null`, and duplicate keys
+
+> **Resolution:** FIXED in `d72e7f7` — added `checkStrictObject` pre-scan to `ParseDocOpts`: rejects non-object top-level values (`null`, scalars, arrays), duplicate top-level keys (both orderings), and any trailing bytes after the closing brace (goes beyond the suggested `dec.More()` — a raw `{}}` would slip past `More()`, so the check consumes the closing token and requires clean `io.EOF`). `DocOptsFromMap` inherits the strictness via `ParseDocOpts`. Valid-input semantics unchanged (regression cases in new `TestParseDocOptsStrictness`, `internal/convert/libreoffice_test.go`).
 
 **File:** `internal/convert/opts.go:39-50`
 **Issue:** The doc comment says "strict-decodes raw JSON" and this function is the documented first firewall against smuggled options, but `json.Decoder.Decode` reads only the *first* JSON value and ignores everything after it. Verified empirically:
@@ -72,6 +82,8 @@ Optionally also reject non-object top-level values (`null`, which currently yiel
 
 ### WR-02: Corrupt-opts terminal path strands the job in `queued` with no failure record
 
+> **Resolution:** ALREADY FIXED in `c895b5a` (prior to this fix pass) — the corrupt-opts branch now calls `MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", …)` and best-effort-enqueues the webhook before returning `SkipRetry`. Verified in place at `internal/worker/worker.go` during this pass; not re-applied. (The webhook enqueue in this branch was additionally gated on MarkFailed success as part of WR-04, `c84c585`.)
+
 **File:** `internal/worker/worker.go:262-264`
 **Issue:** `HandleDocumentConvert`'s strict re-parse of persisted opts returns `asynq.SkipRetry` **without calling `MarkFailed`** — and it runs *before* `MarkActive`, so the job row stays `queued` forever from the client's perspective: polling shows `queued`, no `error_code`, no webhook. The reconciler then repeatedly finds it stale-queued, re-enqueues it, and each re-delivery hits the same SkipRetry — burning the entire `RECONCILER_MAX_RECOVERIES` budget over multiple staleness intervals before the reconciler finally fails it with the misleading code `reconciler_exhausted` (`internal/reconciler/reconciler.go:116`) instead of the actual cause. Every other terminal classification in this handler (`isDocumentTerminal` branch, line 273-285) correctly commits `MarkFailed` first.
 **Fix:**
@@ -89,6 +101,8 @@ if _, err := convert.DocOptsFromMap(job.Opts); err != nil {
 
 ### WR-03: PDF/A filter suffix is appended for any target format, and `wantPDFA` is silently ignored for non-pdf targets
 
+> **Resolution:** FIXED in `44be4ec` — `Convert` now returns `libreoffice: pdf_profile requested for non-pdf target %q` when `isPDFA && targetFormat != "pdf"`, checked immediately after `targetFormat` is computed and before the argv is assembled. The error substring is coupled into `terminalLibreOfficeSignatures` (`internal/worker/worker.go`) in the same commit so it classifies terminal, per the finding's note. Covered by new `TestConvertRejectsPDFAOnNonPDFTarget` plus a signature case in `TestIsTerminalLibreOfficeSignatures`. With the guard at the argv-build site, `wantPDFA=true` can no longer reach `validateDocumentOutput`'s non-pdf branch.
+
 **File:** `internal/convert/libreoffice.go:80-86` (and `:213-249`)
 **Issue:** `Convert` appends the PDF/A suffix to `convertTo` whenever the persisted opts carry `pdf_profile`, without checking that `targetFormat == "pdf"`. The API's `ValidateApplicability` guarantees this at write time, but the worker deliberately skips the applicability re-check (worker.go:257-261 comment), so a `jobs.options` row carrying `pdf_profile` on a cross-format job (DB corruption, manual insert, or a future write path) produces an argv like `odt:writer8:{"SelectPdfVersion":...}` — a PDF-export filter-JSON handed to a non-PDF filter. Worse, `validateDocumentOutput`'s non-pdf branch ignores `wantPDFA` entirely, so if soffice tolerates the bogus options string the job is reported `done` with the requested archival profile silently unhonored. This is the one place where the "suffix only ever rides on a pdf export filter" invariant is *not* enforced at the point the argv is built.
 **Fix:** Enforce locally in `Convert`, where the argv is assembled:
@@ -102,6 +116,8 @@ if isPDFA && targetFormat != "pdf" {
 
 ### WR-04: Swallowed `MarkFailed` error can emit a webhook reporting non-terminal status `"active"`
 
+> **Resolution:** FIXED in `c84c585` — webhook enqueue is now gated on `MarkFailed` success (`ferr == nil && job.CallbackURL != ""`) in all three failure branches: `HandleImageConvert` terminal branch, `HandleDocumentConvert` terminal branch, and the corrupt-opts branch introduced by `c895b5a` (same defect shape, would have delivered status `"queued"`). Per project conventions `internal/` packages never log, so gating (not logging) was chosen; on `MarkFailed` failure the job stays active/queued and the reconciler requeues it.
+
 **File:** `internal/worker/worker.go:278-285` (document path; same pattern at `:205-212` image path)
 **Issue:** On a terminal conversion error, `_ = h.repo.MarkFailed(...)` discards the error, then the handler unconditionally enqueues a webhook when `job.CallbackURL != ""` and returns SkipRetry. If `MarkFailed` fails (Postgres blip mid-transaction), the comment's premise — "the failed status is already committed above" — is false: the job is still `active`. `HandleWebhookDeliver` then re-reads the job (`worker.go:316`) and delivers a payload with `"status": "active"` — a non-terminal status the webhook contract never defines (clients expect `done`/`failed`; the e2e assertion at `internal/e2e/e2e_test.go:670-672` treats anything else as a failure). Meanwhile the job stays `active` until the reconciler requeues it and the entire conversion re-runs.
 **Fix:** Gate the webhook enqueue on `MarkFailed` success:
@@ -114,6 +130,8 @@ if ferr := h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupt
 Apply to both `HandleImageConvert` and `HandleDocumentConvert`.
 
 ### WR-05: Oversize-opts test cannot detect removal of the size cap
+
+> **Resolution:** FIXED in `7c8fb07` — `TestCreateJob_OptsOversizeRejected` now sends `{` + 5000 spaces + `"pdf_profile":"pdf/a-2b"}`: oversized but otherwise fully valid JSON with an allow-listed profile, so only the size cap can produce the 422. Verified the rejection reason is `opts_too_large` in the test run log.
 
 **File:** `internal/api/handlers_test.go:1023-1045`
 **Issue:** `TestCreateJob_OptsOversizeRejected` uses `{"pdf_profile":"aaaa...5000"}` — a value that *also* fails the `ParseDocOpts` allow-list. If the `len(rawOpts) > maxOptsBytes` guard (`internal/api/handlers.go:252`) were deleted outright, this test would still pass 422 via the enum rejection, silently masking the regression of the T-14-02 DoS bound this test exists to prove.
