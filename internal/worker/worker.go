@@ -260,6 +260,17 @@ func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) erro
 	// (single source of validation truth), and are deliberately not
 	// duplicated here.
 	if _, err := convert.DocOptsFromMap(job.Opts); err != nil {
+		// Mark failed BEFORE SkipRetry: without this the job would stay
+		// queued forever (no webhook, client polls a dead job) while the
+		// reconciler requeues it into the same failure until MaxRecoveries
+		// is exhausted (T-14-02b). Sanitized message only; the parse error
+		// is kept in job_events.detail for internal diagnostics.
+		_ = h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
+		// Postgres-first: the failed status is already committed above, so a
+		// failed enqueue must not fail the job — best-effort only.
+		if job.CallbackURL != "" {
+			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		}
 		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
 	}
 
