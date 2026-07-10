@@ -87,11 +87,22 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
 		jobID = uuid.New()
 	}
 
+	// The options column is NOT NULL (0001_init.sql:25); a nil p.Opts defaults
+	// to the inert two-byte empty object rather than SQL NULL, per D-08.
+	optsJSON := []byte("{}")
+	if p.Opts != nil {
+		var err error
+		optsJSON, err = json.Marshal(p.Opts)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("marshal job options: %w", err)
+		}
+	}
+
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format, callback_url)
-			VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7)`,
-			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat, p.CallbackURL,
+			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format, callback_url, options)
+			VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)`,
+			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat, p.CallbackURL, optsJSON,
 		); err != nil {
 			return fmt.Errorf("insert job: %w", err)
 		}
@@ -295,12 +306,15 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	var j Job
 	var src, tgt, cb, code, msg *string
 	var clientID *uuid.UUID
+	// options is NOT NULL (0001_init.sql:25), so it is scanned into a plain
+	// []byte, NOT a *string pointer, unlike the other nullable columns above.
+	var optsJSON []byte
 	err := r.pool.QueryRow(ctx, `
 		SELECT id, client_id, operation, engine, status, source_format, target_format,
-		       callback_url, error_code, error_message, created_at, started_at, finished_at
+		       callback_url, options, error_code, error_message, created_at, started_at, finished_at
 		FROM jobs WHERE id = $1`, id,
 	).Scan(&j.ID, &clientID, &j.Operation, &j.Engine, &j.Status, &src, &tgt,
-		&cb, &code, &msg, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
+		&cb, &optsJSON, &code, &msg, &j.CreatedAt, &j.StartedAt, &j.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -318,6 +332,9 @@ func (r *Repo) Get(ctx context.Context, id uuid.UUID) (*Job, error) {
 	j.CallbackURL = deref(cb)
 	j.ErrorCode = deref(code)
 	j.ErrorMessage = deref(msg)
+	if err := json.Unmarshal(optsJSON, &j.Opts); err != nil {
+		return nil, fmt.Errorf("unmarshal job options: %w", err)
+	}
 	return &j, nil
 }
 
