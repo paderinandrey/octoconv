@@ -178,8 +178,11 @@ services:
       IMAGE_MAX_RETRY: "4"
       ENGINE_TIMEOUT: "120s"
       DOCUMENT_MAX_RETRY: "3"
-      # document-worker signs its own webhook callbacks (cmd/document-worker/
-      # main.go:54) -- it must not fall back to an empty secret (DEBT-05).
+      # document-worker only PRODUCES webhook-delivery tasks; signing happens
+      # in cmd/worker's HandleWebhookDeliver (internal/worker/worker.go). These
+      # two vars are read at startup (cmd/document-worker/main.go) but are
+      # currently inert here -- wired for parity/explicitness, revisited by
+      # the v1.3 webhook-decoupling phase (WEBH-01) (DEBT-05).
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
       WEBHOOK_PRESIGN_TTL: "6h"
       METRICS_ADDR: "127.0.0.1:9090"
