@@ -72,7 +72,8 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   3. E2E HTTP clients carry explicit per-request timeouts; a deliberately hung API/download endpoint produces a diagnosable test failure (timeout error), not a `go test` binary-level panic.
   4. `gofmt -l ./...` returns zero files.
   5. Every variable documented in `.env.example` is either wired into the corresponding `docker-compose.yml` service or has an explicit, logged reason why not — no silent gaps remain.
-**Plans**: TBD
+**Plans**: 1 plan
+- [ ] 12-01-PLAN.md — Engine-class constants + E2E harness hardening (extra_hosts, HTTP timeouts) + docker-compose/.env audit + gofmt (DEBT-01..05)
 
 ### Phase 13: Cross-Format Conversion & Input Safety
 **Goal**: Клиенты могут конвертировать между офисными форматами внутри документного класса (не только → PDF), полученный выход структурно проверяется на валидность, а legacy/encrypted документы отклоняются на входе, а не падают невнятным таймаутом внутри soffice.
