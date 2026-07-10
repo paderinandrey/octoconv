@@ -51,12 +51,25 @@ func (LibreOfficeConverter) Pairs() []Pair {
 // worker builds outPath as "out."+job.TargetFormat (internal/worker/worker.go)
 // — so Convert is target-agnostic: it drives whichever pair Pairs()
 // advertised. ctx must carry the engine timeout.
-func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string, _ map[string]any) error {
+func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string, opts map[string]any) error {
 	workDir := filepath.Dir(outPath) // caller's per-job workDir; already unique, already cleaned up
 	profileDir := filepath.Join(workDir, "lo-profile")
 	if err := os.MkdirAll(profileDir, 0o700); err != nil {
 		return fmt.Errorf("libreoffice: mkdir profile: %w", err)
 	}
+
+	// Garbage opts (e.g. a corrupt jobs.options column) is a deterministic
+	// failure, not a transient one -- DocOptsFromMap applies the same
+	// strictness (DisallowUnknownFields + allow-list) here as at the API
+	// write path (D-10).
+	docOpts, err := DocOptsFromMap(opts)
+	if err != nil {
+		return fmt.Errorf("libreoffice: %w", err)
+	}
+	// suffix is a compile-time server constant selected only by the
+	// validated pdf_profile enum -- never built from opts' raw bytes
+	// (D-07, Pitfall 9).
+	suffix, isPDFA := PDFAFilterOptions(docOpts)
 
 	targetFormat := NormalizeFormat(filepath.Ext(outPath))
 	filter, err := filterFor(filepath.Ext(inPath), filepath.Ext(outPath))
@@ -64,11 +77,19 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		return fmt.Errorf("libreoffice: %w", err)
 	}
 
+	convertTo := targetFormat + ":" + filter
+	if isPDFA {
+		// Appended onto the SAME argv element (no shell involved --
+		// runCommand/exec.Command takes an argv array, exec.go:19-20), so no
+		// new escaping mechanism is needed.
+		convertTo += ":" + suffix
+	}
+
 	args := []string{
 		"--headless", "--invisible", "--nocrashreport", "--nodefault",
 		"--nologo", "--nofirststartwizard", "--norestore",
 		"-env:UserInstallation=file://" + profileDir,
-		"--convert-to", targetFormat + ":" + filter,
+		"--convert-to", convertTo,
 		"--outdir", workDir,
 		inPath,
 	}
@@ -93,7 +114,7 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		return fmt.Errorf("libreoffice: rename output: %w", err)
 	}
 
-	return validateDocumentOutput(outPath, targetFormat)
+	return validateDocumentOutput(outPath, targetFormat, isPDFA)
 }
 
 // Engine reports the document engine class (D-01).
@@ -170,6 +191,14 @@ func validatePDF(path string) error {
 	return nil
 }
 
+// gtsPDFAMarker is the OutputIntent identifier every ISO 19005 (PDF/A)
+// conforming PDF is required to embed. This is a family match (not the
+// stricter "/GTS_PDFA2" per-part variant) -- a deliberate, explicitly
+// NON-authoritative sanity check (Pitfall 8): it proves LibreOffice at least
+// attempted PDF/A tagging, not full ISO 19005 conformance. Full veraPDF
+// validation is accepted residual risk (DOCV3-01).
+var gtsPDFAMarker = []byte("/GTS_PDFA")
+
 // validateDocumentOutput dispatches to the correct structural validator for
 // targetFormat (D-03): validatePDF (unchanged %PDF- magic check) for pdf
 // targets, or -- symmetric to the input-side guarantee -- output validated by
@@ -177,11 +206,27 @@ func validatePDF(path string) error {
 // document target. A mismatched/wrong-container output (e.g. a docx handed
 // as target "odt") is treated identically to an empty/corrupt output: a
 // deterministic, unrecoverable failure that must never be marked "done"
-// (T-13-01).
-func validateDocumentOutput(path, targetFormat string) error {
+// (T-13-01). When wantPDFA is set (a pdf_profile was requested, D-05), a pdf
+// target additionally requires the /GTS_PDFA OutputIntent marker to be
+// present -- a regressed LibreOffice that silently returns a plain PDF under
+// a PDF/A request must never be reported as a successful archival export.
+func validateDocumentOutput(path, targetFormat string, wantPDFA bool) error {
 	target := NormalizeFormat(targetFormat)
 	if target == "pdf" {
-		return validatePDF(path)
+		if err := validatePDF(path); err != nil {
+			return err
+		}
+		if !wantPDFA {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("libreoffice: read output for PDF/A check: %w", err)
+		}
+		if !bytes.Contains(data, gtsPDFAMarker) {
+			return fmt.Errorf("libreoffice: output missing PDF/A OutputIntent marker")
+		}
+		return nil
 	}
 
 	fi, err := os.Stat(path)
