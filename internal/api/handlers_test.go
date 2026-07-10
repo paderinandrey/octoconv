@@ -282,6 +282,14 @@ func bareZipFixture(t *testing.T) []byte {
 
 func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.Buffer, string) {
 	t.Helper()
+	return multipartBodyWithOpts(t, filename, target, data, "")
+}
+
+// multipartBodyWithOpts is multipartBody plus an optional "opts" form field,
+// written only when non-empty -- mirrors the callback_url optional-field
+// discipline used by handleCreateJob itself.
+func multipartBodyWithOpts(t *testing.T, filename, target string, data []byte, opts string) (*bytes.Buffer, string) {
+	t.Helper()
 	var b bytes.Buffer
 	w := multipart.NewWriter(&b)
 	if filename != "" {
@@ -293,6 +301,9 @@ func multipartBody(t *testing.T, filename, target string, data []byte) (*bytes.B
 	}
 	if target != "" {
 		_ = w.WriteField("target", target)
+	}
+	if opts != "" {
+		_ = w.WriteField("opts", opts)
 	}
 	_ = w.Close()
 	return &b, w.FormDataContentType()
@@ -895,6 +906,271 @@ func TestGetJob_CrossClient_NotFound(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["error"] != "job not found" {
 		t.Fatalf(`error = %q, want "job not found" (identical to true-not-found)`, resp["error"])
+	}
+}
+
+// --- opts tests (OPTS-01/OPTS-02, D-02/D-03/D-04/D-08/D-09) ---
+
+// TestCreateJob_OptsAccepted verifies a valid opts field on a docx->pdf
+// request is accepted, normalized, threaded into CreateParams.Opts, and
+// echoed back in the 202 response.
+func TestCreateJob_OptsAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.docx", "pdf", docxFixture(t), `{"pdf_profile":"pdf/a-2b"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil {
+		t.Fatal("expected job to be created")
+	}
+	if repo.created.Opts["pdf_profile"] != "pdf/a-2b" {
+		t.Errorf("CreateParams.Opts = %+v, want pdf_profile=pdf/a-2b", repo.created.Opts)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	optsResp, ok := resp["opts"].(map[string]any)
+	if !ok || optsResp["pdf_profile"] != "pdf/a-2b" {
+		t.Errorf("response opts = %v, want echoed pdf_profile=pdf/a-2b", resp["opts"])
+	}
+}
+
+// TestCreateJob_OptsUnknownKeyRejected verifies an opts value with an
+// unrecognized key is rejected 422 before any storage write (T-14-01).
+func TestCreateJob_OptsUnknownKeyRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.docx", "pdf", docxFixture(t), `{"EncryptFile":true}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an unknown-key opts value")
+	}
+}
+
+// TestCreateJob_OptsInapplicableImage verifies pdf_profile requested on an
+// image conversion (png->webp) is rejected 422 (inapplicable).
+func TestCreateJob_OptsInapplicableImage(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.png", "webp", pngBytesFixture(), `{"pdf_profile":"pdf/a-2b"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts applicability validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for inapplicable opts on an image conversion")
+	}
+}
+
+// TestCreateJob_OptsInapplicableTarget verifies pdf_profile requested on a
+// docx->odt request (non-pdf target) is rejected 422 (inapplicable).
+func TestCreateJob_OptsInapplicableTarget(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.docx", "odt", docxFixture(t), `{"pdf_profile":"pdf/a-2b"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts applicability validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for pdf_profile on a non-pdf target")
+	}
+}
+
+// TestCreateJob_OptsOversizeRejected verifies an opts field larger than the
+// size cap is rejected 422 before parsing (T-14-02).
+func TestCreateJob_OptsOversizeRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	oversized := `{"pdf_profile":"` + strings.Repeat("a", 5000) + `"}`
+	body, ct := multipartBodyWithOpts(t, "in.docx", "pdf", docxFixture(t), oversized)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload an oversized opts field")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an oversized opts field")
+	}
+}
+
+// TestCreateJob_OptsInjectionAttempt verifies an API-level attempt to smuggle
+// a second filter property inside the pdf_profile value itself is rejected
+// 422 -- the closed allow-list check in ParseDocOpts rejects anything other
+// than the exact "pdf/a-2b" string, proving adversarial bytes never reach
+// storage or the CreateParams.Opts persisted value (T-14-01).
+func TestCreateJob_OptsInjectionAttempt(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	injection := `{"pdf_profile":"pdf/a-2b\",\"EncryptFile\":true"}`
+	body, ct := multipartBodyWithOpts(t, "in.docx", "pdf", docxFixture(t), injection)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts validation rejects the injection attempt")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an opts injection attempt")
+	}
+}
+
+// TestCreateJob_NoOptsResponseUnchanged is the D-09 regression: a no-opts
+// POST response contains no "opts" key and CreateParams.Opts stays nil.
+func TestCreateJob_NoOptsResponseUnchanged(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBody(t, "in.png", "webp", pngBytesFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.Opts != nil {
+		t.Errorf("CreateParams.Opts = %+v, want nil (no opts field supplied)", repo.created)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if _, present := resp["opts"]; present {
+		t.Errorf("response = %v, want no \"opts\" key when no opts were supplied", resp)
+	}
+}
+
+// TestCreateJob_EmptyOptsObjectTreatedAsNoOpts verifies the literal "{}"
+// opts value is treated identically to an absent opts field (D-09).
+func TestCreateJob_EmptyOptsObjectTreatedAsNoOpts(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.png", "webp", pngBytesFixture(), "{}")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if _, present := resp["opts"]; present {
+		t.Errorf("response = %v, want no \"opts\" key for opts={}", resp)
+	}
+}
+
+// TestGetJob_OptsEcho verifies a job with stored opts echoes them in the GET
+// response (D-09).
+func TestGetJob_OptsEcho(t *testing.T) {
+	id := uuid.New()
+	resolver := newFakeResolver()
+	repo := &fakeRepo{getJob: &jobs.Job{
+		ID:       id,
+		ClientID: resolver.client.ID,
+		Status:   jobs.StatusQueued,
+		Opts:     map[string]any{"pdf_profile": "pdf/a-2b"},
+	}}
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	optsResp, ok := resp["opts"].(map[string]any)
+	if !ok || optsResp["pdf_profile"] != "pdf/a-2b" {
+		t.Errorf("response opts = %v, want echoed pdf_profile=pdf/a-2b", resp["opts"])
+	}
+}
+
+// TestGetJob_NoOptsOmitted verifies a job without stored opts omits the
+// "opts" key entirely (D-09 omitempty; existing no-opts responses unchanged).
+func TestGetJob_NoOptsOmitted(t *testing.T) {
+	id := uuid.New()
+	resolver := newFakeResolver()
+	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if _, present := resp["opts"]; present {
+		t.Errorf("response = %v, want no \"opts\" key for a job without stored opts", resp)
 	}
 }
 

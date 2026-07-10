@@ -24,7 +24,12 @@ const (
 	formFieldFile        = "file"
 	formFieldTarget      = "target"
 	formFieldCallbackURL = "callback_url"
+	formFieldOpts        = "opts"
 	operationConv        = "convert"
+	// maxOptsBytes bounds the opts JSON field before it is even parsed
+	// (T-14-02): a conservative 4 KiB comfortably fits the closed DocOpts
+	// schema while bounding the DoS surface of an oversized field.
+	maxOptsBytes = 4096
 )
 
 // handleHealth probes Postgres, Redis, and S3/MinIO reachability under a
@@ -234,6 +239,46 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// opts is optional (D-02); an empty value or the literal "{}" means "no
+	// opts" (D-09) and normalizedOpts stays nil, skipping validation
+	// entirely. Otherwise: size cap, then syntax (ParseDocOpts), then
+	// applicability (ValidateApplicability, now that engine/detected/target
+	// are known) -- all BEFORE s.storage.Upload below (D-03/D-04). The API
+	// never duplicates internal/convert's validation logic; it only calls it
+	// (single validation authority, D-04/D-10).
+	var normalizedOpts map[string]any
+	rawOpts := r.FormValue(formFieldOpts)
+	if rawOpts != "" && rawOpts != "{}" {
+		if len(rawOpts) > maxOptsBytes {
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_too_large size=%d limit=%d", client.ID, filename, len(rawOpts), maxOptsBytes)
+			writeError(w, http.StatusUnprocessableEntity, "opts field too large")
+			return
+		}
+		docOpts, err := convert.ParseDocOpts([]byte(rawOpts))
+		if err != nil {
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+			return
+		}
+		if err := convert.ValidateApplicability(engine, detected, target, docOpts); err != nil {
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+			return
+		}
+		// D-08: persist the normalized struct, never the raw client bytes --
+		// round-trip through json.Marshal/Unmarshal so only the validated
+		// enum value ever reaches storage.
+		normalizedRaw, err := json.Marshal(docOpts)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+			return
+		}
+		if err := json.Unmarshal(normalizedRaw, &normalizedOpts); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+			return
+		}
+	}
+
 	jobID := uuid.New()
 	key := storage.InputKey(jobID, 0, filename)
 	// Stored Content-Type is the canonical MIME of the detected format, never
@@ -255,6 +300,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		SourceFormat: detected,
 		TargetFormat: target,
 		CallbackURL:  callbackURL,
+		Opts:         normalizedOpts,
 		Input: jobs.Input{
 			Ordinal:     0,
 			ObjectKey:   key,
@@ -291,10 +337,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	resp := map[string]any{
 		"job_id": createdID,
 		"status": jobs.StatusQueued,
-	})
+	}
+	if len(normalizedOpts) > 0 {
+		resp["opts"] = normalizedOpts
+	}
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // handleGetJob returns the job status; when done, a presigned download URL for
@@ -331,6 +381,9 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"job_id": job.ID,
 		"status": job.Status,
+	}
+	if len(job.Opts) > 0 {
+		resp["opts"] = job.Opts
 	}
 
 	switch job.Status {
