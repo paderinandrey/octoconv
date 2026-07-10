@@ -54,7 +54,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 
 **Goal:** Документный класс перестаёт быть «только → PDF»: кросс-конвертация внутри класса, чёткие отказы для legacy/encrypted-форматов, архивный PDF/A через validated opts, новый chromium-based HTML→PDF движок (третий engine-class) — и webhook-доставка, переживающая деплой/падение любого подмножества engine-воркеров.
 
-- [ ] **Phase 12: Tech Debt Cleanup** - Закрыть унаследованный advisory tech debt v1.0–v1.2 перед новой движковой работой
+- [x] **Phase 12: Tech Debt Cleanup** - Закрыть унаследованный advisory tech debt v1.0–v1.2 перед новой движковой работой (completed 2026-07-10)
 - [ ] **Phase 13: Cross-Format Conversion & Input Safety** - Кросс-конвертация внутри документного класса + структурная валидация выхода + отказ OLE-CFB входов
 - [ ] **Phase 14: Validated Conversion Options & PDF/A Export** - Closed-allowlist `opts` механизм + PDF/A-архивный экспорт как первый реальный потребитель
 - [ ] **Phase 15: HTML→PDF Chromium Engine** - Третий engine-class: chromium-based HTML→PDF с офлайн-рендерингом (SSRF-safe)
@@ -73,7 +73,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   4. `gofmt -l ./...` returns zero files.
   5. Every variable documented in `.env.example` is either wired into the corresponding `docker-compose.yml` service or has an explicit, logged reason why not — no silent gaps remain.
 **Plans**: 1 plan
-- [ ] 12-01-PLAN.md — Engine-class constants + E2E harness hardening (extra_hosts, HTTP timeouts) + docker-compose/.env audit + gofmt (DEBT-01..05)
+- [x] 12-01-PLAN.md — Engine-class constants + E2E harness hardening (extra_hosts, HTTP timeouts) + docker-compose/.env audit + gofmt (DEBT-01..05)
 
 ### Phase 13: Cross-Format Conversion & Input Safety
 **Goal**: Клиенты могут конвертировать между офисными форматами внутри документного класса (не только → PDF), полученный выход структурно проверяется на валидность, а legacy/encrypted документы отклоняются на входе, а не падают невнятным таймаутом внутри soffice.
@@ -131,7 +131,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 9. LibreOffice Converter Engine | v1.2 | 2/2 | Complete | 2026-07-09 |
 | 10. Document Worker & Reconciler Integration | v1.2 | 4/4 | Complete | 2026-07-09 |
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
-| 12. Tech Debt Cleanup | v1.3 | 0/TBD | Not started | - |
+| 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 0/TBD | Not started | - |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 0/TBD | Not started | - |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |

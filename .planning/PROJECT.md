@@ -62,7 +62,7 @@ OctoConv — внутренний асинхронный сервис конве
 - [ ] Клиент может запросить PDF/A-вариант экспорта через `opts`
 - [ ] HTML→PDF через отдельный chromium-based движок (третий engine-class) с собственной safety-моделью
 - [ ] Webhook-доставка работает при деплое любого подмножества engine-воркеров
-- [ ] Tech debt v1.0–v1.2 закрыт (WR-02/03/04, gofmt, docker-compose audit)
+- [x] Tech debt v1.0–v1.2 закрыт (WR-02/03/04, gofmt, docker-compose audit) — Phase 12, verified 5/5
 
 ### Out of Scope
 

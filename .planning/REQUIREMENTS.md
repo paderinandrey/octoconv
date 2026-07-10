@@ -9,11 +9,11 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Tech Debt
 
-- [ ] **DEBT-01**: E2E-suite работает на plain-Linux docker: `docker-compose.e2e.yml` даёт `api`-сервису `extra_hosts: host.docker.internal:host-gateway`, webhook-пара E2E проходит вне Docker Desktop (WR-02 из 11-REVIEW.md)
-- [ ] **DEBT-02**: Engine-class литералы ("image"/"document"/…) определены как экспортированные константы в `internal/convert` и используются API, reconciler'ом и воркерами вместо дублированных строк (WR-03)
-- [ ] **DEBT-03**: E2E HTTP-клиенты имеют per-request таймауты — зависший API/download endpoint даёт диагностируемое падение теста, а не `go test` binary-timeout panic (WR-04)
-- [ ] **DEBT-04**: `gofmt -l ./...` не находит файлов (nit в `internal/queue/queue_test.go`, тянется с Phase 9/10)
-- [ ] **DEBT-05**: docker-compose.yml сверен с `.env.example` — каждая документированная env-переменная либо прокинута в соответствующий сервис, либо расхождение явно обосновано (перенос из v1.0 close)
+- [x] **DEBT-01**: E2E-suite работает на plain-Linux docker: `docker-compose.e2e.yml` даёт `api`-сервису `extra_hosts: host.docker.internal:host-gateway`, webhook-пара E2E проходит вне Docker Desktop (WR-02 из 11-REVIEW.md)
+- [x] **DEBT-02**: Engine-class литералы ("image"/"document"/…) определены как экспортированные константы в `internal/convert` и используются API, reconciler'ом и воркерами вместо дублированных строк (WR-03)
+- [x] **DEBT-03**: E2E HTTP-клиенты имеют per-request таймауты — зависший API/download endpoint даёт диагностируемое падение теста, а не `go test` binary-timeout panic (WR-04)
+- [x] **DEBT-04**: `gofmt -l ./...` не находит файлов (nit в `internal/queue/queue_test.go`, тянется с Phase 9/10)
+- [x] **DEBT-05**: docker-compose.yml сверен с `.env.example` — каждая документированная env-переменная либо прокинута в соответствующий сервис, либо расхождение явно обосновано (перенос из v1.0 close)
 
 ### Cross-Format Conversion
 
@@ -67,11 +67,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DEBT-01 | Phase 12 | Pending |
-| DEBT-02 | Phase 12 | Pending |
-| DEBT-03 | Phase 12 | Pending |
-| DEBT-04 | Phase 12 | Pending |
-| DEBT-05 | Phase 12 | Pending |
+| DEBT-01 | Phase 12 | Complete |
+| DEBT-02 | Phase 12 | Complete |
+| DEBT-03 | Phase 12 | Complete |
+| DEBT-04 | Phase 12 | Complete |
+| DEBT-05 | Phase 12 | Complete |
 | CONV-01 | Phase 13 | Pending |
 | CONV-02 | Phase 13 | Pending |
 | SAFE-01 | Phase 13 | Pending |
