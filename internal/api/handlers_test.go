@@ -407,6 +407,38 @@ func TestCreateJob_UnrecognizedContent(t *testing.T) {
 	}
 }
 
+// TestCreateJob_OLECFBRejected verifies SAFE-01/D-05/D-06: a file whose
+// content begins with the OLE-CFB magic (legacy binary .doc/.xls/.ppt or a
+// password-protected OOXML document — both share the identical header) is
+// rejected 422 before any storage write, with a message naming both
+// sub-cases and a remedy.
+func TestCreateJob_OLECFBRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	cfb := append([]byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}, []byte("legacy sector padding")...)
+	body, ct := multipartBody(t, "in.doc", "pdf", cfb)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload an OLE-CFB document before rejection")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an OLE-CFB document")
+	}
+	if !strings.Contains(rec.Body.String(), "password") {
+		t.Errorf("body = %s, want a message mentioning password/remedy", rec.Body.String())
+	}
+}
+
 func TestCreateJob_NoAuthHeader_Unauthorized(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
