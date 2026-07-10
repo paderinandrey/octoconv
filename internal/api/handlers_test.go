@@ -1019,13 +1019,18 @@ func TestCreateJob_OptsInapplicableTarget(t *testing.T) {
 }
 
 // TestCreateJob_OptsOversizeRejected verifies an opts field larger than the
-// size cap is rejected 422 before parsing (T-14-02).
+// size cap is rejected 422 before parsing (T-14-02). The payload is padded
+// with JSON whitespace around a fully VALID pdf_profile, so ONLY the size
+// cap can reject it — if the len(rawOpts) > maxOptsBytes guard were deleted,
+// the opts would parse and validate cleanly and this test would fail
+// (review WR-05: the previous payload also failed the enum allow-list,
+// silently masking removal of the cap).
 func TestCreateJob_OptsOversizeRejected(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	srv, _ := newTestServer(repo, store, &fakeQueue{})
 
-	oversized := `{"pdf_profile":"` + strings.Repeat("a", 5000) + `"}`
+	oversized := `{` + strings.Repeat(" ", 5000) + `"pdf_profile":"pdf/a-2b"}`
 	body, ct := multipartBodyWithOpts(t, "in.docx", "pdf", docxFixture(t), oversized)
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
 	req.Header.Set("Content-Type", ct)
