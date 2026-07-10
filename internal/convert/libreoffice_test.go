@@ -161,6 +161,116 @@ func TestValidateDocumentOutput(t *testing.T) {
 	}
 }
 
+// TestPDFAFilterOptions asserts the PDF/A-2b builder forces both properties
+// Pitfall 7 requires (SelectPdfVersion + EmbedStandardFonts:true), and that
+// empty opts produce no filter suffix at all.
+func TestPDFAFilterOptions(t *testing.T) {
+	suffix, isPDFA := PDFAFilterOptions(DocOpts{PDFProfile: "pdf/a-2b"})
+	if !isPDFA {
+		t.Fatal("PDFAFilterOptions(pdf/a-2b) isPDFA = false, want true")
+	}
+	if !strings.Contains(suffix, "SelectPdfVersion") {
+		t.Errorf("PDFAFilterOptions(pdf/a-2b) suffix = %q, want it to contain SelectPdfVersion", suffix)
+	}
+	if !strings.Contains(suffix, "EmbedStandardFonts") || !strings.Contains(suffix, "true") {
+		t.Errorf("PDFAFilterOptions(pdf/a-2b) suffix = %q, want it to force EmbedStandardFonts:true (Pitfall 7)", suffix)
+	}
+
+	suffix, isPDFA = PDFAFilterOptions(DocOpts{})
+	if isPDFA || suffix != "" {
+		t.Errorf("PDFAFilterOptions(empty opts) = (%q, %v), want (\"\", false)", suffix, isPDFA)
+	}
+}
+
+// TestDocOptsInjectionResistance is the mandatory success-criterion-1
+// artifact (D-07, Pitfall 9): it proves that no adversarial byte sequence in
+// a client-supplied opts JSON value can ever reach the soffice filter
+// argument. Every adversarial input is either rejected outright by
+// ParseDocOpts (the common case, since the allow-list is a single exact
+// string), or -- if it somehow parses -- must produce a filter suffix
+// byte-for-byte identical to the clean pdf/a-2b case, with none of the
+// adversarial tokens present.
+func TestDocOptsInjectionResistance(t *testing.T) {
+	cleanSuffix, cleanIsPDFA := PDFAFilterOptions(DocOpts{PDFProfile: "pdf/a-2b"})
+	if !cleanIsPDFA || cleanSuffix == "" {
+		t.Fatal("clean pdf/a-2b case must produce a non-empty PDF/A suffix; test setup is broken")
+	}
+
+	adversarial := []string{
+		// Attempts to break out of the JSON string value and inject a
+		// second filter property directly.
+		`{"pdf_profile":"pdf/a-2b\",\"EncryptFile\":true,\"x\":\""}`,
+		// Attempts to smuggle a different UNO export filter name onto the
+		// end of the enum value.
+		`{"pdf_profile":"pdf/a-2b:calc_pdf_Export"}`,
+		// A structurally valid but wholly unknown key -- must be rejected
+		// by DisallowUnknownFields, not silently ignored.
+		`{"EncryptFile":true}`,
+		// A valid enum value alongside an unknown key -- the whole decode
+		// must fail, not just the unknown key.
+		`{"pdf_profile":"pdf/a-2b","EncryptFile":true}`,
+		// Case-variant of the only allowed value -- must NOT be treated as
+		// equivalent to the exact allow-listed string.
+		`{"pdf_profile":"PDF/A-2B"}`,
+	}
+
+	for _, raw := range adversarial {
+		t.Run(raw, func(t *testing.T) {
+			opts, err := ParseDocOpts([]byte(raw))
+			if err != nil {
+				// Rejected before ever reaching the builder: client bytes
+				// never got a chance to influence the argv/filter string.
+				return
+			}
+			suffix, isPDFA := PDFAFilterOptions(opts)
+			if suffix != cleanSuffix || isPDFA != cleanIsPDFA {
+				t.Errorf("adversarial opts %q parsed successfully and produced a DIFFERENT filter suffix (%q, %v) than the clean pdf/a-2b case (%q, %v) -- this proves client bytes reached the soffice filter argument", raw, suffix, isPDFA, cleanSuffix, cleanIsPDFA)
+			}
+			for _, token := range []string{"EncryptFile", "calc_pdf_Export"} {
+				if strings.Contains(suffix, token) {
+					t.Errorf("adversarial token %q leaked into filter suffix %q -- this proves client bytes reached the soffice filter argument", token, suffix)
+				}
+			}
+		})
+	}
+}
+
+// TestValidatePDFAOutputIntent proves D-05/D-06: a produced PDF that carries
+// the /GTS_PDFA OutputIntent marker passes validateDocumentOutput when PDF/A
+// was requested; one that lacks it fails with an "OutputIntent"-substring
+// error (the terminal signature worker.go matches on); and when PDF/A was
+// NOT requested (wantPDFA=false), the marker's presence/absence is ignored
+// entirely (regression safety for plain document->pdf conversions).
+func TestValidatePDFAOutputIntent(t *testing.T) {
+	dir := t.TempDir()
+
+	withMarker := filepath.Join(dir, "with-marker.pdf")
+	pdfWithMarker := []byte("%PDF-1.6\n%some pdf bytes /GTS_PDFA1 more bytes\n%%EOF")
+	if err := os.WriteFile(withMarker, pdfWithMarker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(withMarker, "pdf", true); err != nil {
+		t.Errorf("validateDocumentOutput(marker present, wantPDFA=true) = %v, want nil", err)
+	}
+
+	withoutMarker := filepath.Join(dir, "without-marker.pdf")
+	pdfWithoutMarker := []byte("%PDF-1.6\n%plain pdf bytes, no marker\n%%EOF")
+	if err := os.WriteFile(withoutMarker, pdfWithoutMarker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := validateDocumentOutput(withoutMarker, "pdf", true)
+	if err == nil {
+		t.Fatal("validateDocumentOutput(marker absent, wantPDFA=true) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "OutputIntent") {
+		t.Errorf("validateDocumentOutput(marker absent, wantPDFA=true) error = %v, want substring \"OutputIntent\"", err)
+	}
+
+	if err := validateDocumentOutput(withoutMarker, "pdf", false); err != nil {
+		t.Errorf("validateDocumentOutput(marker absent, wantPDFA=false) = %v, want nil (marker ignored)", err)
+	}
+}
+
 func TestRegistryLibreOfficePairs(t *testing.T) {
 	// Default registry is populated by converters.go init().
 	if !Default.Supports("docx", "pdf") {
