@@ -24,8 +24,6 @@ const (
 	formFieldFile        = "file"
 	formFieldTarget      = "target"
 	formFieldCallbackURL = "callback_url"
-	engineImage          = "image"
-	engineDocument       = "document"
 	operationConv        = "convert"
 )
 
@@ -264,9 +262,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// reconciler will recover it.
 	var enqueueErr error
 	switch engine {
-	case engineImage:
+	case convert.EngineImage:
 		enqueueErr = s.queue.EnqueueImageConvert(ctx, createdID)
-	case engineDocument:
+	case convert.EngineDocument:
 		enqueueErr = s.queue.EnqueueDocumentConvert(ctx, createdID)
 	default:
 		// Fail closed: an engine class with no known queue must never be

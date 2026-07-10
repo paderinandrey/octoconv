@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 
+	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/metrics"
 )
@@ -130,9 +131,9 @@ func (s *Sweeper) sweep(ctx context.Context) {
 		// image queue.
 		var enqueueErr error
 		switch j.Engine {
-		case "image":
+		case convert.EngineImage:
 			enqueueErr = s.enq.EnqueueImageConvert(ctx, j.ID)
-		case "document":
+		case convert.EngineDocument:
 			enqueueErr = s.enq.EnqueueDocumentConvert(ctx, j.ID)
 		default:
 			// Fail closed (T-10-03): av/cad/archive/probe are out of scope

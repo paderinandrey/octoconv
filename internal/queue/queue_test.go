@@ -48,7 +48,7 @@ func TestWebhookRetryDelaySchedule(t *testing.T) {
 		{n: 0, base: schedule[0]},
 		{n: 1, base: schedule[1]},
 		{n: 5, base: schedule[5]},
-		{n: 6, base: schedule[5]},  // clamps past the end of the schedule
+		{n: 6, base: schedule[5]}, // clamps past the end of the schedule
 		{n: 100, base: schedule[5]},
 	}
 	for _, tc := range cases {

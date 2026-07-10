@@ -67,8 +67,8 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 	return validatePDF(outPath)
 }
 
-// Engine reports the "document" engine class (D-01).
-func (LibreOfficeConverter) Engine() string { return "document" }
+// Engine reports the document engine class (D-01).
+func (LibreOfficeConverter) Engine() string { return EngineDocument }
 
 // filterFor maps a source document extension to the LibreOffice PDF export
 // filter that produces the correct output for that document's application
