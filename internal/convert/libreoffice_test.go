@@ -12,31 +12,51 @@ import (
 )
 
 func TestFilterFor(t *testing.T) {
-	cases := map[string]string{
-		"docx":  "writer_pdf_Export",
-		"odt":   "writer_pdf_Export",
-		"xlsx":  "calc_pdf_Export",
-		"ods":   "calc_pdf_Export",
-		"pptx":  "impress_pdf_Export",
-		"odp":   "impress_pdf_Export",
-		".DOCX": "writer_pdf_Export",
-		"PPTX":  "impress_pdf_Export",
+	cases := map[[2]string]string{
+		// The 6 ->pdf pairs (unchanged filter names).
+		{"docx", "pdf"}: "writer_pdf_Export",
+		{"odt", "pdf"}:  "writer_pdf_Export",
+		{"xlsx", "pdf"}: "calc_pdf_Export",
+		{"ods", "pdf"}:  "calc_pdf_Export",
+		{"pptx", "pdf"}: "impress_pdf_Export",
+		{"odp", "pdf"}:  "impress_pdf_Export",
+
+		// The 6 cross pairs: forward ("8" family filters) and reverse
+		// ("... 2007 XML" family filters).
+		{"docx", "odt"}: "writer8",
+		{"odt", "docx"}: "MS Word 2007 XML",
+		{"xlsx", "ods"}: "calc8",
+		{"ods", "xlsx"}: "Calc MS Excel 2007 XML",
+		{"pptx", "odp"}: "impress8",
+		{"odp", "pptx"}: "Impress MS PowerPoint 2007 XML",
+
+		// Case/alias robustness.
+		{".DOCX", "ODT"}: "writer8",
+		{"PPTX", ".pdf"}: "impress_pdf_Export",
 	}
 	for in, want := range cases {
-		got, err := filterFor(in)
+		got, err := filterFor(in[0], in[1])
 		if err != nil {
-			t.Errorf("filterFor(%q) unexpected error: %v", in, err)
+			t.Errorf("filterFor(%q, %q) unexpected error: %v", in[0], in[1], err)
 			continue
 		}
 		if got != want {
-			t.Errorf("filterFor(%q) = %q, want %q", in, got, want)
+			t.Errorf("filterFor(%q, %q) = %q, want %q", in[0], in[1], got, want)
 		}
 	}
 
-	if got, err := filterFor(".txt"); err == nil {
-		t.Errorf("filterFor(\".txt\") = %q, nil, want an error", got)
+	if got, err := filterFor("docx", "mp3"); err == nil {
+		t.Errorf("filterFor(\"docx\", \"mp3\") = %q, nil, want an error", got)
 	} else if got != "" {
-		t.Errorf("filterFor(\".txt\") returned non-empty filter %q alongside error", got)
+		t.Errorf("filterFor(\"docx\", \"mp3\") returned non-empty filter %q alongside error", got)
+	} else if !strings.Contains(err.Error(), "no export filter for") {
+		t.Errorf("filterFor(\"docx\", \"mp3\") error = %v, want substring \"no export filter for\"", err)
+	}
+
+	if got, err := filterFor(".txt", "pdf"); err == nil {
+		t.Errorf("filterFor(\".txt\", \"pdf\") = %q, nil, want an error", got)
+	} else if got != "" {
+		t.Errorf("filterFor(\".txt\", \"pdf\") returned non-empty filter %q alongside error", got)
 	}
 }
 
@@ -68,6 +88,65 @@ func TestValidatePDF(t *testing.T) {
 	}
 }
 
+// TestValidateDocumentOutput mirrors TestValidatePDF's three-case shape for
+// the non-pdf branch (D-03), plus proves validateDocumentOutput(path,"pdf")
+// still delegates to the %PDF- check unchanged.
+func TestValidateDocumentOutput(t *testing.T) {
+	dir := t.TempDir()
+
+	// (a) a synthesized valid ODT container whose SniffContainer.Format
+	// matches the requested target -> nil.
+	odtPath := filepath.Join(dir, "valid.odt")
+	odtData := odfZipFixture(t, "application/vnd.oasis.opendocument.text")
+	if err := os.WriteFile(odtPath, odtData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(odtPath, "odt"); err != nil {
+		t.Errorf("validateDocumentOutput(valid odt, %q) = %v, want nil", "odt", err)
+	}
+
+	// (b) an empty file -> error.
+	emptyPath := filepath.Join(dir, "empty.odt")
+	if err := os.WriteFile(emptyPath, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(emptyPath, "odt"); err == nil {
+		t.Error("validateDocumentOutput(empty, \"odt\") = nil, want error")
+	} else if !strings.Contains(err.Error(), "output is empty") {
+		t.Errorf("validateDocumentOutput(empty) error = %v, want substring \"output is empty\"", err)
+	}
+
+	// (c) a valid zip whose container format does NOT match the requested
+	// target (a docx container validated against target "odt") -> error
+	// containing "output does not match expected container format".
+	wrongPath := filepath.Join(dir, "wrong.odt")
+	docxData := ooxmlZipFixture(t, "word/document.xml")
+	if err := os.WriteFile(wrongPath, docxData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(wrongPath, "odt"); err == nil {
+		t.Error("validateDocumentOutput(docx-as-odt) = nil, want error")
+	} else if !strings.Contains(err.Error(), "output does not match expected container format") {
+		t.Errorf("validateDocumentOutput(mismatch) error = %v, want substring \"output does not match expected container format\"", err)
+	}
+
+	// validateDocumentOutput(path, "pdf") still delegates to the %PDF- check.
+	pdfValidPath := filepath.Join(dir, "valid.pdf")
+	if err := os.WriteFile(pdfValidPath, []byte("%PDF-1.6\n%rest of content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(pdfValidPath, "pdf"); err != nil {
+		t.Errorf("validateDocumentOutput(valid pdf, \"pdf\") = %v, want nil", err)
+	}
+	pdfInvalidPath := filepath.Join(dir, "invalid.pdf")
+	if err := os.WriteFile(pdfInvalidPath, []byte("not a pdf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentOutput(pdfInvalidPath, "pdf"); err == nil {
+		t.Error("validateDocumentOutput(non-pdf content, \"pdf\") = nil, want error")
+	}
+}
+
 func TestRegistryLibreOfficePairs(t *testing.T) {
 	// Default registry is populated by converters.go init().
 	if !Default.Supports("docx", "pdf") {
@@ -89,6 +168,41 @@ func TestRegistryLibreOfficePairs(t *testing.T) {
 	}
 	if _, ok := Default.Lookup("odp", "pdf"); !ok {
 		t.Error("expected a converter for odp->pdf")
+	}
+
+	// D-01: the 6 cross pairs are supported, including a cased/aliased
+	// variant.
+	crossCases := [][2]string{
+		{"docx", "odt"}, {"odt", "docx"},
+		{"xlsx", "ods"}, {"ods", "xlsx"},
+		{"pptx", "odp"}, {"odp", "pptx"},
+	}
+	for _, p := range crossCases {
+		if !Default.Supports(p[0], p[1]) {
+			t.Errorf("expected %s->%s to be supported", p[0], p[1])
+		}
+	}
+	if !Default.Supports(".DOCX", "ODT") {
+		t.Error("expected .DOCX->ODT (aliased/cased) to be supported")
+	}
+
+	// No cross-family pairs are registered.
+	forbidden := [][2]string{
+		{"docx", "ods"}, {"docx", "odp"},
+		{"xlsx", "odt"}, {"xlsx", "odp"},
+		{"pptx", "odt"}, {"pptx", "ods"},
+	}
+	for _, p := range forbidden {
+		if Default.Supports(p[0], p[1]) {
+			t.Errorf("forbidden cross-family pair %s->%s must not be supported", p[0], p[1])
+		}
+	}
+
+	// Identity pairs remain unregistered for every document format.
+	for _, f := range documentFormats {
+		if Default.Supports(f, f) {
+			t.Errorf("identity pair %s->%s must not be registered", f, f)
+		}
 	}
 }
 
