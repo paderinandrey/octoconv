@@ -114,3 +114,7 @@ None — no external service configuration required. No new Go dependency (go.mo
 ---
 *Phase: 14-validated-conversion-options-pdf-a-export*
 *Completed: 2026-07-11*
+
+## Self-Check: PASSED
+
+All created/modified files found on disk (internal/convert/opts.go, internal/convert/libreoffice.go, internal/convert/libreoffice_test.go, internal/worker/worker.go, this SUMMARY.md); all 4 task/summary commits (65ba272, 8016179, a3ca73c, bba8eac) verified present in git log.
