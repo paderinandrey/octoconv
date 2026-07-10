@@ -6,7 +6,7 @@ status: planning
 last_updated: "2026-07-10T00:26:15.889Z"
 last_activity: 2026-07-10
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,20 +20,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения и офисные документы) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Planning next milestone (v1.2 shipped 2026-07-10)
+**Current focus:** Roadmap for v1.3 (Phases 12-16) written; discussing/planning Phase 12 (Tech Debt Cleanup) next.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 12 (Tech Debt Cleanup) — not yet planned
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-10 — Milestone v1.3 started
+Status: Roadmap done, awaiting phase planning
+Last activity: 2026-07-10 — v1.3 roadmap created (Phases 12-16, 14/14 requirements mapped)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 30 (all v1.0 + v1.1)
+- Total plans completed: 30 (all v1.0 + v1.1 + v1.2)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -48,10 +48,15 @@ Last activity: 2026-07-10 — Milestone v1.3 started
 | 05 | 1 | - | - |
 | 06 | 4 | - | - |
 | 07 | 2 | - | - |
-| 08 | TBD | - | - |
-| 09 | TBD | - | - |
+| 08 | 2 | - | - |
+| 09 | 2 | - | - |
 | 10 | 4 | - | - |
 | 11 | 4 | - | - |
+| 12 | TBD | - | - |
+| 13 | TBD | - | - |
+| 14 | TBD | - | - |
+| 15 | TBD | - | - |
+| 16 | TBD | - | - |
 
 **Recent Trend:**
 
@@ -64,15 +69,18 @@ Last activity: 2026-07-10 — Milestone v1.3 started
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table (v1.2 outcomes recorded there at milestone close). No decisions pending for the next milestone yet.
+Decisions are logged in PROJECT.md Key Decisions table (v1.2 outcomes recorded there at milestone close). v1.3-specific decisions still pending during phase planning:
+- Phase 13: CFB legacy-vs-encrypted distinction depth (generic reject message vs. CFB-directory-stream parsing) — flagged by research, needs a Key Decision before implementation.
+- Phase 15: chromium network-blocking mechanism (CDP-driven interception vs. CLI-flag + container/network egress restriction) — flagged as the milestone's highest-risk open question.
+- Phase 16: webhook-consumer redundancy topology (fixed replica count vs. leader election vs. sweeper extracted to its own singleton process).
 
 ### Pending Todos
 
-None yet.
+None yet — first todo is planning Phase 12.
 
 ### Blockers/Concerns
 
-None — v1.2 research concerns (soffice process topology, cold-start latency, timeout default, memory footprint) were resolved during Phases 9–10 (live process-kill proof, tini PID-1 fix, resource limits validated by live E2E).
+None currently blocking. Carried-forward research risk: Phase 15 (HTML→PDF) is the milestone's highest-risk item per research SUMMARY — offline-rendering/SSRF-equivalent network containment needs explicit live verification, not just a code-review claim.
 
 ## Deferred Items
 
@@ -80,25 +88,24 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
-| tech_debt | docker-compose.yml audit for other stale gaps vs .env.example | Open | v1.0 close (2026-07-08) |
-| v2_scope | Cross-format conversion within document class (docx↔odt etc.) | Deferred to v2 (DOC-V2-01) | v1.2 requirements definition (2026-07-09) |
-| v2_scope | Pre-flight OLE-CFB (password-protected legacy doc) detection | Deferred to v2 (DOC-V2-02) | v1.2 requirements definition (2026-07-09) |
-| v2_scope | `opts`-driven PDF/A export | Deferred to v2 (DOC-V2-03) | v1.2 requirements definition (2026-07-09) |
-| v2_scope | HTML → PDF via chromium-based engine | Deferred to v2 (DOC-V2-04) | v1.2 requirements definition (2026-07-09) |
-| accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05) | v1.2 requirements definition (2026-07-09) |
-| tech_debt | WR-02: docker-compose.e2e.yml lacks `extra_hosts` on `api` — E2E webhook pair fails on plain-Linux docker | Open (advisory, 11-REVIEW.md) | v1.2 close (2026-07-10) |
-| tech_debt | WR-03: engine-class string literals duplicated in 4 places — extract exported constants | Open (advisory, 11-REVIEW.md) | v1.2 close (2026-07-10) |
-| tech_debt | WR-04: E2E HTTP clients lack per-request timeouts | Open (advisory, 11-REVIEW.md) | v1.2 close (2026-07-10) |
-| tech_debt | gofmt nit in internal/queue/queue_test.go (pre-existing since Phase 9/10) | Open | v1.2 close (2026-07-10) |
+| tech_debt | docker-compose.yml audit for other stale gaps vs .env.example | Now DEBT-05, mapped to Phase 12 | v1.0 close (2026-07-08) |
+| tech_debt | WR-02: docker-compose.e2e.yml lacks `extra_hosts` on `api` — E2E webhook pair fails on plain-Linux docker | Now DEBT-01, mapped to Phase 12 | v1.2 close (2026-07-10) |
+| tech_debt | WR-03: engine-class string literals duplicated in 4 places — extract exported constants | Now DEBT-02, mapped to Phase 12 | v1.2 close (2026-07-10) |
+| tech_debt | WR-04: E2E HTTP clients lack per-request timeouts | Now DEBT-03, mapped to Phase 12 | v1.2 close (2026-07-10) |
+| tech_debt | gofmt nit in internal/queue/queue_test.go (pre-existing since Phase 9/10) | Now DEBT-04, mapped to Phase 12 | v1.2 close (2026-07-10) |
+| v2_scope | Full ISO 19005 (veraPDF) validation of PDF/A outputs | Deferred to v2 (DOCV3-01) | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Legacy vs encrypted CFB distinction (directory-stream parsing) | Deferred to v2 (DOCV3-02) | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03) | v1.3 requirements definition (2026-07-10) |
+| accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried into v1.3) | v1.2 requirements definition (2026-07-09) |
 | seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
-| seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | Dormant | v1.2 close (2026-07-10) |
+| seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | Now WEBH-01, mapped to Phase 16 | v1.2 close (2026-07-10) |
 
 ## Session Continuity
 
-Last session: 2026-07-10 — milestone v1.2 closed and archived
-Stopped at: v1.2 complete; awaiting /gsd:new-milestone
-Resume file: none (phase artifacts archived to .planning/milestones/v1.2-phases/)
+Last session: 2026-07-10 — v1.3 roadmap created (Phases 12-16), REQUIREMENTS.md traceability updated to 14/14 coverage
+Stopped at: Roadmap approved/written; ready to plan Phase 12 (Tech Debt Cleanup)
+Resume file: none
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run `/gsd:plan-phase 12` to plan the first v1.3 phase (Tech Debt Cleanup).

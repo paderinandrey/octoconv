@@ -67,26 +67,26 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DEBT-01 | TBD | Pending |
-| DEBT-02 | TBD | Pending |
-| DEBT-03 | TBD | Pending |
-| DEBT-04 | TBD | Pending |
-| DEBT-05 | TBD | Pending |
-| CONV-01 | TBD | Pending |
-| CONV-02 | TBD | Pending |
-| SAFE-01 | TBD | Pending |
-| OPTS-01 | TBD | Pending |
-| OPTS-02 | TBD | Pending |
-| HTML-01 | TBD | Pending |
-| HTML-02 | TBD | Pending |
-| HTML-03 | TBD | Pending |
-| WEBH-01 | TBD | Pending |
+| DEBT-01 | Phase 12 | Pending |
+| DEBT-02 | Phase 12 | Pending |
+| DEBT-03 | Phase 12 | Pending |
+| DEBT-04 | Phase 12 | Pending |
+| DEBT-05 | Phase 12 | Pending |
+| CONV-01 | Phase 13 | Pending |
+| CONV-02 | Phase 13 | Pending |
+| SAFE-01 | Phase 13 | Pending |
+| OPTS-01 | Phase 14 | Pending |
+| OPTS-02 | Phase 14 | Pending |
+| HTML-01 | Phase 15 | Pending |
+| HTML-02 | Phase 15 | Pending |
+| HTML-03 | Phase 15 | Pending |
+| WEBH-01 | Phase 16 | Pending |
 
 **Coverage:**
 - v1 requirements: 14 total
-- Mapped to phases: 0 (roadmap pending)
-- Unmapped: 14 ⚠️
+- Mapped to phases: 14/14 ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-10*
-*Last updated: 2026-07-10 after initial definition*
+*Last updated: 2026-07-10 after roadmap creation (Phases 12-16 mapped, 14/14 coverage)*
