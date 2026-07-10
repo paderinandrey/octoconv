@@ -26,8 +26,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Conversion Options
 
-- [ ] **OPTS-01**: Клиент может передать валидируемые опции конвертации (`opts`) в `POST /v1/jobs`; opts — закрытый allowlist (типизированная Go-структура), невалидные значения → 422, клиентские байты никогда не попадают сырыми в CLI-аргументы/filter-JSON движка
-- [ ] **OPTS-02**: Клиент может запросить PDF/A-2b вариант экспорта для document→pdf через opts; выходной PDF несёт PDF/A OutputIntent-маркер (sanity-чек; полная ISO 19005-валидация veraPDF — принятый residual risk)
+- [x] **OPTS-01**: Клиент может передать валидируемые опции конвертации (`opts`) в `POST /v1/jobs`; opts — закрытый allowlist (типизированная Go-структура), невалидные значения → 422, клиентские байты никогда не попадают сырыми в CLI-аргументы/filter-JSON движка
+- [x] **OPTS-02**: Клиент может запросить PDF/A-2b вариант экспорта для document→pdf через opts; выходной PDF несёт PDF/A OutputIntent-маркер (sanity-чек; полная ISO 19005-валидация veraPDF — принятый residual risk)
 
 ### HTML→PDF Engine
 
@@ -75,8 +75,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CONV-01 | Phase 13 | Complete |
 | CONV-02 | Phase 13 | Complete |
 | SAFE-01 | Phase 13 | Complete |
-| OPTS-01 | Phase 14 | Pending |
-| OPTS-02 | Phase 14 | Pending |
+| OPTS-01 | Phase 14 | Complete |
+| OPTS-02 | Phase 14 | Complete |
 | HTML-01 | Phase 15 | Pending |
 | HTML-02 | Phase 15 | Pending |
 | HTML-03 | Phase 15 | Pending |

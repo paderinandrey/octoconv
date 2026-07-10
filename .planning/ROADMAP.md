@@ -139,7 +139,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete   | 2026-07-10 |
+| 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
