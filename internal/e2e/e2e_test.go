@@ -46,6 +46,7 @@ import (
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
+	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/webhook"
 )
@@ -113,10 +114,10 @@ func provisionClient(t *testing.T) string {
 	return raw
 }
 
-// postJob uploads data as a multipart job (fields: file, target and, when
-// non-empty, callback_url) to POST /v1/jobs, asserts 202, and returns the
-// created job id.
-func postJob(t *testing.T, baseURL, apiKey, filename string, data []byte, target, callbackURL string) string {
+// buildJobRequest builds the shared multipart POST /v1/jobs request (fields:
+// file, target and, when non-empty, callback_url) used by both postJob and
+// postJobExpectStatus, so the two helpers never drift on request shape.
+func buildJobRequest(t *testing.T, baseURL, apiKey, filename string, data []byte, target, callbackURL string) *http.Request {
 	t.Helper()
 
 	var b bytes.Buffer
@@ -146,6 +147,16 @@ func postJob(t *testing.T, baseURL, apiKey, filename string, data []byte, target
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	req.Header.Set("Authorization", "ApiKey "+apiKey)
+	return req
+}
+
+// postJob uploads data as a multipart job (fields: file, target and, when
+// non-empty, callback_url) to POST /v1/jobs, asserts 202, and returns the
+// created job id.
+func postJob(t *testing.T, baseURL, apiKey, filename string, data []byte, target, callbackURL string) string {
+	t.Helper()
+
+	req := buildJobRequest(t, baseURL, apiKey, filename, data, target, callbackURL)
 
 	resp, err := e2eHTTP.Do(req)
 	if err != nil {
@@ -168,6 +179,29 @@ func postJob(t *testing.T, baseURL, apiKey, filename string, data []byte, target
 		t.Fatalf("create response missing job_id; body=%s", body)
 	}
 	return out.JobID
+}
+
+// postJobExpectStatus is postJob's sibling for cases where no job is ever
+// created: it builds the identical multipart request, asserts an arbitrary
+// wantStatus (rather than postJob's hard-coded 202), and returns the raw
+// response body for the caller to optionally inspect (D-07's CFB-rejection
+// test uses this for the 422 branch).
+func postJobExpectStatus(t *testing.T, baseURL, apiKey, filename string, data []byte, target string, wantStatus int) []byte {
+	t.Helper()
+
+	req := buildJobRequest(t, baseURL, apiKey, filename, data, target, "")
+
+	resp, err := e2eHTTP.Do(req)
+	if err != nil {
+		t.Fatalf("POST /v1/jobs: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("POST /v1/jobs (%s -> %s) status = %d, want %d; body=%s",
+			filename, target, resp.StatusCode, wantStatus, body)
+	}
+	return body
 }
 
 // pollUntilDone polls GET /v1/jobs/{id} on a ~2s interval until the job
@@ -334,6 +368,120 @@ func assertDownloadIsPDF(t *testing.T, downloadURL string) {
 	}
 	if string(head) != "%PDF-" {
 		t.Fatalf("download head = %q, want %%PDF-", head)
+	}
+}
+
+// crossFormatPairs is the phase's exactly-6 symmetric intra-family cross
+// pairs (D-01/D-07), reusing the existing sample.* fixtures as inputs.
+var crossFormatPairs = []struct {
+	filename string
+	target   string
+}{
+	{"sample.docx", "odt"},
+	{"sample.odt", "docx"},
+	{"sample.xlsx", "ods"},
+	{"sample.ods", "xlsx"},
+	{"sample.pptx", "odp"},
+	{"sample.odp", "pptx"},
+}
+
+// TestCrossFormatConversionE2E drives all 6 intra-family cross-format pairs
+// (docx<->odt, xlsx<->ods, pptx<->odp) through the LIVE pipeline: multipart
+// upload -> poll to done -> presigned download -> convert.SniffContainer
+// structural check against the expected target format (D-01/D-02/D-07). This
+// is the live confirmation that the D-02 LibreOffice 7.4 filter names
+// actually produce valid output -- a wrong filter name makes its pair fail
+// here, not in an offline unit test. No webhook assertion needed in this
+// table; the existing ->pdf table already covers the webhook path (D-05).
+func TestCrossFormatConversionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	for _, pair := range crossFormatPairs {
+		t.Run(pair.filename+"->"+pair.target, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", pair.filename))
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", pair.filename, err)
+			}
+
+			jobID := postJob(t, cfg.baseURL, apiKey, pair.filename, data, pair.target, "")
+
+			// Generous bound: LibreOffice cold start in a fresh container is
+			// slow, and the document queue may serialize the 6 jobs.
+			body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+
+			downloadURL, _ := body["download_url"].(string)
+			if downloadURL == "" {
+				t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+			}
+			assertDownloadIsFormat(t, downloadURL, pair.target)
+		})
+	}
+}
+
+// assertDownloadIsFormat fetches the presigned URL (no auth header -- the
+// URL is self-authorizing) and asserts the downloaded bytes structurally
+// sniff as expectedFormat via convert.SniffContainer -- the SAME function
+// that validates upload input (D-03's input/output symmetry), not a bare
+// magic-byte check. Unlike assertDownloadIsPDF, this works for every non-pdf
+// office target.
+func assertDownloadIsFormat(t *testing.T, downloadURL, expectedFormat string) {
+	t.Helper()
+	resp, err := downloadClient().Get(downloadURL)
+	if err != nil {
+		t.Fatalf("GET download_url: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		t.Fatalf("GET download_url status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read download body: %v", err)
+	}
+	cr, err := convert.SniffContainer(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("SniffContainer(download): %v", err)
+	}
+	if cr.Format != expectedFormat {
+		t.Fatalf("downloaded container format = %q, want %q", cr.Format, expectedFormat)
+	}
+}
+
+// oleCFBFixtures is the two SAFE-01 sub-cases (SC#3): a genuine legacy
+// binary Word97 .doc and a genuine password-protected (Agile-encrypted)
+// OOXML .docx. Both begin with the 8-byte OLE-CFB magic and must be rejected
+// 422 before any conversion is attempted (D-05/D-06).
+var oleCFBFixtures = []string{
+	"legacy.doc",
+	"encrypted.docx",
+}
+
+// TestOLECFBRejectionE2E proves live (against real fixtures, not synthetic
+// magic bytes) that both OLE-CFB sub-cases are rejected 422 before any job
+// is ever created -- unlike the postJob/pollUntilDone tables above, no job
+// ID is produced here at all.
+func TestOLECFBRejectionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	for _, filename := range oleCFBFixtures {
+		t.Run(filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", filename))
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", filename, err)
+			}
+
+			body := postJobExpectStatus(t, cfg.baseURL, apiKey, filename, data, "pdf", http.StatusUnprocessableEntity)
+
+			// Loose substring check (not exact-string) so a reworded D-06
+			// message doesn't brittle-fail this live test; the 422 status
+			// above is the load-bearing assertion.
+			if !bytes.Contains(bytes.ToLower(body), []byte("password")) {
+				t.Errorf("422 body for %s does not mention the remedy; body=%s", filename, body)
+			}
+		})
 	}
 }
 
