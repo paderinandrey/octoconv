@@ -57,7 +57,8 @@ func TestIsTerminalLibreOfficeSignatures(t *testing.T) {
 	cases := []string{
 		"convert: libreoffice: output missing %PDF- magic bytes",
 		"convert: libreoffice: output is empty",
-		"convert: libreoffice: no pdf export filter for \".xyz\"",
+		"convert: libreoffice: no export filter for docx -> mp3",
+		"convert: libreoffice: output does not match expected container format odt",
 	}
 	for _, msg := range cases {
 		if !isTerminal(errors.New(msg)) {
@@ -92,7 +93,8 @@ func TestIsDocumentTerminal(t *testing.T) {
 		fmt.Errorf("no converter for %s -> %s", "docx", "png"),
 		errors.New("convert: libreoffice: output is empty"),
 		errors.New("convert: libreoffice: output missing %PDF- magic bytes"),
-		errors.New("convert: libreoffice: no pdf export filter for \".xyz\""),
+		errors.New("convert: libreoffice: no export filter for docx -> mp3"),
+		errors.New("convert: libreoffice: output does not match expected container format odt"),
 		fmt.Errorf("download %q: %w", "uploads/x/0-in.docx", minio.ErrorResponse{Code: minio.NoSuchKey}),
 	}
 	for _, err := range terminalCases {
