@@ -207,11 +207,16 @@ func (h *Handler) HandleImageConvert(ctx context.Context, t *asynq.Task) error {
 			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
 			// (which contains local temp paths) is kept in job_events.detail
 			// for internal diagnostics only.
-			_ = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			ferr := h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
 			metrics.RecordJobOutcome(queue.QueueImage, jobs.StatusFailed, time.Since(start))
-			// Postgres-first: the failed status is already committed above, so a
-			// failed enqueue must not fail the conversion — best-effort only.
-			if job.CallbackURL != "" {
+			// Postgres-first: enqueue the webhook ONLY once the failed status
+			// is actually committed. If MarkFailed itself failed (Postgres
+			// blip), the job is still active — a webhook now would re-read the
+			// row and deliver the non-terminal status "active", which the
+			// contract never defines (WR-04); the reconciler will requeue the
+			// still-active job instead. A failed enqueue after a successful
+			// MarkFailed must not fail the conversion — best-effort only.
+			if ferr == nil && job.CallbackURL != "" {
 				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
 			}
 			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
@@ -270,10 +275,13 @@ func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) erro
 		// reconciler requeues it into the same failure until MaxRecoveries
 		// is exhausted (T-14-02b). Sanitized message only; the parse error
 		// is kept in job_events.detail for internal diagnostics.
-		_ = h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
-		// Postgres-first: the failed status is already committed above, so a
-		// failed enqueue must not fail the job — best-effort only.
-		if job.CallbackURL != "" {
+		ferr := h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
+		// Postgres-first: enqueue the webhook ONLY once the failed status is
+		// actually committed — if MarkFailed itself failed, a webhook now
+		// would report the non-terminal status "queued" (WR-04). A failed
+		// enqueue after a successful MarkFailed must not fail the job —
+		// best-effort only.
+		if ferr == nil && job.CallbackURL != "" {
 			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
 		}
 		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
@@ -291,11 +299,16 @@ func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) erro
 			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
 			// (which contains local temp paths) is kept in job_events.detail
 			// for internal diagnostics only.
-			_ = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			ferr := h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
 			metrics.RecordJobOutcome(queue.QueueDocument, jobs.StatusFailed, time.Since(start))
-			// Postgres-first: the failed status is already committed above, so a
-			// failed enqueue must not fail the conversion — best-effort only.
-			if job.CallbackURL != "" {
+			// Postgres-first: enqueue the webhook ONLY once the failed status
+			// is actually committed. If MarkFailed itself failed (Postgres
+			// blip), the job is still active — a webhook now would re-read the
+			// row and deliver the non-terminal status "active", which the
+			// contract never defines (WR-04); the reconciler will requeue the
+			// still-active job instead. A failed enqueue after a successful
+			// MarkFailed must not fail the conversion — best-effort only.
+			if ferr == nil && job.CallbackURL != "" {
 				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
 			}
 			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
