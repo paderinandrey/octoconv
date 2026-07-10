@@ -45,14 +45,14 @@ completed: 2026-07-11
 
 # Phase 14 Plan 03: Opts API Boundary + Live PDF/A Acceptance Summary
 
-**API now parses/validates/persists/echoes the opts form field end to end (fail-closed 422 before storage), and a live docker-compose run confirmed a real PDF/A-2b export carrying `/Type/OutputIntent/S/GTS_PDFA1` on LibreOffice 7.4 -- no code corrections needed.**
+**API now parses/validates/persists/echoes the opts form field end to end (fail-closed 422 before storage), and a live docker-compose run confirmed a real PDF/A-2b export carrying `/Type/OutputIntent/S/GTS_PDFA1` on LibreOffice 7.4 -- no code corrections needed. Checkpoint APPROVED by the user (2026-07-11); plan complete.**
 
 ## Performance
 
 - **Duration:** ~25 min (Tasks 1-2 implementation + live docker-compose acceptance run)
 - **Started:** 2026-07-11T02:04:00+03:00 (approx, first commit 02:05:06)
 - **Completed:** 2026-07-11T02:29:00+03:00 (approx, after live verification + teardown)
-- **Tasks:** 2 of 3 committed (Task 3 is a human-verify checkpoint; automated verification complete, awaiting sign-off)
+- **Tasks:** 3 of 3 complete (Tasks 1-2 committed; Task 3 human-verify checkpoint approved by the user on 2026-07-11)
 - **Files modified:** 3
 
 ## Accomplishments
@@ -84,7 +84,7 @@ Each completed task was committed atomically:
 
 1. **Task 1: Parse, validate, persist, and echo opts in the API layer** - `f5b44e9` (feat)
 2. **Task 2: Extend the E2E suite** - `75c328d` (test)
-3. **Task 3: Live acceptance (checkpoint:human-verify)** - automated verification complete (see matrix above); no code changes required; awaiting human sign-off before this plan/phase is marked fully done. No commit for this task since no files changed.
+3. **Task 3: Live acceptance (checkpoint:human-verify)** - COMPLETE. Automated verification passed (see matrix above), no code changes required, and the user typed "approved" on 2026-07-11 confirming the live PDF/A export (with OutputIntent marker), the opts 422s, and the no-opts regression are all satisfactory. No task commit since no source files changed; the approval is recorded in this SUMMARY's docs commit.
 
 **Plan metadata:** this SUMMARY committed separately (see final commit); STATE.md/ROADMAP.md are NOT touched by this worktree executor per orchestrator convention.
 
@@ -115,9 +115,17 @@ None - no external service configuration required. No new Go dependency (go.mod/
 ## Next Phase Readiness
 
 - OPTS-01 and OPTS-02 are both live-verified end to end: the API validates `opts` fail-closed before any S3 write, and a client can request PDF/A-2b for document->pdf and receive a real, OutputIntent-tagged PDF, confirmed against the deployed LibreOffice 7.4 engine.
-- This is the last plan of Phase 14. Once the checkpoint below is approved, Phase 14 is complete and the milestone can move to Phase 15 (HTML->PDF via chromium).
+- This is the last plan of Phase 14. The checkpoint is approved, so Phase 14 execution is complete and the milestone can move to Phase 15 (HTML->PDF via chromium) after phase verification.
 - No blockers. `go build ./...`, `go vet ./...`, and the full `go test ./...` suite are clean.
+
+## Checkpoint Approval
+
+**Task 3 (checkpoint:human-verify): APPROVED by the user on 2026-07-11.** The user confirmed the live PDF/A export (observed OutputIntent marker `/Type/OutputIntent/S/GTS_PDFA1/OutputConditionIdentifier(sRGB IEC61966-2.1)`), the opts 422s (inapplicable target + unknown key), and the no-opts document->pdf regression are all satisfactory. Plan 14-03 is complete.
 
 ---
 *Phase: 14-validated-conversion-options-pdf-a-export*
-*Completed: 2026-07-11 (Tasks 1-2 + Task 3 automated verification; awaiting human sign-off)*
+*Completed: 2026-07-11*
+
+## Self-Check: PASSED
+
+All modified files found on disk (internal/api/handlers.go, internal/api/handlers_test.go, internal/e2e/e2e_test.go, this SUMMARY.md); all task/summary commits (f5b44e9, 75c328d, f34558b) verified present in git log; no unintended file deletions across the plan's commit range.
