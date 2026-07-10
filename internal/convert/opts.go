@@ -3,7 +3,9 @@ package convert
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 )
 
 // pdfProfileA2b is the single accepted pdf_profile value today (D-01). Future
@@ -31,12 +33,18 @@ type DocOpts struct {
 }
 
 // ParseDocOpts strict-decodes raw JSON into a DocOpts and validates
-// PDFProfile against the closed allow-list. Unknown keys are rejected
-// (DisallowUnknownFields) so a client cannot smuggle an option this struct
-// doesn't know about; an out-of-allow-list pdf_profile value is rejected the
-// same way. An empty/absent pdf_profile ("{}" or missing key) is valid and
-// yields a zero DocOpts (opts are optional).
+// PDFProfile against the closed allow-list. Strict means exactly one
+// top-level JSON object (a bare `null` or any other non-object value is
+// rejected), no duplicate top-level keys (no silent "last wins"), no bytes
+// trailing the closing brace (checkStrictObject), and unknown keys are
+// rejected (DisallowUnknownFields) so a client cannot smuggle an option this
+// struct doesn't know about; an out-of-allow-list pdf_profile value is
+// rejected the same way. An empty/absent pdf_profile ("{}" or missing key)
+// is valid and yields a zero DocOpts (opts are optional).
 func ParseDocOpts(raw []byte) (DocOpts, error) {
+	if err := checkStrictObject(raw); err != nil {
+		return DocOpts{}, err
+	}
 	var o DocOpts
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -47,6 +55,54 @@ func ParseDocOpts(raw []byte) (DocOpts, error) {
 		return DocOpts{}, fmt.Errorf("unsupported pdf_profile %q", o.PDFProfile)
 	}
 	return o, nil
+}
+
+// checkStrictObject enforces the strictness properties json.Decoder.Decode
+// alone does not (WR-01): Decode reads only the FIRST JSON value and ignores
+// everything after it, accepts a top-level `null` as a valid zero struct, and
+// resolves duplicate keys as silent "last wins". This walk requires the input
+// to be exactly one top-level JSON object with unique top-level keys and
+// nothing but EOF after the closing brace, so a smuggled second object,
+// trailing garbage, or a rejected value resurrected by a duplicate key can
+// never slip past the parse boundary.
+func checkStrictObject(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("parse opts: %w", err)
+	}
+	if tok != json.Delim('{') {
+		return fmt.Errorf("parse opts: top-level value must be a JSON object")
+	}
+	seen := make(map[string]struct{})
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("parse opts: %w", err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("parse opts: object key is not a string")
+		}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("parse opts: duplicate key %q", key)
+		}
+		seen[key] = struct{}{}
+		// Consume the value (Decode reads exactly one value mid-object,
+		// including nested composites); the actual field decoding happens in
+		// ParseDocOpts, this walk only validates shape.
+		var discard json.RawMessage
+		if err := dec.Decode(&discard); err != nil {
+			return fmt.Errorf("parse opts: %w", err)
+		}
+	}
+	if _, err := dec.Token(); err != nil { // consume the closing '}'
+		return fmt.Errorf("parse opts: %w", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("parse opts: trailing data after JSON object")
+	}
+	return nil
 }
 
 // DocOptsFromMap round-trips a persisted map[string]any (job.Opts, already

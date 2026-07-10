@@ -235,6 +235,49 @@ func TestDocOptsInjectionResistance(t *testing.T) {
 	}
 }
 
+// TestParseDocOptsStrictness proves the parser rejects the laxities
+// json.Decoder.Decode alone would accept (review WR-01): trailing data after
+// the first JSON value (a smuggled second object or plain garbage), a
+// non-object top-level value (`null` decodes as a valid zero struct), and
+// duplicate keys (silent "last wins" would resurrect a rejected value) --
+// while valid inputs keep parsing exactly as before.
+func TestParseDocOptsStrictness(t *testing.T) {
+	rejected := []string{
+		// Trailing second object -- Decode would silently drop it.
+		`{"pdf_profile":"pdf/a-2b"}{"EncryptFile":true}`,
+		// Trailing garbage bytes.
+		`{"pdf_profile":"pdf/a-2b"} garbage`,
+		// Non-object top-level values -- `null` previously yielded a valid
+		// zero DocOpts.
+		`null`,
+		`"pdf/a-2b"`,
+		`[]`,
+		// Duplicate key, both orderings -- "last wins" must never resurrect
+		// a value the allow-list rejected.
+		`{"pdf_profile":"evil","pdf_profile":"pdf/a-2b"}`,
+		`{"pdf_profile":"pdf/a-2b","pdf_profile":"evil"}`,
+	}
+	for _, raw := range rejected {
+		if _, err := ParseDocOpts([]byte(raw)); err == nil {
+			t.Errorf("ParseDocOpts(%q) = nil error, want rejection", raw)
+		}
+	}
+
+	// Valid inputs are unaffected by the strictness checks.
+	o, err := ParseDocOpts([]byte(`{"pdf_profile":"pdf/a-2b"}`))
+	if err != nil || o.PDFProfile != pdfProfileA2b {
+		t.Errorf("ParseDocOpts(valid profile) = (%+v, %v), want pdf/a-2b, nil", o, err)
+	}
+	o, err = ParseDocOpts([]byte(`{}`))
+	if err != nil || o.PDFProfile != "" {
+		t.Errorf("ParseDocOpts({}) = (%+v, %v), want zero DocOpts, nil", o, err)
+	}
+	o, err = ParseDocOpts([]byte(" {\n  \"pdf_profile\": \"pdf/a-2b\"\n } \n"))
+	if err != nil || o.PDFProfile != pdfProfileA2b {
+		t.Errorf("ParseDocOpts(whitespace-padded valid profile) = (%+v, %v), want pdf/a-2b, nil", o, err)
+	}
+}
+
 // TestValidatePDFAOutputIntent proves D-05/D-06: a produced PDF that carries
 // the /GTS_PDFA OutputIntent marker passes validateDocumentOutput when PDF/A
 // was requested; one that lacks it fails with an "OutputIntent"-substring
