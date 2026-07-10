@@ -96,7 +96,10 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   1. `POST /v1/jobs` accepts an `opts` field validated against a closed allow-list (typed Go struct); any unrecognized or invalid opts value returns 422, and no client-supplied bytes reach the engine's CLI arguments or filter JSON verbatim (proven by a targeted injection-attempt test).
   2. A client can request a PDF/A-2b export for a document→pdf job via `opts`; the resulting PDF is live-verified to carry a PDF/A OutputIntent marker.
   3. Existing document→pdf jobs submitted without `opts` continue converting successfully with no regression — live e2e verified.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 14-01-PLAN.md — Persist opts: Job.Opts field + jobs.options jsonb round-trip (OPTS-01)
+- [ ] 14-02-PLAN.md — Closed DocOpts validation + server-constant PDF/A filter + OutputIntent check + worker threading + injection test (OPTS-01, OPTS-02)
+- [ ] 14-03-PLAN.md — API opts parse/validate/echo + live e2e acceptance (PDF/A export, 422s, no-opts regression) (OPTS-01, OPTS-02)
 
 ### Phase 15: HTML→PDF Chromium Engine
 **Goal**: HTML-файлы конвертируются в PDF через новый, полностью изолированный от сети (офлайн-рендеринг) третий engine-class, следующий паттерну engine-class из v1.2.
@@ -136,7 +139,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 11. API Routing & End-to-End Document Conversion | v1.2 | 4/4 | Complete | 2026-07-10 |
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 14. Validated Conversion Options & PDF/A Export | v1.3 | 0/TBD | Not started | - |
+| 14. Validated Conversion Options & PDF/A Export | v1.3 | 0/3 | Not started | - |
 | 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
