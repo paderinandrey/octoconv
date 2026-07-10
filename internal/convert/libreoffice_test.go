@@ -115,7 +115,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(odtPath, odtData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(odtPath, "odt"); err != nil {
+	if err := validateDocumentOutput(odtPath, "odt", false); err != nil {
 		t.Errorf("validateDocumentOutput(valid odt, %q) = %v, want nil", "odt", err)
 	}
 
@@ -124,7 +124,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(emptyPath, []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(emptyPath, "odt"); err == nil {
+	if err := validateDocumentOutput(emptyPath, "odt", false); err == nil {
 		t.Error("validateDocumentOutput(empty, \"odt\") = nil, want error")
 	} else if !strings.Contains(err.Error(), "output is empty") {
 		t.Errorf("validateDocumentOutput(empty) error = %v, want substring \"output is empty\"", err)
@@ -138,7 +138,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(wrongPath, docxData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(wrongPath, "odt"); err == nil {
+	if err := validateDocumentOutput(wrongPath, "odt", false); err == nil {
 		t.Error("validateDocumentOutput(docx-as-odt) = nil, want error")
 	} else if !strings.Contains(err.Error(), "output does not match expected container format") {
 		t.Errorf("validateDocumentOutput(mismatch) error = %v, want substring \"output does not match expected container format\"", err)
@@ -149,14 +149,14 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(pdfValidPath, []byte("%PDF-1.6\n%rest of content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(pdfValidPath, "pdf"); err != nil {
+	if err := validateDocumentOutput(pdfValidPath, "pdf", false); err != nil {
 		t.Errorf("validateDocumentOutput(valid pdf, \"pdf\") = %v, want nil", err)
 	}
 	pdfInvalidPath := filepath.Join(dir, "invalid.pdf")
 	if err := os.WriteFile(pdfInvalidPath, []byte("not a pdf"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(pdfInvalidPath, "pdf"); err == nil {
+	if err := validateDocumentOutput(pdfInvalidPath, "pdf", false); err == nil {
 		t.Error("validateDocumentOutput(non-pdf content, \"pdf\") = nil, want error")
 	}
 }

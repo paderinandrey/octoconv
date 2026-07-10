@@ -54,6 +54,10 @@ var terminalLibreOfficeSignatures = []string{
 	"no export filter for",
 	"output does not match expected container format",
 	"produced no output file",
+	// PDF/A OutputIntent marker missing on a requested pdf_profile export
+	// (D-05/D-06, phase 14): a mis-tagged output always fails the same
+	// check again, so it must never retry into a false "done".
+	"output missing pdf/a outputintent marker",
 }
 
 // isTerminal classifies a process() error as terminal (no retry can help:
@@ -249,6 +253,16 @@ func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) erro
 		return fmt.Errorf("load job %s: %w", jobID, err)
 	}
 
+	// Strict re-parse of the persisted opts (D-10): garbage in jobs.options
+	// is a terminal, not transient, failure -- a corrupt column value can
+	// never fix itself on retry. This is a strictness check only; the
+	// applicability/enum business rules already ran once, at the API layer
+	// (single source of validation truth), and are deliberately not
+	// duplicated here.
+	if _, err := convert.DocOptsFromMap(job.Opts); err != nil {
+		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
+	}
+
 	if err := h.repo.MarkActive(ctx, jobID); err != nil {
 		// Already active/done/canceled — let asynq drop it rather than loop.
 		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
@@ -409,7 +423,7 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 
-	if err := conv.Convert(attemptCtx, inPath, outPath, nil); err != nil {
+	if err := conv.Convert(attemptCtx, inPath, outPath, job.Opts); err != nil {
 		return fmt.Errorf("convert: %w", err)
 	}
 
