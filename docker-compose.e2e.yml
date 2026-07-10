@@ -18,6 +18,14 @@ services:
     environment:
       WEBHOOK_ALLOW_PRIVATE_IPS: "true"
       WEBHOOK_ALLOW_INSECURE_HTTP: "true"
+    # validateCallbackURL runs inside the api process at job-creation time
+    # (net.LookupHost), so api itself needs the host-gateway alias too — not
+    # just worker/document-worker which actually deliver the webhook (DEBT-01/
+    # WR-02). Without this, plain-Linux docker cannot resolve
+    # host.docker.internal and every callback_url is rejected with 400 before
+    # any conversion runs.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # worker delivers webhooks (HandleWebhookDeliver) — it is the process that
   # actually dials the E2E test's host-bound receiver.
