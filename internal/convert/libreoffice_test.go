@@ -86,6 +86,20 @@ func TestValidatePDF(t *testing.T) {
 	if err := validatePDF(wrongPath); err == nil {
 		t.Error("validatePDF(wrong magic) = nil, want error")
 	}
+
+	// A sub-magic-length file must surface as the terminal missing-magic
+	// signature, not a transient-looking "unexpected EOF" (D-04).
+	tinyPath := filepath.Join(dir, "tiny.pdf")
+	if err := os.WriteFile(tinyPath, []byte("%PD"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := validatePDF(tinyPath)
+	if err == nil {
+		t.Fatal("validatePDF(tiny) = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "output missing %PDF- magic bytes") {
+		t.Errorf("validatePDF(tiny) = %q, want the terminal missing-magic signature", err)
+	}
 }
 
 // TestValidateDocumentOutput mirrors TestValidatePDF's three-case shape for

@@ -53,6 +53,7 @@ var terminalLibreOfficeSignatures = []string{
 	"output is empty",
 	"no export filter for",
 	"output does not match expected container format",
+	"produced no output file",
 }
 
 // isTerminal classifies a process() error as terminal (no retry can help:

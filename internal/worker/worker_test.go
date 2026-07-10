@@ -59,6 +59,7 @@ func TestIsTerminalLibreOfficeSignatures(t *testing.T) {
 		"convert: libreoffice: output is empty",
 		"convert: libreoffice: no export filter for docx -> mp3",
 		"convert: libreoffice: output does not match expected container format odt",
+		"convert: libreoffice: produced no output file for \"odt\": stat /work/in.odt: no such file or directory",
 	}
 	for _, msg := range cases {
 		if !isTerminal(errors.New(msg)) {

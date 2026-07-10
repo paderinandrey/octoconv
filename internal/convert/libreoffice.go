@@ -81,6 +81,14 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 	// "in.<sourceFormat>", so the produced file is deterministically
 	// workDir/in.<targetFormat>. Rename it to the caller's outPath.
 	producedPath := filepath.Join(workDir, strings.TrimSuffix(filepath.Base(inPath), filepath.Ext(inPath))+"."+targetFormat)
+	// soffice's documented failure mode includes exiting 0 WITHOUT producing
+	// an output file (e.g. a refused/unknown export filter). That outcome is
+	// deterministic, so it must surface as a terminal-classified error
+	// ("produced no output file" is in terminalLibreOfficeSignatures), not
+	// the transient-looking rename ENOENT it would otherwise become (D-04).
+	if _, err := os.Stat(producedPath); err != nil {
+		return fmt.Errorf("libreoffice: produced no output file for %q: %v", targetFormat, err)
+	}
 	if err := os.Rename(producedPath, outPath); err != nil {
 		return fmt.Errorf("libreoffice: rename output: %w", err)
 	}
@@ -140,6 +148,12 @@ func validatePDF(path string) error {
 	}
 	if fi.Size() == 0 {
 		return fmt.Errorf("libreoffice: output is empty")
+	}
+	// A file shorter than the magic itself can never be a valid PDF; classify
+	// it as the terminal missing-magic case up front so the ReadFull below
+	// cannot surface it as a transient-looking "unexpected EOF" (D-04).
+	if fi.Size() < int64(len(pdfMagic)) {
+		return fmt.Errorf("libreoffice: output missing %%PDF- magic bytes")
 	}
 	f, err := os.Open(path)
 	if err != nil {
