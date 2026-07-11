@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Document Class v2
-status: executing
-stopped_at: Phase 15 context gathered
-last_updated: "2026-07-11T13:56:54.875Z"
+status: ready_to_plan
+stopped_at: Phase 15 complete (5/5) — ready to discuss Phase 16
+last_updated: 2026-07-11T16:59:34.601Z
 last_activity: 2026-07-11 -- Phase 15 execution started
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 12
-  completed_plans: 7
-  percent: 58
+  completed_plans: 12
+  percent: 60
 ---
 
 # Project State
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения и офисные документы) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 15 — html-pdf-chromium-engine
+**Current focus:** Phase 16 — webhook delivery decoupling
 
 ## Current Position
 
-Phase: 15 (html-pdf-chromium-engine) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 15
-Last activity: 2026-07-11 -- Phase 15 execution started
+Phase: 16
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-11
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 37 (all v1.0 + v1.1 + v1.2)
+- Total plans completed: 42 (all v1.0 + v1.1 + v1.2)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -56,7 +56,7 @@ Last activity: 2026-07-11 -- Phase 15 execution started
 | 12 | 1 | - | - |
 | 13 | 3 | - | - |
 | 14 | 3 | - | - |
-| 15 | TBD | - | - |
+| 15 | 5 | - | - |
 | 16 | TBD | - | - |
 
 **Recent Trend:**

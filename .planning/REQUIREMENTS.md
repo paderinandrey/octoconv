@@ -31,9 +31,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### HTML→PDF Engine
 
-- [ ] **HTML-01**: Клиент может конвертировать загруженный HTML-файл в PDF через отдельный chromium-based движок — третий engine-class: своя asynq-очередь, свой воркер-бинарник/контейнер, свой таймаут с terminal-классификацией (по шаблону document-класса v1.2; требует миграции CHECK-констрейнта `jobs.engine`)
-- [ ] **HTML-02**: HTML-рендеринг офлайн: движок не может фетчить внешние сетевые ресурсы, на которые ссылается HTML (SSRF-safe); входного режима URL-fetch не существует
-- [ ] **HTML-03**: Базовые print-опции (размер страницы, поля, printBackground) доступны через тот же validated-opts механизм, что и OPTS-01
+- [x] **HTML-01**: Клиент может конвертировать загруженный HTML-файл в PDF через отдельный chromium-based движок — третий engine-class: своя asynq-очередь, свой воркер-бинарник/контейнер, свой таймаут с terminal-классификацией (по шаблону document-класса v1.2; требует миграции CHECK-констрейнта `jobs.engine`)
+- [x] **HTML-02**: HTML-рендеринг офлайн: движок не может фетчить внешние сетевые ресурсы, на которые ссылается HTML (SSRF-safe); входного режима URL-fetch не существует
+- [x] **HTML-03**: Базовые print-опции (размер страницы, поля, printBackground) доступны через тот же validated-opts механизм, что и OPTS-01
 
 ### Webhook Reliability
 
@@ -77,9 +77,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SAFE-01 | Phase 13 | Complete |
 | OPTS-01 | Phase 14 | Complete |
 | OPTS-02 | Phase 14 | Complete |
-| HTML-01 | Phase 15 | Pending |
-| HTML-02 | Phase 15 | Pending |
-| HTML-03 | Phase 15 | Pending |
+| HTML-01 | Phase 15 | Complete |
+| HTML-02 | Phase 15 | Complete |
+| HTML-03 | Phase 15 | Complete |
 | WEBH-01 | Phase 16 | Pending |
 
 **Coverage:**
