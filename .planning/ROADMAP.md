@@ -127,7 +127,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   3. Exactly one reconciler-sweeper instance is active fleet-wide even with multiple webhook-consumer replicas running — no duplicate-sweep race — verified by topology design plus a live test.
 **Plans**: 4 plans
 - [x] 16-01-PLAN.md — Advisory-lock wrapper in reconciler (exactly-one-sweeper primitive) + unit tests
-- [ ] 16-02-PLAN.md — cmd/webhook-worker binary (with storage) + Dockerfile; remove webhook/sweeper from cmd/worker
+- [x] 16-02-PLAN.md — cmd/webhook-worker binary (with storage) + Dockerfile; remove webhook/sweeper from cmd/worker
 - [ ] 16-03-PLAN.md — Two named webhook-worker compose services + strip webhook env from image worker + .env.example
 - [ ] 16-04-PLAN.md — Live e2e acceptance (SC1/SC2/SC3) with human-verify checkpoint
 
@@ -150,7 +150,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 5/5 | Complete    | 2026-07-11 |
-| 16. Webhook Delivery Decoupling | v1.3 | 1/4 | In Progress|  |
+| 16. Webhook Delivery Decoupling | v1.3 | 2/4 | In Progress|  |
 
 ---
 
