@@ -43,12 +43,22 @@ type Client struct {
 	// comment for the worst-case-lifetime derivation this TTL must always
 	// exceed.
 	documentUniqueTTL time.Duration
+	// htmlMaxRetry is the per-task MaxRetry budget for html-to-pdf
+	// conversion tasks (HTML_MAX_RETRY, default 3 — mirrors
+	// documentMaxRetry's bounded-lower-than-image reasoning).
+	htmlMaxRetry int
+	// htmlUniqueTTL is the per-job asynq.Unique lock TTL for html-to-pdf
+	// conversion tasks, derived once at construction from htmlMaxRetry and
+	// HTML_ENGINE_TIMEOUT via HTMLUniqueTTL — see its doc comment for the
+	// worst-case-lifetime derivation this TTL must always exceed.
+	htmlUniqueTTL time.Duration
 }
 
 // NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
 // 4), ENGINE_TIMEOUT (default 120s — same env var the worker reads to bound
-// a conversion attempt), DOCUMENT_MAX_RETRY (default 3), and
-// DOCUMENT_ENGINE_TIMEOUT (default 300s — Phase 9 D-01).
+// a conversion attempt), DOCUMENT_MAX_RETRY (default 3),
+// DOCUMENT_ENGINE_TIMEOUT (default 300s — Phase 9 D-01), HTML_MAX_RETRY
+// (default 3), and HTML_ENGINE_TIMEOUT (default 60s).
 func NewClient() (*Client, error) {
 	opt, err := RedisOpt()
 	if err != nil {
@@ -58,6 +68,8 @@ func NewClient() (*Client, error) {
 	engineTimeout := envDuration("ENGINE_TIMEOUT", 120*time.Second)
 	documentMaxRetry := envInt("DOCUMENT_MAX_RETRY", 3)
 	documentEngineTimeout := envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second)
+	htmlMaxRetry := envInt("HTML_MAX_RETRY", 3)
+	htmlEngineTimeout := envDuration("HTML_ENGINE_TIMEOUT", 60*time.Second)
 	return &Client{
 		c:                 asynq.NewClient(opt),
 		imageMaxRetry:     imageMaxRetry,
@@ -65,6 +77,8 @@ func NewClient() (*Client, error) {
 		webhookUniqueTTL:  WebhookUniqueTTL(webhookMaxRetry, webhookPerAttemptTimeout),
 		documentMaxRetry:  documentMaxRetry,
 		documentUniqueTTL: DocumentUniqueTTL(documentMaxRetry, documentEngineTimeout),
+		htmlMaxRetry:      htmlMaxRetry,
+		htmlUniqueTTL:     HTMLUniqueTTL(htmlMaxRetry, htmlEngineTimeout),
 	}, nil
 }
 
@@ -104,6 +118,19 @@ func (c *Client) EnqueueDocumentConvert(ctx context.Context, jobID uuid.UUID) er
 	}
 	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
 		return fmt.Errorf("enqueue document convert %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// EnqueueHTMLConvert puts an html-to-pdf conversion job onto the html
+// queue.
+func (c *Client) EnqueueHTMLConvert(ctx context.Context, jobID uuid.UUID) error {
+	task, err := NewHTMLConvertTask(jobID, c.htmlMaxRetry, c.htmlUniqueTTL)
+	if err != nil {
+		return err
+	}
+	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
+		return fmt.Errorf("enqueue html convert %s: %w", jobID, err)
 	}
 	return nil
 }

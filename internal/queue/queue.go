@@ -20,17 +20,19 @@ const (
 	TypeImageConvert    = "image:convert"
 	TypeWebhookDeliver  = "webhook:deliver"
 	TypeDocumentConvert = "document:convert"
+	TypeHTMLConvert     = "html:convert"
 )
 
 // Queue names. asynq routes tasks to a queue per engine class so workers and
-// autoscaling can be scoped to a single class. QueueImage/QueueDocument are
-// tied to convert.EngineImage/EngineDocument (the single source of truth for
-// engine-class literals, DEBT-02) so queue names cannot drift from the
-// engine-class identifiers.
+// autoscaling can be scoped to a single class. QueueImage/QueueDocument/
+// QueueHTML are tied to convert.EngineImage/EngineDocument/EngineHTML (the
+// single source of truth for engine-class literals, DEBT-02) so queue names
+// cannot drift from the engine-class identifiers.
 const (
 	QueueImage    = convert.EngineImage
 	QueueWebhook  = "webhook"
 	QueueDocument = convert.EngineDocument
+	QueueHTML     = convert.EngineHTML
 )
 
 // ConvertPayload is the task payload. It carries only the job id — all task
@@ -93,6 +95,26 @@ func NewDocumentConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Durati
 	}
 	return asynq.NewTask(TypeDocumentConvert, b,
 		asynq.Queue(QueueDocument),
+		asynq.MaxRetry(maxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
+}
+
+// NewHTMLConvertTask builds an asynq task for an html-to-pdf conversion job,
+// routed to the html queue, bounded to maxRetry (HTML_MAX_RETRY), and
+// carrying a per-job asynq.Unique lock (uniqueTTL, see HTMLUniqueTTL) so a
+// second enqueue for the same jobID while the first task/lock is still live
+// collides on the same uniqueness key and returns asynq.ErrDuplicateTask
+// instead of creating a second concurrent task — mirrors
+// NewDocumentConvertTask exactly; reuses ConvertPayload/ParseConvertPayload
+// (no new payload type needed, all job detail is re-read from Postgres).
+func NewHTMLConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) (*asynq.Task, error) {
+	b, err := json.Marshal(ConvertPayload{JobID: jobID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal convert payload: %w", err)
+	}
+	return asynq.NewTask(TypeHTMLConvert, b,
+		asynq.Queue(QueueHTML),
 		asynq.MaxRetry(maxRetry),
 		asynq.Unique(uniqueTTL),
 	), nil
@@ -223,6 +245,32 @@ func DocumentRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 	return documentRetrySchedule[idx]
 }
 
+// htmlRetrySchedule is the backoff schedule for html-to-pdf conversion
+// retries: 5s, 15s, 30s — no jitter, mirroring documentRetrySchedule's shape
+// exactly (same rationale: a transient chromium render failure should be
+// retried a few times quickly, not ground through slowly, and there is no
+// shared external endpoint here that needs jitter to avoid a thundering
+// herd).
+var htmlRetrySchedule = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+}
+
+// HTMLRetryDelay is an asynq RetryDelayFunc for the html queue. Mirrors
+// DocumentRetryDelay's clamp-index-to-schedule-length shape exactly — NOT
+// WebhookRetryDelay's jittered shape.
+func HTMLRetryDelay(n int, e error, t *asynq.Task) time.Duration {
+	idx := n
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(htmlRetrySchedule) {
+		idx = len(htmlRetrySchedule) - 1
+	}
+	return htmlRetrySchedule[idx]
+}
+
 // RetryDelayFunc dispatches to a per-queue retry delay function based on the
 // task type. It fixes the confirmed defect where every queue silently
 // inherited WebhookRetryDelay via a single server-wide
@@ -238,6 +286,8 @@ func RetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 		return WebhookRetryDelay(n, e, t)
 	case TypeDocumentConvert:
 		return DocumentRetryDelay(n, e, t)
+	case TypeHTMLConvert:
+		return HTMLRetryDelay(n, e, t)
 	default:
 		return asynq.DefaultRetryDelayFunc(n, e, t)
 	}
@@ -331,6 +381,34 @@ func documentBackoffSum(maxRetry int) time.Duration {
 // retry lifetime.
 func DocumentUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + documentBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
+// htmlBackoffSum sums HTMLRetryDelay(i) for i in [0, maxRetry) — the total
+// backoff time asynq spends waiting before each of maxRetry retries,
+// clamped to the last schedule entry once i reaches len(htmlRetrySchedule).
+// Mirrors documentBackoffSum; safe to call HTMLRetryDelay directly since it
+// has no jitter (same reasoning as documentBackoffSum's doc comment).
+func htmlBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		sum += HTMLRetryDelay(i, nil, nil)
+	}
+	return sum
+}
+
+// HTMLUniqueTTL derives the per-job asynq.Unique lock TTL for html-to-pdf
+// conversion tasks from the actual retry budget (maxRetry, normally
+// HTML_MAX_RETRY) and the per-attempt bound (engineTimeout, normally
+// HTML_ENGINE_TIMEOUT), mirroring DocumentUniqueTTL's derivation exactly so
+// the lock can never silently drift under asynq's true worst-case retry
+// lifetime if either env var changes later.
+//
+// Worst-case formula: (maxRetry+1) * engineTimeout + htmlBackoffSum(maxRetry) + margin.
+// Same "(maxRetry+1) executions, not maxRetry" correction as
+// ImageUniqueTTL/DocumentUniqueTTL applies here. REUSES the shared
+// uniqueTTLSafetyMargin const verbatim — no html-specific margin constant.
+func HTMLUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*engineTimeout + htmlBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
 // webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter
