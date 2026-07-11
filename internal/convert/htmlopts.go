@@ -37,10 +37,17 @@ const (
 // print-to-pdf mode exposes no CLI flags for page geometry (RESEARCH.md
 // Pattern 1).
 type HTMLOpts struct {
-	PageSize        string `json:"page_size,omitempty"`
-	MarginMM        int    `json:"margin_mm,omitempty"`
-	Landscape       bool   `json:"landscape,omitempty"`
-	PrintBackground bool   `json:"print_background,omitempty"`
+	PageSize string `json:"page_size,omitempty"`
+	// MarginMM is a *int, not an int, so an unset margin (nil) is
+	// distinguishable from an explicit margin_mm:0. A nil MarginMM means the
+	// client requested no page margin at all, and buildPrintCSS omits the
+	// `margin` declaration entirely -- chromium's default print margin (and
+	// the client HTML's own `@page` margin) then applies, instead of being
+	// forced edge-to-edge. A non-nil pointer (including &0) is an explicit
+	// client request and is honored as `margin: Nmm !important` (WR-02/CR-03).
+	MarginMM        *int `json:"margin_mm,omitempty"`
+	Landscape       bool `json:"landscape,omitempty"`
+	PrintBackground bool `json:"print_background,omitempty"`
 }
 
 // ParseHTMLOpts strict-decodes raw JSON into an HTMLOpts and validates
@@ -65,8 +72,10 @@ func ParseHTMLOpts(raw []byte) (HTMLOpts, error) {
 			return HTMLOpts{}, fmt.Errorf("unsupported page_size %q", o.PageSize)
 		}
 	}
-	if o.MarginMM < htmlMarginMMMin || o.MarginMM > htmlMarginMMMax {
-		return HTMLOpts{}, fmt.Errorf("margin_mm %d out of range [%d,%d]", o.MarginMM, htmlMarginMMMin, htmlMarginMMMax)
+	// Range-check only when a margin was actually supplied; a nil MarginMM
+	// (no margin_mm key) is valid and means "unset", not "0".
+	if o.MarginMM != nil && (*o.MarginMM < htmlMarginMMMin || *o.MarginMM > htmlMarginMMMax) {
+		return HTMLOpts{}, fmt.Errorf("margin_mm %d out of range [%d,%d]", *o.MarginMM, htmlMarginMMMin, htmlMarginMMMax)
 	}
 	return o, nil
 }
@@ -128,7 +137,20 @@ func buildPrintCSS(o HTMLOpts) string {
 	if o.Landscape {
 		size += " landscape"
 	}
-	css := fmt.Sprintf("@page { size: %s !important; margin: %dmm !important; }\n", size, o.MarginMM)
+	// Emit the `margin` declaration ONLY when the client explicitly requested
+	// one (MarginMM non-nil). A no-opts / unset-margin job (nil) gets no
+	// `margin` at all, so chromium's default print margin and the client
+	// HTML's own `@page` margin are respected -- rather than being forced to
+	// a non-overridable `margin: 0mm !important` edge-to-edge default that a
+	// zero-value int would have produced (WR-02/CR-03). An explicit
+	// margin_mm:0 (MarginMM = &0) still emits `margin: 0mm !important`, so a
+	// client can deliberately ask for true edge-to-edge output.
+	var css string
+	if o.MarginMM != nil {
+		css = fmt.Sprintf("@page { size: %s !important; margin: %dmm !important; }\n", size, *o.MarginMM)
+	} else {
+		css = fmt.Sprintf("@page { size: %s !important; }\n", size)
+	}
 	if o.PrintBackground {
 		css += "*, *::before, *::after { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }\n"
 	} else {

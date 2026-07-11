@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -11,9 +12,28 @@ func TestParseHTMLOpts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseHTMLOpts: unexpected error: %v", err)
 		}
-		want := HTMLOpts{PageSize: "a4", MarginMM: 10, Landscape: true, PrintBackground: false}
-		if o != want {
-			t.Errorf("ParseHTMLOpts = %+v, want %+v", o, want)
+		if o.PageSize != "a4" || o.MarginMM == nil || *o.MarginMM != 10 || !o.Landscape || o.PrintBackground {
+			t.Errorf("ParseHTMLOpts = %+v (MarginMM=%v), want a4/10/landscape/no-bg", o, ptrVal(o.MarginMM))
+		}
+	})
+
+	t.Run("absent margin_mm leaves MarginMM nil (unset, not zero)", func(t *testing.T) {
+		o, err := ParseHTMLOpts([]byte(`{"page_size":"a4"}`))
+		if err != nil {
+			t.Fatalf("ParseHTMLOpts: unexpected error: %v", err)
+		}
+		if o.MarginMM != nil {
+			t.Errorf("ParseHTMLOpts with no margin_mm = MarginMM %v, want nil", ptrVal(o.MarginMM))
+		}
+	})
+
+	t.Run("explicit margin_mm:0 is preserved as non-nil zero", func(t *testing.T) {
+		o, err := ParseHTMLOpts([]byte(`{"margin_mm":0}`))
+		if err != nil {
+			t.Fatalf("ParseHTMLOpts: unexpected error: %v", err)
+		}
+		if o.MarginMM == nil || *o.MarginMM != 0 {
+			t.Errorf("ParseHTMLOpts with margin_mm:0 = %v, want non-nil 0", ptrVal(o.MarginMM))
 		}
 	})
 
@@ -81,9 +101,30 @@ func TestHTMLOptsFromMap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("HTMLOptsFromMap: unexpected error: %v", err)
 		}
-		want := HTMLOpts{PageSize: "letter", MarginMM: 5}
-		if o != want {
-			t.Errorf("HTMLOptsFromMap = %+v, want %+v", o, want)
+		if o.PageSize != "letter" || o.MarginMM == nil || *o.MarginMM != 5 {
+			t.Errorf("HTMLOptsFromMap = %+v (MarginMM=%v), want letter/5", o, ptrVal(o.MarginMM))
+		}
+	})
+
+	t.Run("persisted map without margin_mm re-parses to nil margin", func(t *testing.T) {
+		m := map[string]any{"page_size": "a4"}
+		o, err := HTMLOptsFromMap(m)
+		if err != nil {
+			t.Fatalf("HTMLOptsFromMap: unexpected error: %v", err)
+		}
+		if o.MarginMM != nil {
+			t.Errorf("HTMLOptsFromMap without margin_mm = MarginMM %v, want nil", ptrVal(o.MarginMM))
+		}
+	})
+
+	t.Run("persisted explicit margin_mm:0 re-parses to non-nil zero", func(t *testing.T) {
+		m := map[string]any{"margin_mm": float64(0)}
+		o, err := HTMLOptsFromMap(m)
+		if err != nil {
+			t.Fatalf("HTMLOptsFromMap: unexpected error: %v", err)
+		}
+		if o.MarginMM == nil || *o.MarginMM != 0 {
+			t.Errorf("HTMLOptsFromMap with margin_mm:0 = %v, want non-nil 0", ptrVal(o.MarginMM))
 		}
 	})
 
@@ -134,7 +175,7 @@ func TestValidateHTMLApplicability(t *testing.T) {
 	})
 
 	t.Run("non-empty opts on html->pdf accepted", func(t *testing.T) {
-		o := HTMLOpts{PageSize: "a4", MarginMM: 10}
+		o := HTMLOpts{PageSize: "a4", MarginMM: intPtr(10)}
 		if err := ValidateHTMLApplicability(EngineHTML, "html", "pdf", o); err != nil {
 			t.Errorf("ValidateHTMLApplicability(html,pdf) = %v, want nil", err)
 		}
@@ -143,7 +184,7 @@ func TestValidateHTMLApplicability(t *testing.T) {
 
 func TestBuildPrintCSS(t *testing.T) {
 	t.Run("only mapped constant present, no other size token", func(t *testing.T) {
-		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: 10})
+		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: intPtr(10)})
 		if !strings.Contains(css, "A4") {
 			t.Errorf("buildPrintCSS output %q does not contain mapped constant A4", css)
 		}
@@ -183,9 +224,36 @@ func TestBuildPrintCSS(t *testing.T) {
 	})
 
 	t.Run("every injected property carries !important", func(t *testing.T) {
-		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: 5, PrintBackground: true})
+		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: intPtr(5), PrintBackground: true})
 		if strings.Count(css, "!important") < 3 {
 			t.Errorf("buildPrintCSS output %q does not carry !important on every property", css)
+		}
+	})
+
+	t.Run("no-opts job omits the margin declaration entirely", func(t *testing.T) {
+		// A zero-value HTMLOpts (no client opts) must NOT force a
+		// `margin: 0mm !important` default -- it should emit no margin at all
+		// so chromium's default print margin / the client HTML's own @page
+		// margin is respected (WR-02/CR-03).
+		css := buildPrintCSS(HTMLOpts{})
+		if strings.Contains(css, "margin") {
+			t.Errorf("buildPrintCSS(no opts) = %q, want no margin declaration", css)
+		}
+	})
+
+	t.Run("explicit margin_mm:0 emits margin: 0mm !important", func(t *testing.T) {
+		// An explicit zero is a deliberate edge-to-edge request and must be
+		// honored, distinct from "unset".
+		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: intPtr(0)})
+		if !strings.Contains(css, "margin: 0mm !important") {
+			t.Errorf("buildPrintCSS(margin_mm:0) = %q, want 'margin: 0mm !important'", css)
+		}
+	})
+
+	t.Run("explicit margin_mm:15 emits margin: 15mm !important", func(t *testing.T) {
+		css := buildPrintCSS(HTMLOpts{PageSize: "a4", MarginMM: intPtr(15)})
+		if !strings.Contains(css, "margin: 15mm !important") {
+			t.Errorf("buildPrintCSS(margin_mm:15) = %q, want 'margin: 15mm !important'", css)
 		}
 	})
 
@@ -206,4 +274,16 @@ func TestBuildPrintCSS(t *testing.T) {
 			t.Errorf("buildPrintCSS leaked raw client bytes into CSS: %q", css)
 		}
 	})
+}
+
+// intPtr returns a pointer to v, for constructing HTMLOpts with an explicit
+// (non-nil) MarginMM in tests.
+func intPtr(v int) *int { return &v }
+
+// ptrVal renders a *int for test diagnostics: "nil" when unset, else the value.
+func ptrVal(p *int) string {
+	if p == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("%d", *p)
 }
