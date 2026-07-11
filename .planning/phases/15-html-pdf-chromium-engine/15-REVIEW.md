@@ -55,7 +55,7 @@ fix_commits:
 **Reviewed:** 2026-07-11
 **Depth:** standard
 **Files Reviewed:** 16
-**Status:** issues_found
+**Status:** resolved (CR-01/CR-02/CR-03 fixed; IN-01..IN-03 info-only, out of fix scope)
 
 ## Summary
 
