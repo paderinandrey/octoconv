@@ -62,6 +62,51 @@ func TestInjectPrintCSSWithHeadClose(t *testing.T) {
 	}
 }
 
+// TestInjectCSPFirstPrecedesInHeadScript is the CR-01 regression: the CSP
+// meta must be parsed BEFORE any <script> that lives in <head>, otherwise
+// that script executes before the script-blocking policy is installed
+// (defeating D-05). A <meta> CSP only governs content after it in source
+// order, so the CSP must be the first child of <head>.
+func TestInjectCSPFirstPrecedesInHeadScript(t *testing.T) {
+	original := []byte("<!doctype html>\n<html>\n<head>\n<script>fetch('http://169.254.169.254/')</script>\n<title>x</title>\n</head>\n<body>hi</body>\n</html>")
+	originalCopy := append([]byte(nil), original...)
+
+	got := injectCSPFirst(original, cspNoScriptMeta)
+
+	cspIdx := strings.Index(string(got), cspNoScriptMeta)
+	scriptIdx := strings.Index(string(got), "<script>")
+	if cspIdx < 0 {
+		t.Fatalf("injectCSPFirst output does not contain the CSP meta: %s", got)
+	}
+	if scriptIdx < 0 || cspIdx > scriptIdx {
+		t.Errorf("CSP meta must precede the in-head <script>: csp at %d, <script> at %d\n%s", cspIdx, scriptIdx, got)
+	}
+	// The CSP must land as the first child of <head> (after the opening tag).
+	headOpenEnd := strings.Index(string(got), "<head>") + len("<head>")
+	if cspIdx != headOpenEnd {
+		t.Errorf("CSP meta not injected as first child of <head>: csp at %d, expected %d", cspIdx, headOpenEnd)
+	}
+	if string(original) != string(originalCopy) {
+		t.Error("injectCSPFirst mutated its input html slice in place")
+	}
+}
+
+// TestInjectCSPFirstNoHeadFallsBackToHTMLOpen covers the no-<head> fallback:
+// the CSP still lands right after the opening <html> tag, ahead of body script.
+func TestInjectCSPFirstNoHeadFallsBackToHTMLOpen(t *testing.T) {
+	original := []byte("<html><body><script>x()</script>hi</body></html>")
+	got := injectCSPFirst(original, cspNoScriptMeta)
+	cspIdx := strings.Index(string(got), cspNoScriptMeta)
+	scriptIdx := strings.Index(string(got), "<script>")
+	if cspIdx < 0 || scriptIdx < 0 || cspIdx > scriptIdx {
+		t.Errorf("CSP meta must precede the script even with no <head>: csp at %d, <script> at %d\n%s", cspIdx, scriptIdx, got)
+	}
+	htmlOpenEnd := strings.Index(string(got), "<html>") + len("<html>")
+	if cspIdx != htmlOpenEnd {
+		t.Errorf("CSP meta not injected right after <html> open: csp at %d, expected %d", cspIdx, htmlOpenEnd)
+	}
+}
+
 func TestInjectPrintCSSCaseInsensitiveHeadClose(t *testing.T) {
 	original := []byte("<!DOCTYPE HTML><HTML><HEAD><TITLE>x</TITLE></HEAD><BODY>hi</BODY></HTML>")
 	css := "<style>marker</style>"

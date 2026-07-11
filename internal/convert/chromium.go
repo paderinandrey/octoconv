@@ -47,6 +47,7 @@ const cspNoScriptMeta = `<meta http-equiv="Content-Security-Policy" content="scr
 // Pattern 1).
 var (
 	headCloseTag   = []byte("</head>")
+	headOpenPrefix = []byte("<head")
 	htmlOpenPrefix = []byte("<html")
 )
 
@@ -72,6 +73,32 @@ func injectPrintCSS(html []byte, css string) []byte {
 		}
 	}
 	return spliceAt(html, 0, css)
+}
+
+// injectCSPFirst returns a NEW copy of html with csp inserted as the FIRST
+// child of <head> -- immediately after the opening "<head ...>" tag -- so
+// the CSP is parsed before any <script> that also lives in <head> (CR-01).
+// A <meta> CSP only governs content that appears AFTER it in source order;
+// injecting it right before </head> (as injectPrintCSS does for the print
+// style) would leave a head-preceding inline <script> to execute before the
+// policy is installed, defeating D-05's JS-disable. The print <style> stays
+// at end-of-head for cascade priority; only the CSP must lead. Fallbacks
+// mirror injectPrintCSS: after the opening "<html ...>" tag, else position 0
+// (LooksLikeHTML has already gated that one of these markers exists, D-07).
+func injectCSPFirst(html []byte, csp string) []byte {
+	lower := bytes.ToLower(html)
+
+	if idx := bytes.Index(lower, headOpenPrefix); idx >= 0 {
+		if end := bytes.IndexByte(html[idx:], '>'); end >= 0 {
+			return spliceAt(html, idx+end+1, csp)
+		}
+	}
+	if idx := bytes.Index(lower, htmlOpenPrefix); idx >= 0 {
+		if end := bytes.IndexByte(html[idx:], '>'); end >= 0 {
+			return spliceAt(html, idx+end+1, csp)
+		}
+	}
+	return spliceAt(html, 0, csp)
 }
 
 // spliceAt returns a new byte slice with css inserted into html at byte
@@ -106,14 +133,16 @@ func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, op
 	if err != nil {
 		return fmt.Errorf("chromium: read input: %w", err)
 	}
-	// buildPrintCSS is a server-constant string selected only by the
-	// already-validated HTMLOpts fields -- never built from raw client
-	// bytes (RESEARCH.md Pattern 1, Pitfall 9's lesson applied to CSS).
-	// cspNoScriptMeta is prepended so both injected blocks land together,
-	// immediately before </head> (or the injectPrintCSS fallback markers) --
-	// see cspNoScriptMeta's doc comment for why JS-disable moved from a
-	// launch flag to this injection point (Plan 04 live finding).
-	rendered := injectPrintCSS(input, cspNoScriptMeta+buildPrintCSS(o))
+	// Two separate injections with distinct anchors (CR-01): the CSP meta
+	// must be the FIRST child of <head> so it precedes any in-head <script>
+	// (a <meta> CSP only governs content parsed after it); the print <style>
+	// goes just before </head> for cascade priority. Both are server-constant
+	// strings selected only by already-validated HTMLOpts fields -- never
+	// built from raw client bytes (RESEARCH.md Pattern 1, Pitfall 9's lesson
+	// applied to CSS). See cspNoScriptMeta's doc comment for why JS-disable
+	// moved from a launch flag to this injection point (Plan 04 live finding).
+	rendered := injectCSPFirst(input, cspNoScriptMeta)
+	rendered = injectPrintCSS(rendered, buildPrintCSS(o))
 	renderedPath := filepath.Join(workDir, "rendered.html")
 	if err := os.WriteFile(renderedPath, rendered, 0o600); err != nil {
 		return fmt.Errorf("chromium: write rendered html: %w", err)
@@ -152,6 +181,14 @@ func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, op
 	// --print-to-pdf=<path> writes directly to outPath -- no rename step is
 	// needed (unlike soffice's --outdir convention in libreoffice.go).
 	// validatePDF is reused verbatim from libreoffice.go; target is always
-	// "pdf" for this engine, so no new validator is needed.
-	return validatePDF(outPath)
+	// "pdf" for this engine, so no new validator is needed. Wrap in a
+	// chromium: context so a failure here doesn't surface with a misleading
+	// bare "libreoffice:" prefix (CR-02); the terminal-signature substrings
+	// it emits ("output is empty", "output missing %PDF- magic bytes") are
+	// preserved inside the wrapped message, so isHTMLTerminal still classifies
+	// correctly via the shared terminalLibreOfficeSignatures list.
+	if err := validatePDF(outPath); err != nil {
+		return fmt.Errorf("chromium: %w", err)
+	}
+	return nil
 }
