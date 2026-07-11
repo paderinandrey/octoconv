@@ -167,6 +167,9 @@ func TestChromiumArgvContainsRequiredFlags(t *testing.T) {
 		`"--no-sandbox"`,
 		`"--disable-dev-shm-usage"`,
 		`"--no-pdf-header-footer"`,
+		// IN-02: chromium scratch/profile state pinned inside the per-job
+		// workDir so it lands within the caller's os.RemoveAll cleanup boundary.
+		`"--user-data-dir=" + profileDir`,
 		`"file://" + renderedPath`,
 	}
 	for _, want := range required {

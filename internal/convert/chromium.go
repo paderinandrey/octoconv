@@ -162,12 +162,22 @@ func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, op
 	// file:///workDir/rendered.html path and generation timestamp into
 	// every produced PDF (live-observed default-on behavior, not requested
 	// by any HTML-03 option).
+	//
+	// --user-data-dir pins chromium's profile/scratch/crash-dump state to a
+	// per-job directory INSIDE workDir (IN-02 hardening). Without it,
+	// chromium-headless-shell falls back to a $HOME-relative default, which
+	// under USER nobody is typically non-writable (/nonexistent); pinning it
+	// here guarantees all scratch state lands within the caller's
+	// os.RemoveAll(workDir) cleanup boundary -- no stray writes, no cross-job
+	// state. The value is a server-derived path (workDir), never client bytes.
+	profileDir := filepath.Join(workDir, "chrome-profile")
 	args := []string{
 		"--headless",
 		"--disable-gpu",
 		"--no-sandbox",
 		"--disable-dev-shm-usage",
 		"--no-pdf-header-footer",
+		"--user-data-dir=" + profileDir,
 		"--proxy-server=127.0.0.1:9",
 		"--proxy-bypass-list=<-loopback>",
 		"--host-resolver-rules=MAP * ~NOTFOUND",
