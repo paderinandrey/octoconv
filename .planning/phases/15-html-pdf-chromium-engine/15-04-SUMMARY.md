@@ -52,7 +52,7 @@ key-decisions:
   - "tini necessity (D-09) was NOT empirically demonstrated for this exact invocation shape: runCommand's precise kill pattern (SIGKILL to the whole process group via negative PGID) left zero zombie processes whether tini was PID 1 or not, across repeated live trials. tini is KEPT in Dockerfile.chromium-worker anyway (D-09's own stated bias, defense-in-depth, signal forwarding for graceful shutdown) -- no Dockerfile change made, finding recorded honestly in PROJECT.md rather than silently assumed."
   - "jobs_engine_check migration's assumed constraint name confirmed correct against a live Postgres (item 0): no migration change needed."
 
-requirements-completed: []  # Checkpoint pending human sign-off -- see below; not marked complete until Task 2's checkpoint is approved.
+requirements-completed: [HTML-01, HTML-02]
 
 # Metrics
 duration: 95min
@@ -61,14 +61,14 @@ completed: 2026-07-11
 
 # Phase 15 Plan 04: chromium-worker Container + Live Smoke Checklist Summary
 
-**Third engine-class container (chromium-worker) built and live-tested against the real chromium-headless-shell 150.0.7871.100 binary; two load-bearing RESEARCH.md assumptions (JS-disable via launch flag, print_background via CSS hint) were found broken and corrected in place with live-verified working mechanisms, pending human checkpoint sign-off.**
+**Third engine-class container (chromium-worker) built and live-tested against the real chromium-headless-shell 150.0.7871.100 binary; two load-bearing RESEARCH.md assumptions (JS-disable via launch flag, print_background via CSS hint) were found broken and corrected in place with live-verified working mechanisms — checkpoint approved by user 2026-07-11.**
 
 ## Performance
 
 - **Duration:** ~95 min (includes live docker build + 8-item smoke checklist + code corrections)
 - **Started:** 2026-07-11T14:20:00Z
-- **Completed:** 2026-07-11T14:47:00Z (Task 2's automatable portion; checkpoint still pending)
-- **Tasks:** 2 (Task 1 complete; Task 2's automation complete, human sign-off pending)
+- **Completed:** 2026-07-11T14:47:00Z (checkpoint approved by user 2026-07-11)
+- **Tasks:** 2 (both complete — Task 2's checkpoint approved by user)
 - **Files modified:** 11 (2 created, 9 modified)
 
 ## Accomplishments
@@ -159,21 +159,29 @@ See `key-decisions` in frontmatter above — all six are live-verified findings 
 ## User Setup Required
 None - no external service configuration required for the automated portion. Everything needed (docker, postgres, the built image) was already available in the environment.
 
+## Checkpoint Approval
+
+**Task 2 (`checkpoint:human-verify`, `gate="blocking-human"`) — APPROVED by user 2026-07-11.**
+
+The two live-verified deviations were explicitly accepted:
+- CSP `<meta script-src 'none'>` for JS-disable, replacing the non-working `--blink-settings=scriptEnabled=false` launch flag.
+- Forced `background:none` override for `print_background=false`, replacing the non-honored `print-color-adjust` CSS hint.
+
+Both stay within the locked HTML/CSS-injection architecture (Pattern 1) with zero new dependencies and no CDP/chromedp escalation. The `file://` accepted-residual-risk and tini-kept-as-defense-in-depth framings recorded in `PROJECT.md` were also accepted. Plan 05 (e2e canary test, full acceptance) is unblocked.
+
 ## Next Phase Readiness
 
-**This plan is NOT complete.** Task 2 is a `checkpoint:human-verify` (`gate="blocking-human"`) that has NOT been self-approved, per this plan's own instructions. All automatable smoke-checklist work is done, findings are recorded above, and live-verified corrections are committed. What remains for the human:
+Plan is complete. Ready for Plan 05:
 
-1. **Review the two significant mechanism corrections** (CSP-based JS-disable, forced-background-suppression) — these are live-verified working, but they are a genuine deviation from RESEARCH.md's originally-specified launch-flag mechanism and warrant explicit sign-off given D-05's security criticality.
-2. **Confirm the accepted-residual-risk framing** for `file://` reads and the tini-necessity finding recorded in `PROJECT.md`.
-3. Approve to unblock Plan 05 (e2e canary test, full acceptance), or flag any of the above for further work.
-
+- The chromium-worker container topology exists as the third engine class; all Go-layer corrections are committed and tested.
 - `go build ./...`, `go vet ./...`, `go test ./...` all pass on the corrected code.
 - `docker compose config` validates both compose files with the new `chromium-worker` service.
 - The image builds and `chromium-headless-shell --version` runs (`Chromium 150.0.7871.100`).
+- Plan 05 owns the full e2e canary test (positive zero-hits proof), the live `.htm` end-to-end upload, and the phase acceptance.
 
 ---
 *Phase: 15-html-pdf-chromium-engine*
-*Completed: pending checkpoint approval*
+*Completed: 2026-07-11 (checkpoint approved)*
 
 ## Self-Check: PASSED
 
