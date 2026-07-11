@@ -45,6 +45,7 @@ requirements-completed: [HTML-01, HTML-02, HTML-03]
 # Metrics
 duration: 70min
 completed: 2026-07-11
+status: complete
 ---
 
 # Phase 15 Plan 05: Live E2E Acceptance (html→pdf Chromium Engine) Summary
@@ -55,8 +56,8 @@ completed: 2026-07-11
 
 - **Duration:** ~70 min (2 auto tasks + full live acceptance run)
 - **Started:** 2026-07-11T16:15:00Z
-- **Completed:** 2026-07-11T16:37:00Z (automated portion; checkpoint pending)
-- **Tasks:** 3 (2 auto tasks complete + committed; Task 3 checkpoint automated-verification complete, awaiting human approval)
+- **Completed:** 2026-07-11T16:37:00Z (automated portion); checkpoint approved by user 2026-07-11
+- **Tasks:** 3 (all complete — Task 3's checkpoint:human-verify APPROVED by user 2026-07-11)
 - **Files modified:** 4 (3 fixtures created, 1 test file modified)
 
 ## Accomplishments
@@ -76,7 +77,7 @@ Each auto task was committed atomically; Task 3 is the checkpoint (no code commi
 
 1. **Task 1: E2E fixtures + happy-path + print-opts round-trip + non-HTML rejection tests** - `725e708` (test)
 2. **Task 2: Canary network-block test — startCanaryReceiver + TestHTMLNetworkBlockE2E** - `c82172f` (test)
-3. **Task 3 (checkpoint, automated-verification portion): live acceptance run against a freshly built stack** - documented in this SUMMARY; no separate commit (operational verification only, no code changes)
+3. **Task 3 (checkpoint:human-verify, APPROVED by user 2026-07-11): live acceptance run against a freshly built stack** - documented in this SUMMARY; no separate code commit (operational verification only, no code changes)
 
 **Plan metadata:** (this SUMMARY.md commit)
 
@@ -115,13 +116,29 @@ None for the automated portion — the live stack was built and torn down entire
 
 All four Phase 15 success criteria plus the D-07 input-safety check are live-verified against a freshly built stack. The pre-existing document-engine E2E suite (Phases 9-14) was re-run on the same fresh stack with no regression.
 
+## Checkpoint Approval
+
+**Task 3 (`checkpoint:human-verify`, `gate="blocking"`) — APPROVED by user 2026-07-11.**
+
+All four success criteria were accepted against the fresh-stack evidence:
+- **SC1** — html routing end-to-end + `engine='html'` in Postgres + `.htm` alias confirmed.
+- **SC2** — network-block canary recorded zero hits across all vectors (external IP, loopback, compose hosts, `file://`) while the job completed.
+- **SC3** — print-opts round-trip (page_size `/MediaBox` width difference a4=594.96pt vs a5=420pt; print_background variants both valid).
+- **SC4** — `HTML_ENGINE_TIMEOUT` expiry classified terminal (single `active→failed` transition, no retry storm).
+
+The two honest notes were acknowledged as non-blocking:
+- The per-IP rate limiter tripping mid-full-suite was incidental to manual `curl` diagnostics run in the same window, not a plan defect; the HTML tests pass cleanly on their own.
+- The narrower `file://` text-file (`/etc/hostname`) observation is distinct from Plan 04's image-file residual-risk finding and is recorded honestly, not conflated.
+
+Plan 15-05 is complete; Phase 15's live-acceptance bar is closed at 4/4 success criteria.
+
 ## Next Phase Readiness
 
-Automated verification is complete and committed. **Task 3's `checkpoint:human-verify` gate is NOT self-approved** — per this plan's explicit instruction ("Do NOT self-approve") and the project's checkpoint protocol, human sign-off is required before this plan (and Phase 15) can be marked complete. See the CHECKPOINT REACHED block returned alongside this SUMMARY for the exact review points and resume signal.
+Plan is complete. Phase 15 (html→pdf chromium engine) is fully live-verified end-to-end: the third engine class routes, converts, network-blocks, honors print options, and classifies timeouts terminal — all proven against a freshly built docker-compose stack, not by code review. The milestone (v1.3) can advance to its remaining scope (Phase 16 webhook-decoupling, WEBH-01) and eventual close. Orchestrator owns STATE.md/ROADMAP.md/REQUIREMENTS.md updates.
 
 ---
 *Phase: 15-html-pdf-chromium-engine*
-*Automated verification completed: 2026-07-11 (checkpoint pending human approval)*
+*Completed: 2026-07-11 (checkpoint approved by user)*
 
 ## Self-Check: PASSED
 
