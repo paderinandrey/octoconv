@@ -110,7 +110,12 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
   2. HTML referencing an external network resource (e.g. an `<img src>` pointing at an attacker-controlled or internal/metadata address) does not result in any network fetch during conversion — proven by a live test that demonstrates the render is network-blocked, not asserted by code review alone.
   3. A client can set page size, margins, and `printBackground` via the same validated-opts mechanism as Phase 14, and the resulting PDF reflects the requested options.
   4. HTML→PDF conversion is bounded by its own engine timeout, classified terminal on expiry (per the document-engine timeout pattern), and runs inside its own dedicated worker binary/container.
-**Plans**: TBD
+**Plans**: 5 plans (waves 1→5, mostly sequential; live-verify smoke checklist in wave 4, live e2e acceptance in wave 5)
+- [ ] 15-01-PLAN.md — Engine-class foundation: jobs.engine CHECK migration + EngineHTML const + htm→html alias + queue/client/api/reconciler scaffolding (HTML-01)
+- [ ] 15-02-PLAN.md — Converter + validated print-opts (CSS @page injection, not CLI flags) + fail-closed HTML sniff + injection tests (HTML-02, HTML-03)
+- [ ] 15-03-PLAN.md — Worker handler (terminal-timeout) + API HTML-detect/opts-dispatch/routing + MIMEType (HTML-01, HTML-02, HTML-03)
+- [ ] 15-04-PLAN.md — Container topology (Dockerfile.chromium-worker, cmd/chromium-worker, compose) + live Verify-Live Smoke Checklist against real chromium binary (HTML-01, HTML-02)
+- [ ] 15-05-PLAN.md — Live E2E acceptance: end-to-end + network-block canary (external/loopback/file://) + print-opts round-trip + timeout-terminal + non-HTML 422 (HTML-01, HTML-02, HTML-03)
 
 ### Phase 16: Webhook Delivery Decoupling
 **Goal**: Webhook-доставка результата переживает отсутствие или падение любого одного engine-воркер-процесса — деплой любого подмножества воркеров больше не может молча терять вебхуки.
@@ -140,9 +145,9 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 15. HTML→PDF Chromium Engine | v1.3 | 0/TBD | Not started | - |
+| 15. HTML→PDF Chromium Engine | v1.3 | 0/5 | Not started | - |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
 ---
 
-*Next: run `/gsd:plan-phase 12` to plan the first v1.3 phase.*
+*Next: run `/gsd:execute-phase 15` to execute the HTML→PDF Chromium Engine phase.*
