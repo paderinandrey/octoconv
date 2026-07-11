@@ -1,0 +1,20 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/webhook-worker ./cmd/webhook-worker
+
+# Runtime stage: webhook delivery is a pure HTTP client + Postgres/Redis/S3
+# consumer — no conversion engine, no engine CLI tooling of any kind. The
+# minio S3 client used for presigning download URLs is a Go client compiled
+# into the binary, not a system package, so nothing extra is needed here.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/webhook-worker /usr/local/bin/webhook-worker
+USER nobody
+ENTRYPOINT ["/usr/local/bin/webhook-worker"]
