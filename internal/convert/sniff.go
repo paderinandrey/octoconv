@@ -125,6 +125,8 @@ func MIMEType(format string) string {
 		return "application/vnd.oasis.opendocument.spreadsheet"
 	case "odp":
 		return "application/vnd.oasis.opendocument.presentation"
+	case "html":
+		return "text/html"
 	default:
 		return "application/octet-stream"
 	}

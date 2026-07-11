@@ -1199,3 +1199,218 @@ func TestGetJob_SameClient_OK(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// --- html engine tests (Plan 03: HTML-01/02/03) ---
+
+// htmlFixture returns a small, genuinely-HTML document (valid UTF-8, no NUL,
+// starts with <!doctype html> after trimming) that convert.LooksLikeHTML
+// accepts.
+func htmlFixture() []byte {
+	return []byte("<!doctype html><html><head></head><body><p>hello</p></body></html>")
+}
+
+// TestCreateJob_HTMLDetectedAndAccepted proves a valid .html upload targeting
+// pdf is detected (fail-closed content check, D-07), routed to the html
+// engine, and enqueued via EnqueueHTMLConvert (not any other queue).
+func TestCreateJob_HTMLDetectedAndAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBody(t, "in.html", "pdf", htmlFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if !store.uploaded {
+		t.Error("must upload a valid html upload")
+	}
+	if store.contentType != "text/html" {
+		t.Errorf("contentType = %q, want text/html", store.contentType)
+	}
+	if repo.created == nil {
+		t.Fatal("must create job for a valid html -> pdf conversion")
+	}
+	if repo.created.SourceFormat != "html" || repo.created.TargetFormat != "pdf" {
+		t.Errorf("job format = %s -> %s, want html -> pdf", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if repo.created.Engine != "html" {
+		t.Errorf("job Engine = %q, want html", repo.created.Engine)
+	}
+	if queue.enqueuedHTML != repo.createdID {
+		t.Errorf("enqueuedHTML = %s, want %s", queue.enqueuedHTML, repo.createdID)
+	}
+	if queue.enqueuedDocument != uuid.Nil {
+		t.Errorf("enqueuedDocument = %s, want uuid.Nil (html upload must never touch the document queue)", queue.enqueuedDocument)
+	}
+	if queue.enqueuedImage != uuid.Nil {
+		t.Errorf("enqueuedImage = %s, want uuid.Nil (html upload must never touch the image queue)", queue.enqueuedImage)
+	}
+}
+
+// TestCreateJob_HTMExtensionAliasAccepted proves the htm->html NormalizeFormat
+// alias (Plan 01) lets a .htm-named upload with genuine HTML content route
+// the same way a .html-named upload does.
+func TestCreateJob_HTMExtensionAliasAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBody(t, "in.htm", "pdf", htmlFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.SourceFormat != "html" {
+		t.Fatalf("must create job with SourceFormat=html for a .htm upload, got %+v", repo.created)
+	}
+}
+
+// TestCreateJob_HTMLContentRejected proves a .html-named upload whose content
+// fails LooksLikeHTML (binary/non-HTML content masquerading as html, T-15-09)
+// is rejected 422 BEFORE any storage write -- fail-closed, D-07.
+func TestCreateJob_HTMLContentRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	// Binary garbage, NOT valid HTML text (contains NUL bytes).
+	garbage := []byte{0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE, 0x00, 0x00}
+	body, ct := multipartBody(t, "in.html", "pdf", garbage)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload content that fails the HTML content check")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for content that fails the HTML content check")
+	}
+}
+
+// TestCreateJob_HTMLOptsAccepted verifies a valid page_size/margin_mm/
+// landscape/print_background opts payload is validated, persisted
+// (normalized), and echoed in the response (HTML-03).
+func TestCreateJob_HTMLOptsAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.html", "pdf", htmlFixture(), `{"page_size":"a4","margin_mm":10,"landscape":true,"print_background":true}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil {
+		t.Fatal("must create job for a valid html opts payload")
+	}
+	if repo.created.Opts["page_size"] != "a4" {
+		t.Errorf("CreateParams.Opts = %+v, want page_size=a4", repo.created.Opts)
+	}
+	var resp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	optsResp, ok := resp["opts"].(map[string]any)
+	if !ok || optsResp["page_size"] != "a4" {
+		t.Errorf("response opts = %v, want echoed page_size=a4", resp["opts"])
+	}
+}
+
+// TestCreateJob_HTMLOptsUnknownFieldRejected verifies an unknown opts field
+// on an html job is rejected 422 before storage.
+func TestCreateJob_HTMLOptsUnknownFieldRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.html", "pdf", htmlFixture(), `{"unknown_field":true}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an unknown-key html opts value")
+	}
+}
+
+// TestCreateJob_HTMLOptsMarginOutOfRangeRejected verifies an out-of-range
+// margin_mm value on an html job is rejected 422 before storage.
+func TestCreateJob_HTMLOptsMarginOutOfRangeRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.html", "pdf", htmlFixture(), `{"margin_mm":9999}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for an out-of-range margin_mm value")
+	}
+}
+
+// TestCreateJob_DocumentOptsOnHTMLRejected verifies a document-only opts
+// value (pdf_profile) requested on an html job is rejected 422 -- proves the
+// engine-keyed opts dispatch does not accidentally accept DocOpts fields on
+// an html conversion (HTML-03).
+func TestCreateJob_DocumentOptsOnHTMLRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.html", "pdf", htmlFixture(), `{"pdf_profile":"pdf/a-2b"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts validation")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a document opts value (pdf_profile) on an html job")
+	}
+}
