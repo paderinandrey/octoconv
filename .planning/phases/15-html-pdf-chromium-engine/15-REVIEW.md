@@ -25,10 +25,25 @@ findings:
   warning: 2
   info: 3
   total: 6
-status: issues_found
+status: resolved
+fix_commits:
+  CR-01: b-fixed  # CSP injected as first head child (injectCSPFirst) + 2 regression tests
+  CR-02: b-fixed  # chromium PDF-validation errors wrapped in chromium: context
+  CR-03: deferred # forced margin:0 default — needs opts-presence design; changing it regresses approved live-verified SC3 output
 ---
 
 # Phase 15: Code Review Report
+
+> **Fix outcomes (2026-07-11):** CR-01 (BLOCKER) and CR-02 (WARNING) fixed in
+> commit `dd`-range this phase — `injectCSPFirst` places the CSP as the first
+> child of `<head>` so it precedes any in-head `<script>` (D-05 restored),
+> with two regression tests; chromium PDF-validation failures now wrap in a
+> `chromium:` context. CR-03 (WARNING, forced `margin:0 !important` default)
+> is DEFERRED: distinguishing "margin unset" from "margin=0" needs an
+> HTMLOpts presence-flag design change, and altering the injected margin CSS
+> now would regress the print-opts output already live-verified and
+> user-approved at the 15-05 acceptance checkpoint — tracked as a fast-follow.
+> Info findings (IN-01..IN-03) left as-is (out of Critical+Warning fix scope).
 
 **Reviewed:** 2026-07-11
 **Depth:** standard
