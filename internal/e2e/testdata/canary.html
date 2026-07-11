@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OctoConv HTML Network-Block Canary Fixture</title>
+</head>
+<body>
+<h1>Network-Block Canary</h1>
+<p>This fixture deliberately references external, loopback, compose-host, and
+file:// targets to prove HTML-02's network containment live (RESEARCH.md
+Pattern 2/3, D-04). {{.BaseURL}} is the test-time canary receiver address
+(host.docker.internal-reachable); every other reference below is a literal
+adversarial target, not templated.</p>
+
+<!-- Canary receiver (host.docker.internal at test time) -- both an <img>
+     subresource load and a JS fetch() (inert since JS is off per D-05, kept
+     as defense-in-depth per the plan's own instruction). -->
+<img src="{{.BaseURL}}/canary-img" alt="canary-img">
+<script>fetch('{{.BaseURL}}/canary-fetch');</script>
+
+<!-- External IP literal (cloud metadata endpoint, Pitfall 11 -- IP literals
+     never touch the host resolver, so this specifically exercises the
+     --proxy-server dead-port flag, not --host-resolver-rules). -->
+<img src="http://169.254.169.254/canary-metadata" alt="metadata">
+
+<!-- Loopback literals (Pattern 2 -- exercises --proxy-bypass-list=<-loopback>,
+     the required third flag closing Chrome's default loopback-bypass gap). -->
+<img src="http://127.0.0.1:9/canary-loopback-ip" alt="loopback-ip">
+<img src="http://localhost:9/canary-loopback-host" alt="loopback-host">
+
+<!-- Compose-network internal hostnames (D-04). -->
+<img src="http://redis:6379/canary-redis" alt="redis">
+<img src="http://postgres:5432/canary-postgres" alt="postgres">
+
+<!-- file:// exfiltration attempt (Pattern 3 -- Plan 04's recorded residual-risk
+     finding: passive subresource loads via file:// are NOT blocked by the
+     proxy/resolver flags, since file:// never touches the network stack
+     those flags govern; active fetch()/XHR to file:// IS separately blocked
+     by Chromium itself). -->
+<img src="file:///etc/hostname" alt="file-exfil">
+
+</body>
+</html>

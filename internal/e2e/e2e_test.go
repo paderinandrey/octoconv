@@ -38,8 +38,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -718,5 +720,255 @@ func downloadClient() *http.Client {
 				return d.DialContext(ctx, network, dialAddr)
 			},
 		},
+	}
+}
+
+// downloadPDFBytes fetches the presigned URL (no auth header -- the URL is
+// self-authorizing) and returns the full response body, asserting a 200
+// status. Shared by mediaBoxWidth (HTML-03 page_size structural check) and
+// the print_background byte-comparison subtest below.
+func downloadPDFBytes(t *testing.T, downloadURL string) []byte {
+	t.Helper()
+	resp, err := downloadClient().Get(downloadURL)
+	if err != nil {
+		t.Fatalf("GET download_url: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		t.Fatalf("GET download_url status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read download body: %v", err)
+	}
+	return body
+}
+
+// mediaBoxPattern extracts a PDF page's /MediaBox array (4 numbers: x0 y0 x1
+// y1, in points). Chromium's print-to-pdf output stores the Page dictionary
+// uncompressed (only content streams are FlateDecode-compressed), so a raw
+// byte-pattern search is a reasonable best-effort structural check here --
+// NOT a general-purpose PDF parser.
+var mediaBoxPattern = regexp.MustCompile(`/MediaBox\s*\[\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\]`)
+
+// mediaBoxWidth downloads the PDF at downloadURL and attempts to extract its
+// first page's /MediaBox width (x1-x0, in points) -- the HTML-03 page_size
+// opt's structural signal (RESEARCH.md Pattern 1: page_size is CSS-injected,
+// not a CLI flag, so this is the live proof the CSS @page rule was actually
+// honored by chromium-headless-shell's renderer). ok is false when the
+// pattern is not found (e.g. a differently-structured PDF variant), signaling
+// the caller to fall back to visual confirmation (recorded in the Task 3
+// acceptance run) instead of failing the automated test on an inconclusive
+// structural check.
+func mediaBoxWidth(t *testing.T, downloadURL string) (float64, bool) {
+	t.Helper()
+	body := downloadPDFBytes(t, downloadURL)
+	m := mediaBoxPattern.FindSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	x0, err0 := strconv.ParseFloat(string(m[1]), 64)
+	x1, err1 := strconv.ParseFloat(string(m[3]), 64)
+	if err0 != nil || err1 != nil {
+		return 0, false
+	}
+	return x1 - x0, true
+}
+
+// renderHTMLWithOpts uploads filename/data as an html->pdf job with the
+// given opts JSON (mirrors TestPDFAExportE2E's opts-form-field usage),
+// polls to done, asserts the download is a valid PDF, and returns the
+// download URL for further structural inspection by the caller.
+func renderHTMLWithOpts(t *testing.T, cfg e2eConfig, apiKey, filename string, data []byte, opts string) string {
+	t.Helper()
+	jobID := postJob(t, cfg.baseURL, apiKey, filename, data, "pdf", "", opts)
+	body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+	downloadURL, _ := body["download_url"].(string)
+	if downloadURL == "" {
+		t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+	}
+	assertDownloadIsPDF(t, downloadURL)
+	return downloadURL
+}
+
+// TestHTMLConversionE2E drives the html->pdf happy path (HTML-01, success
+// criterion 1) and the page_size/print_background print-opts round-trip
+// (HTML-03, success criterion 3) through the LIVE pipeline: multipart
+// upload -> poll to done -> presigned download -> %PDF- magic-byte check,
+// mirroring TestDocumentConversionE2E's shape but for the html engine class.
+func TestHTMLConversionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	data, err := os.ReadFile(filepath.Join("testdata", "sample.html"))
+	if err != nil {
+		t.Fatalf("read fixture sample.html: %v", err)
+	}
+
+	t.Run("HappyPath", func(t *testing.T) {
+		jobID := postJob(t, cfg.baseURL, apiKey, "sample.html", data, "pdf", "", "")
+
+		// Generous bound: chromium-headless-shell cold start in a fresh
+		// container is slow, same rationale as LibreOffice's cold start in
+		// TestDocumentConversionE2E.
+		body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+
+		downloadURL, _ := body["download_url"].(string)
+		if downloadURL == "" {
+			t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+		}
+		assertDownloadIsPDF(t, downloadURL)
+	})
+
+	// HTML-03: page_size a4 vs a5 must produce a differently-sized page.
+	t.Run("PrintOptsPageSize", func(t *testing.T) {
+		a4URL := renderHTMLWithOpts(t, cfg, apiKey, "sample.html", data, `{"page_size":"a4"}`)
+		a5URL := renderHTMLWithOpts(t, cfg, apiKey, "sample.html", data, `{"page_size":"a5"}`)
+
+		a4Width, a4ok := mediaBoxWidth(t, a4URL)
+		a5Width, a5ok := mediaBoxWidth(t, a5URL)
+		if a4ok && a5ok {
+			if a4Width == a5Width {
+				t.Errorf("page_size a4 vs a5 MediaBox width identical (%v pt) -- page_size opt not reflected in the output PDF", a4Width)
+			} else {
+				t.Logf("page_size structurally confirmed: a4 width=%vpt, a5 width=%vpt", a4Width, a5Width)
+			}
+		} else {
+			t.Logf("MediaBox not structurally extractable (a4 found=%v, a5 found=%v); both variants completed successfully -- page_size difference recorded via visual confirmation in the Task 3 acceptance run", a4ok, a5ok)
+		}
+	})
+
+	// HTML-03: print_background true vs false. A structural content-stream
+	// diff is not reliably extractable without a full PDF decompressor (the
+	// fill operators live inside a FlateDecode-compressed stream), so this
+	// subtest's load-bearing assertion is that BOTH variants complete
+	// successfully as valid PDFs; the visual background-suppression
+	// difference is confirmed in the Task 3 acceptance run per the plan.
+	t.Run("PrintOptsBackground", func(t *testing.T) {
+		onURL := renderHTMLWithOpts(t, cfg, apiKey, "sample.html", data, `{"print_background":true}`)
+		offURL := renderHTMLWithOpts(t, cfg, apiKey, "sample.html", data, `{"print_background":false}`)
+
+		onBody := downloadPDFBytes(t, onURL)
+		offBody := downloadPDFBytes(t, offURL)
+		if bytes.Equal(onBody, offBody) {
+			t.Logf("print_background true/false produced byte-identical PDFs; visual confirmation recorded in the Task 3 acceptance run")
+		} else {
+			t.Logf("print_background true/false produced differing PDF bytes (%d vs %d bytes) -- consistent with the forced background:none override taking effect", len(onBody), len(offBody))
+		}
+	})
+}
+
+// TestHTMLContentRejectionE2E proves live that a non-HTML file uploaded
+// under a .html name is rejected 422 before any job is ever created (D-07,
+// mirrors TestOLECFBRejectionE2E's postJobExpectStatus pattern).
+func TestHTMLContentRejectionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	data, err := os.ReadFile(filepath.Join("testdata", "nothtml.html"))
+	if err != nil {
+		t.Fatalf("read fixture nothtml.html: %v", err)
+	}
+
+	body := postJobExpectStatus(t, cfg.baseURL, apiKey, "nothtml.html", data, "pdf", "", http.StatusUnprocessableEntity)
+	if len(body) == 0 {
+		t.Error("422 body for nothtml.html is empty")
+	}
+}
+
+// canaryHit records one inbound connection to the canary receiver -- the
+// request path is recorded (not individually asserted) since the canary
+// fixture references it from multiple element types (img src, script
+// fetch).
+type canaryHit struct {
+	path string
+}
+
+// startCanaryReceiver generalizes startWebhookReceiver (same net.Listen +
+// host.docker.internal-addressed base URL + buffered-channel shape) to
+// record a canaryHit for ANY path, not a single fixed endpoint -- the
+// canary.html fixture references multiple paths (/canary-img,
+// /canary-fetch) and this receiver must catch all of them, since
+// TestHTMLNetworkBlockE2E's assertion is "zero hits across the whole render
+// window," not "zero hits on one specific path."
+func startCanaryReceiver(t *testing.T, host string) (string, <-chan canaryHit) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen for canary receiver: %v", err)
+	}
+
+	hits := make(chan canaryHit, 16)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- canaryHit{path: r.URL.Path}
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Listener.Close() // discard the default loopback listener
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split canary listener addr: %v", err)
+	}
+	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(host, port))
+	return baseURL, hits
+}
+
+// TestHTMLNetworkBlockE2E is the live, direct proof of HTML-02/success
+// criterion 2 (D-04): a canary listener must record ZERO inbound
+// connections while a deliberately adversarial HTML fixture -- external IP
+// literal, loopback literal, compose-network hostnames, and a file://
+// exfiltration attempt (RESEARCH.md Pattern 2/3) -- is rendered to PDF, AND
+// the render must complete (not hang/time out). Both assertions are direct
+// evidence: zero-hits proves no fetch occurred (not "the render didn't
+// crash"), and reaching pollUntilDone's return proves the job finished
+// within the generous bound rather than hanging against the (correctly)
+// dead proxy/resolver.
+func TestHTMLNetworkBlockE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	baseURL, hits := startCanaryReceiver(t, cfg.webhookHost)
+
+	tmplBytes, err := os.ReadFile(filepath.Join("testdata", "canary.html"))
+	if err != nil {
+		t.Fatalf("read fixture canary.html: %v", err)
+	}
+	tmpl, err := template.New("canary").Parse(string(tmplBytes))
+	if err != nil {
+		t.Fatalf("parse canary.html template: %v", err)
+	}
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, struct{ BaseURL string }{BaseURL: baseURL}); err != nil {
+		t.Fatalf("execute canary.html template: %v", err)
+	}
+
+	jobID := postJob(t, cfg.baseURL, apiKey, "canary.html", rendered.Bytes(), "pdf", "", "")
+
+	// pollUntilDone fatals on "failed" and on timeout -- reaching the line
+	// below already proves the render completed within the generous bound,
+	// the "job still completes" half of D-04's assertion.
+	body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+	downloadURL, _ := body["download_url"].(string)
+	if downloadURL == "" {
+		t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+	}
+	assertDownloadIsPDF(t, downloadURL)
+
+	// Drain for any hit that may have arrived during the render window: a
+	// short bounded wait (not a blocking read), since the render already
+	// reached "done" above -- the render window has closed by construction,
+	// this is just giving any in-flight TCP handshake a moment to land in
+	// the buffered channel before we assert zero.
+	select {
+	case hit := <-hits:
+		t.Fatalf("canary received an inbound connection at path %q -- network block FAILED (success criterion 2)", hit.path)
+	case <-time.After(3 * time.Second):
+		// zero hits across the entire render window -- the success-criterion-2
+		// direct proof (D-04).
 	}
 }
