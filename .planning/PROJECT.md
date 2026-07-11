@@ -60,7 +60,7 @@ OctoConv — внутренний асинхронный сервис конве
 - [x] Кросс-конвертация внутри документного класса (docx↔odt, xlsx↔ods, pptx↔odp) через существующие API/очереди/воркер — Phase 13, live e2e verified
 - [x] Запароленные/legacy OLE-CFB документы отклоняются с 422 на входе, до конвертации — Phase 13, live verified (оба под-случая)
 - [x] Клиент может запросить PDF/A-вариант экспорта через `opts` (закрытый allowlist, injection-тест, OutputIntent live-verified) — Phase 14 (OPTS-01, OPTS-02), verified 9/9
-- [ ] HTML→PDF через отдельный chromium-based движок (третий engine-class) с собственной safety-моделью
+- [x] HTML→PDF через отдельный chromium-based движок (третий engine-class): офлайн-рендеринг (сеть заблокирована слоями CLI, доказано живым canary — ноль соединений), JS выключен через CSP-инъекцию, print-опции через validated-opts Phase 14 — Phase 15 (HTML-01/02/03), verified 4/4 + security 14/14 SECURED
 - [ ] Webhook-доставка работает при деплое любого подмножества engine-воркеров
 - [x] Tech debt v1.0–v1.2 закрыт (WR-02/03/04, gofmt, docker-compose audit) — Phase 12, verified 5/5
 
@@ -135,4 +135,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-11 after Phase 14 completion (validated opts + PDF/A export)*
+*Last updated: 2026-07-11 after Phase 15 completion (HTML→PDF chromium engine)*
