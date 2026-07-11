@@ -89,13 +89,15 @@ services:
       API_KEY_SALT: "dev-only-change-me-in-real-deploys"
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
-      # queue.NewClient() (constructed by cmd/api/main.go) reads these four
-      # vars UNCONDITIONALLY, even though the api process only enqueues (it
+      # queue.NewClient() (constructed by cmd/api/main.go) reads these vars
+      # UNCONDITIONALLY, even though the api process only enqueues (it
       # never runs the engine) -- DEBT-05.
       IMAGE_MAX_RETRY: "4"
       ENGINE_TIMEOUT: "120s"
       DOCUMENT_MAX_RETRY: "3"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
+      HTML_MAX_RETRY: "3"
+      HTML_ENGINE_TIMEOUT: "60s"
       STORAGE_TTL: "168h"
       METRICS_ADDR: "127.0.0.1:9090"
       # WEBHOOK_ALLOW_PRIVATE_IPS / WEBHOOK_ALLOW_INSECURE_HTTP: deliberately
@@ -131,10 +133,12 @@ services:
       ENGINE_TIMEOUT: "120s"
       IMAGE_MAX_RETRY: "4"
       # queue.NewClient() (constructed by cmd/worker/main.go) also reads the
-      # document-side retry/timeout vars unconditionally, even though this
-      # process only runs the image engine (DEBT-05).
+      # document-side and html-side retry/timeout vars unconditionally, even
+      # though this process only runs the image engine (DEBT-05).
       DOCUMENT_MAX_RETRY: "3"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
+      HTML_MAX_RETRY: "3"
+      HTML_ENGINE_TIMEOUT: "60s"
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
       WEBHOOK_PRESIGN_TTL: "6h"
       RECONCILER_QUEUED_STALE_AFTER: "90s"
@@ -172,12 +176,14 @@ services:
       DOCUMENT_WORKER_CONCURRENCY: "2"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
       # queue.NewClient() (constructed by cmd/document-worker/main.go) also
-      # reads the image-side retry/timeout vars and DOCUMENT_MAX_RETRY
-      # unconditionally, even though this process only runs the document
-      # engine (DEBT-05).
+      # reads the image-side and html-side retry/timeout vars and
+      # DOCUMENT_MAX_RETRY unconditionally, even though this process only
+      # runs the document engine (DEBT-05).
       IMAGE_MAX_RETRY: "4"
       ENGINE_TIMEOUT: "120s"
       DOCUMENT_MAX_RETRY: "3"
+      HTML_MAX_RETRY: "3"
+      HTML_ENGINE_TIMEOUT: "60s"
       # document-worker only PRODUCES webhook-delivery tasks; signing happens
       # in cmd/worker's HandleWebhookDeliver (internal/worker/worker.go). These
       # two vars are read at startup (cmd/document-worker/main.go) but are
@@ -191,6 +197,57 @@ services:
         limits:
           cpus: "2.0"
           memory: 1g
+
+  chromium-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.chromium-worker
+    container_name: octoconv-chromium-worker
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://octo:octo-pass@postgres:5432/octo_db
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: octoconv
+      S3_USE_SSL: "false"
+      HTML_WORKER_CONCURRENCY: "2"
+      HTML_ENGINE_TIMEOUT: "60s"
+      HTML_MAX_RETRY: "3"
+      # queue.NewClient() (constructed by cmd/chromium-worker/main.go) also
+      # reads the image-side and document-side retry/timeout vars
+      # unconditionally, even though this process only runs the html engine
+      # (DEBT-05).
+      IMAGE_MAX_RETRY: "4"
+      ENGINE_TIMEOUT: "120s"
+      DOCUMENT_MAX_RETRY: "3"
+      DOCUMENT_ENGINE_TIMEOUT: "300s"
+      # chromium-worker only PRODUCES webhook-delivery tasks; signing happens
+      # in cmd/worker's HandleWebhookDeliver (internal/worker/worker.go).
+      # These two vars are read at startup but are currently inert here --
+      # wired for parity/explicitness, same DEBT-05 rationale as
+      # document-worker's own block above.
+      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
+      WEBHOOK_PRESIGN_TTL: "6h"
+      METRICS_ADDR: "127.0.0.1:9090"
+    # /dev/shm sizing as a belt-and-suspenders compensating control
+    # alongside the --disable-dev-shm-usage argv flag (D-09/Pitfall C) --
+    # some Chromium internal code paths still touch /dev/shm even with that
+    # flag set.
+    shm_size: "256m"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
 
   # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
   # only, never 0.0.0.0 — no auth layer needed since it's unreachable outside

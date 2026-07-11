@@ -36,3 +36,11 @@ services:
   document-worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # chromium-worker needs the host-gateway alias for the Plan 04/05
+  # network-block canary test (D-04) — the canary receiver runs in the Go
+  # E2E test process on the host, reachable at host.docker.internal from
+  # inside the compose network.
+  chromium-worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
