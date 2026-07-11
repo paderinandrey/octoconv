@@ -4,8 +4,8 @@ milestone: v1.3
 milestone_name: Document Class v2
 status: executing
 stopped_at: Phase 16 context gathered
-last_updated: "2026-07-11T20:41:07.613Z"
-last_activity: 2026-07-11 -- Phase 16 planning complete
+last_updated: "2026-07-11T21:11:49.535Z"
+last_activity: 2026-07-11 -- Phase 16 execution started
 progress:
   total_phases: 5
   completed_phases: 4
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения и офисные документы) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 16 — webhook delivery decoupling
+**Current focus:** Phase 16 — webhook-delivery-decoupling
 
 ## Current Position
 
-Phase: 16
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-11 -- Phase 16 planning complete
+Phase: 16 (webhook-delivery-decoupling) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 16
+Last activity: 2026-07-11 -- Phase 16 execution started
 
 ## Performance Metrics
 
