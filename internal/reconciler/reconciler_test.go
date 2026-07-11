@@ -86,6 +86,8 @@ type fakeEnqueuer struct {
 	enqueueWebhookErr  error
 	enqueueDocumentErr error
 	documentCalls      []uuid.UUID
+	enqueueHTMLErr     error
+	htmlCalls          []uuid.UUID
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
@@ -101,6 +103,11 @@ func (f *fakeEnqueuer) EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) 
 func (f *fakeEnqueuer) EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error {
 	f.documentCalls = append(f.documentCalls, id)
 	return f.enqueueDocumentErr
+}
+
+func (f *fakeEnqueuer) EnqueueHTMLConvert(ctx context.Context, id uuid.UUID) error {
+	f.htmlCalls = append(f.htmlCalls, id)
+	return f.enqueueHTMLErr
 }
 
 func testConfig() Config {
@@ -153,6 +160,34 @@ func TestSweepRoutesDocumentJobsToDocumentQueue(t *testing.T) {
 	}
 	if len(enq.imageCalls) != 0 {
 		t.Fatalf("EnqueueImageConvert should not be called for a document job, got %d calls", len(enq.imageCalls))
+	}
+	if store.requeueStaleCalls != 1 {
+		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
+	}
+	if len(store.markFailedCalls) != 0 {
+		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+func TestSweepRoutesHTMLJobsToHTMLQueue(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "html"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.htmlCalls) != 1 || enq.htmlCalls[0] != id {
+		t.Fatalf("EnqueueHTMLConvert calls = %+v, want [%s]", enq.htmlCalls, id)
+	}
+	if len(enq.imageCalls) != 0 {
+		t.Fatalf("EnqueueImageConvert should not be called for an html job, got %d calls", len(enq.imageCalls))
+	}
+	if len(enq.documentCalls) != 0 {
+		t.Fatalf("EnqueueDocumentConvert should not be called for an html job, got %d calls", len(enq.documentCalls))
 	}
 	if store.requeueStaleCalls != 1 {
 		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
