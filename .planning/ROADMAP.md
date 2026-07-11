@@ -113,7 +113,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 **Plans**: 5 plans (waves 1→5, mostly sequential; live-verify smoke checklist in wave 4, live e2e acceptance in wave 5)
 - [x] 15-01-PLAN.md — Engine-class foundation: jobs.engine CHECK migration + EngineHTML const + htm→html alias + queue/client/api/reconciler scaffolding (HTML-01)
 - [x] 15-02-PLAN.md — Converter + validated print-opts (CSS @page injection, not CLI flags) + fail-closed HTML sniff + injection tests (HTML-02, HTML-03)
-- [ ] 15-03-PLAN.md — Worker handler (terminal-timeout) + API HTML-detect/opts-dispatch/routing + MIMEType (HTML-01, HTML-02, HTML-03)
+- [x] 15-03-PLAN.md — Worker handler (terminal-timeout) + API HTML-detect/opts-dispatch/routing + MIMEType (HTML-01, HTML-02, HTML-03)
 - [ ] 15-04-PLAN.md — Container topology (Dockerfile.chromium-worker, cmd/chromium-worker, compose) + live Verify-Live Smoke Checklist against real chromium binary (HTML-01, HTML-02)
 - [ ] 15-05-PLAN.md — Live E2E acceptance: end-to-end + network-block canary (external/loopback/file://) + print-opts round-trip + timeout-terminal + non-HTML 422 (HTML-01, HTML-02, HTML-03)
 
@@ -145,7 +145,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 12. Tech Debt Cleanup | v1.3 | 1/1 | Complete    | 2026-07-10 |
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
-| 15. HTML→PDF Chromium Engine | v1.3 | 2/5 | In Progress|  |
+| 15. HTML→PDF Chromium Engine | v1.3 | 3/5 | In Progress|  |
 | 16. Webhook Delivery Decoupling | v1.3 | 0/TBD | Not started | - |
 
 ---
