@@ -120,6 +120,11 @@ func TestIsTerminalChromiumSignatures(t *testing.T) {
 	cases := []string{
 		"convert: chromium: output missing %PDF- magic bytes",
 		"convert: chromium: output is empty",
+		// Live-observed (Plan 04): chromium-headless-shell can exit 0 while
+		// writing no output file at all; validatePDF's os.Stat failure
+		// surfaces as "chromium: stat output: stat <path>: no such file or
+		// directory".
+		"convert: chromium: stat output: stat /work/out.pdf: no such file or directory",
 	}
 	for _, msg := range cases {
 		if !isTerminal(errors.New(msg)) {

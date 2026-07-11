@@ -22,6 +22,26 @@ func (ChromiumConverter) Pairs() []Pair {
 // Engine reports the html engine class (D-01).
 func (ChromiumConverter) Engine() string { return EngineHTML }
 
+// cspNoScriptMeta is a server-constant meta tag (never client-controlled)
+// that disables script execution via a strict Content-Security-Policy
+// (D-05). Plan 04's live smoke checklist found that chromium-headless-shell
+// 150.0.7871.100's launch-time --blink-settings=scriptEnabled=false flag
+// makes the one-shot --print-to-pdf/--dump-dom command handler silently
+// produce NO output at all (exit 0, no file written) -- confirmed
+// reproducible on both a script-bearing and a script-free fixture, so this
+// is not "JS-heavy pages fail," it is a hard incompatibility between that
+// flag and the one-shot command handler in this build. The documented
+// alternative flag, --disable-javascript, was also live-tested and found to
+// be a no-op (a <script>document.write(...)</script> fixture still executed
+// and its output appeared in --dump-dom's DOM). This CSP meta tag, injected
+// into the SAME worker-built copy of the HTML that already carries the
+// print CSS (Pattern 1's injection point), was live-verified to block
+// script execution (document.write's effect was absent from --dump-dom
+// output) while leaving --print-to-pdf fully functional -- it is the
+// mechanism this converter uses to satisfy D-05, in place of the
+// launch-time flag RESEARCH.md originally specified.
+const cspNoScriptMeta = `<meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'">`
+
 // headCloseTag and htmlOpenPrefix are the case-insensitive markers
 // injectPrintCSS searches for to place the print CSS block (RESEARCH.md
 // Pattern 1).
@@ -64,11 +84,12 @@ func spliceAt(html []byte, at int, css string) []byte {
 	return out
 }
 
-// Convert builds a CSS-injected copy of inPath (never mutating inPath
+// Convert builds a CSS+CSP-injected copy of inPath (never mutating inPath
 // itself, mirroring LibreOfficeConverter's never-touch-inPath discipline)
 // and invokes chromium-headless-shell's one-shot print-to-pdf mode against
 // that copy, with the layered network-block flags (D-03) and JS disabled
-// (D-05). ctx must carry the engine timeout.
+// via the injected CSP meta tag (D-05, see cspNoScriptMeta). ctx must carry
+// the engine timeout.
 func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, opts map[string]any) error {
 	workDir := filepath.Dir(outPath) // caller's per-job workDir; already unique, already cleaned up
 
@@ -88,24 +109,41 @@ func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, op
 	// buildPrintCSS is a server-constant string selected only by the
 	// already-validated HTMLOpts fields -- never built from raw client
 	// bytes (RESEARCH.md Pattern 1, Pitfall 9's lesson applied to CSS).
-	rendered := injectPrintCSS(input, buildPrintCSS(o))
+	// cspNoScriptMeta is prepended so both injected blocks land together,
+	// immediately before </head> (or the injectPrintCSS fallback markers) --
+	// see cspNoScriptMeta's doc comment for why JS-disable moved from a
+	// launch flag to this injection point (Plan 04 live finding).
+	rendered := injectPrintCSS(input, cspNoScriptMeta+buildPrintCSS(o))
 	renderedPath := filepath.Join(workDir, "rendered.html")
 	if err := os.WriteFile(renderedPath, rendered, 0o600); err != nil {
 		return fmt.Errorf("chromium: write rendered html: %w", err)
 	}
 
-	// flags verify-live-confirmed in Plan 04 smoke checklist
+	// flags verify-live-confirmed in Plan 04 smoke checklist. Notably
+	// ABSENT: --blink-settings=scriptEnabled=false (live-tested to make the
+	// one-shot command handler silently produce no output at all -- see
+	// cspNoScriptMeta) and --disable-javascript (live-tested no-op, does not
+	// actually disable script execution in this build). JS-disable is
+	// instead enforced via the injected CSP meta tag above. --headless is
+	// live-confirmed optional-but-harmless for the standalone shell binary
+	// (kept for explicitness); --no-sandbox is live-confirmed REQUIRED under
+	// USER nobody (D-08) -- omitting it fails with "No usable sandbox!".
+	// --no-pdf-header-footer suppresses chromium's default print
+	// header/footer, which otherwise leaks the internal
+	// file:///workDir/rendered.html path and generation timestamp into
+	// every produced PDF (live-observed default-on behavior, not requested
+	// by any HTML-03 option).
 	args := []string{
 		"--headless",
 		"--disable-gpu",
 		"--no-sandbox",
 		"--disable-dev-shm-usage",
-		"--blink-settings=scriptEnabled=false",
+		"--no-pdf-header-footer",
 		"--proxy-server=127.0.0.1:9",
 		"--proxy-bypass-list=<-loopback>",
 		"--host-resolver-rules=MAP * ~NOTFOUND",
 		"--print-to-pdf=" + outPath,
-		"file://" + renderedPath, // NOT inPath -- renderedPath carries the injected print CSS
+		"file://" + renderedPath, // NOT inPath -- renderedPath carries the injected print CSS + CSP
 	}
 	if err := runCommand(ctx, "chromium-headless-shell", args...); err != nil {
 		return fmt.Errorf("chromium: %w", err)

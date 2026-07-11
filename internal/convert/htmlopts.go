@@ -132,7 +132,18 @@ func buildPrintCSS(o HTMLOpts) string {
 	if o.PrintBackground {
 		css += "*, *::before, *::after { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }\n"
 	} else {
-		css += "*, *::before, *::after { -webkit-print-color-adjust: economy !important; print-color-adjust: economy !important; }\n"
+		// print-color-adjust: economy is kept as the spec-correct hint for
+		// other renderers, but Plan 04's live smoke checklist (item 3)
+		// found chromium-headless-shell 150.0.7871.100's one-shot
+		// --print-to-pdf path does NOT honor it -- a red background div
+		// still printed under economy in a live test. The forced
+		// background/background-color/background-image overrides below are
+		// the live-verified mechanism that actually suppresses printed
+		// backgrounds in this binary (still server-constant text selected
+		// only by the validated PrintBackground bool, same invariant as
+		// every other buildPrintCSS branch).
+		css += "*, *::before, *::after { -webkit-print-color-adjust: economy !important; print-color-adjust: economy !important; " +
+			"background: none !important; background-color: transparent !important; background-image: none !important; }\n"
 	}
 	return "<style>" + css + "</style>"
 }

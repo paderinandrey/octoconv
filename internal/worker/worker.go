@@ -66,19 +66,29 @@ var terminalLibreOfficeSignatures = []string{
 }
 
 // terminalChromiumSignatures are lowercased error-message substrings that
-// indicate a deterministically-unrecoverable html->pdf conversion. Only the
-// validatePDF-reused strings ("output is empty", "output missing %pdf-
-// magic bytes" -- internal/convert/chromium.go reuses validatePDF verbatim
-// from libreoffice.go, so those two carry over unchanged) are seeded here;
-// no genuinely chromium-specific stderr text is included yet.
-//
-// TODO(plan-04): append LIVE-captured chromium stderr signatures -- do not
-// guess (RESEARCH.md Open Question 2). This project's established
-// convention (see terminalVipsSignatures above) is to populate this list
-// only from real, observed stderr output.
+// indicate a deterministically-unrecoverable html->pdf conversion. Verified
+// live-tested (Plan 04 smoke checklist, debian:bookworm-slim +
+// chromium-headless-shell 150.0.7871.100):
+//   - "output is empty" / "output missing %pdf- magic bytes" -- carried
+//     over unchanged; internal/convert/chromium.go reuses validatePDF
+//     verbatim from libreoffice.go, so these two error strings apply
+//     identically to a corrupt/empty chromium-produced PDF.
+//   - "stat output" -- validatePDF's os.Stat failure branch
+//     (fmt.Errorf("libreoffice: stat output: %w", err)) fires when
+//     --print-to-pdf writes NO file at all. Live-observed directly during
+//     the smoke checklist's item 2 investigation: chromium-headless-shell
+//     can exit 0 while silently producing zero output for a render that
+//     never completes the print-to-pdf command handler (originally
+//     triggered by the since-removed --blink-settings=scriptEnabled=false
+//     flag, but the underlying "exit 0, no output file" failure mode is a
+//     property of the one-shot command handler itself, not exclusive to
+//     that one flag) -- classifying it terminal prevents burning the full
+//     HTML_MAX_RETRY budget on a render that will deterministically produce
+//     no output again on retry.
 var terminalChromiumSignatures = []string{
 	"output is empty",
 	"output missing %pdf- magic bytes",
+	"stat output",
 }
 
 // isTerminal classifies a process() error as terminal (no retry can help:
