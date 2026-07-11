@@ -115,3 +115,49 @@ func TestIsDocumentTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestIsTerminalChromiumSignatures(t *testing.T) {
+	cases := []string{
+		"convert: chromium: output missing %PDF- magic bytes",
+		"convert: chromium: output is empty",
+	}
+	for _, msg := range cases {
+		if !isTerminal(errors.New(msg)) {
+			t.Fatalf("expected isTerminal(%q) = true", msg)
+		}
+	}
+}
+
+func TestIsHTMLTerminal(t *testing.T) {
+	// An HTML_ENGINE_TIMEOUT expiry (exec.go's process-group-kill shape,
+	// preserved through chromium.go and process()'s %w wrapping) IS terminal
+	// for the html engine — HTML-01's deliberate divergence, mirroring
+	// isDocumentTerminal's DOC-08 shape.
+	timeoutErr := fmt.Errorf("convert: %w", fmt.Errorf("chromium-headless-shell killed: %w", context.DeadlineExceeded))
+	if !isHTMLTerminal(timeoutErr) {
+		t.Fatal("expected isHTMLTerminal(wrapped context.DeadlineExceeded) = true (HTML-01)")
+	}
+
+	// Delegates to isTerminal for every non-timeout signature.
+	terminalCases := []error{
+		fmt.Errorf("no converter for %s -> %s", "html", "png"),
+		errors.New("convert: chromium: output is empty"),
+		errors.New("convert: chromium: output missing %PDF- magic bytes"),
+		fmt.Errorf("download %q: %w", "uploads/x/0-in.html", minio.ErrorResponse{Code: minio.NoSuchKey}),
+	}
+	for _, err := range terminalCases {
+		if !isHTMLTerminal(err) {
+			t.Fatalf("expected isHTMLTerminal(%v) = true", err)
+		}
+	}
+
+	transientCases := []error{
+		errors.New("dial tcp: connection refused"),
+		nil,
+	}
+	for _, err := range transientCases {
+		if isHTMLTerminal(err) {
+			t.Fatalf("expected isHTMLTerminal(%v) = false", err)
+		}
+	}
+}

@@ -65,6 +65,22 @@ var terminalLibreOfficeSignatures = []string{
 	"pdf_profile requested for non-pdf target",
 }
 
+// terminalChromiumSignatures are lowercased error-message substrings that
+// indicate a deterministically-unrecoverable html->pdf conversion. Only the
+// validatePDF-reused strings ("output is empty", "output missing %pdf-
+// magic bytes" -- internal/convert/chromium.go reuses validatePDF verbatim
+// from libreoffice.go, so those two carry over unchanged) are seeded here;
+// no genuinely chromium-specific stderr text is included yet.
+//
+// TODO(plan-04): append LIVE-captured chromium stderr signatures -- do not
+// guess (RESEARCH.md Open Question 2). This project's established
+// convention (see terminalVipsSignatures above) is to populate this list
+// only from real, observed stderr output.
+var terminalChromiumSignatures = []string{
+	"output is empty",
+	"output missing %pdf- magic bytes",
+}
+
 // isTerminal classifies a process() error as terminal (no retry can help:
 // bad input, unsupported pair, missing storage object) vs. transient
 // (network/S3/engine-timeout/Postgres blip — broad-retry default, D-01).
@@ -106,6 +122,13 @@ func isTerminal(err error) bool {
 			return true
 		}
 	}
+	for _, sig := range terminalChromiumSignatures {
+		if strings.Contains(msg, sig) {
+			// D-01 (html analog): chromium-headless-shell reports a
+			// deterministically bad/unrenderable input.
+			return true
+		}
+	}
 	return false
 }
 
@@ -130,6 +153,27 @@ func isTerminal(err error) bool {
 // delegating to isTerminal — no document-specific duplication of the
 // no-converter/minio.NoSuchKey/LibreOffice-signature checks.
 func isDocumentTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return isTerminal(err)
+}
+
+// isHTMLTerminal is the html engine's engine-scoped terminal classifier —
+// HTML-01's deliberate divergence from the image engine, mirroring
+// isDocumentTerminal exactly (DOC-08's timeout-is-terminal pattern applied
+// to the chromium engine). An HTML_ENGINE_TIMEOUT expiry surfaces as a
+// wrapped context.DeadlineExceeded (same exec.go process-group-kill shape,
+// preserved through chromium.go's fmt.Errorf("chromium: %w", err) and
+// process()'s fmt.Errorf("convert: %w", err)) and is classified terminal
+// here rather than retried: a stuck chromium render is no more likely to
+// succeed on retry than a stuck soffice render. Every non-timeout error is
+// classified identically to the image/document paths by delegating to the
+// shared isTerminal (which now also checks terminalChromiumSignatures).
+func isHTMLTerminal(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -320,6 +364,96 @@ func (h *Handler) HandleDocumentConvert(ctx context.Context, t *asynq.Task) erro
 		return err
 	}
 	metrics.RecordJobOutcome(queue.QueueDocument, jobs.StatusDone, time.Since(start))
+	// Postgres-first: MarkDone already committed inside process(), so a
+	// failed enqueue must not fail the conversion — best-effort only.
+	if job.CallbackURL != "" {
+		_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+	}
+	return nil
+}
+
+// HandleHTMLConvert runs one html->pdf conversion: load job -> mark active ->
+// download input -> run chromium-headless-shell (via the engine-agnostic
+// process(), which reuses registry.Lookup — the ChromiumConverter registered
+// in convert.Default handles the actual render) -> upload output -> record
+// output -> mark done. Structurally identical to HandleDocumentConvert, with
+// the same two divergences from the image path (HTML-01): (1) the
+// terminal-classification branch calls isHTMLTerminal instead of isTerminal,
+// so an HTML_ENGINE_TIMEOUT expiry takes the terminal path (MarkFailed +
+// SkipRetry, no asynq retry); (2) both metrics.RecordJobOutcome calls are
+// tagged queue.QueueHTML. Non-timeout transient failures (S3/Postgres blips)
+// still fall through isHTMLTerminal -> isTerminal -> false and are returned
+// unwrapped so asynq retries them, bounded by HTML_MAX_RETRY.
+func (h *Handler) HandleHTMLConvert(ctx context.Context, t *asynq.Task) error {
+	payload, err := queue.ParseConvertPayload(t.Payload())
+	if err != nil {
+		// Unparseable payload: nothing we can retry into success.
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	jobID := payload.JobID
+
+	job, err := h.repo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("load job %s: %w", jobID, err)
+	}
+
+	// Strict re-parse of the persisted opts (D-10): garbage in jobs.options
+	// is a terminal, not transient, failure -- a corrupt column value can
+	// never fix itself on retry. This is a strictness check only; the
+	// applicability/enum business rules already ran once, at the API layer
+	// (single source of validation truth), and are deliberately not
+	// duplicated here.
+	if _, err := convert.HTMLOptsFromMap(job.Opts); err != nil {
+		// Mark failed BEFORE SkipRetry: without this the job would stay
+		// queued forever (no webhook, client polls a dead job) while the
+		// reconciler requeues it into the same failure until MaxRecoveries
+		// is exhausted (T-14-02b). Sanitized message only; the parse error
+		// is kept in job_events.detail for internal diagnostics.
+		ferr := h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
+		// Postgres-first: enqueue the webhook ONLY once the failed status is
+		// actually committed — if MarkFailed itself failed, a webhook now
+		// would report the non-terminal status "queued" (WR-04). A failed
+		// enqueue after a successful MarkFailed must not fail the job —
+		// best-effort only.
+		if ferr == nil && job.CallbackURL != "" {
+			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		}
+		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
+	}
+
+	if err := h.repo.MarkActive(ctx, jobID); err != nil {
+		// Already active/done/canceled — let asynq drop it rather than loop.
+		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
+	}
+
+	start := time.Now()
+	if err := h.process(ctx, job); err != nil {
+		if isHTMLTerminal(err) {
+			// Sanitized message only in error_message (exposed via GET
+			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
+			// (which contains local temp paths) is kept in job_events.detail
+			// for internal diagnostics only.
+			ferr := h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			metrics.RecordJobOutcome(queue.QueueHTML, jobs.StatusFailed, time.Since(start))
+			// Postgres-first: enqueue the webhook ONLY once the failed status
+			// is actually committed. If MarkFailed itself failed (Postgres
+			// blip), the job is still active — a webhook now would re-read the
+			// row and deliver the non-terminal status "active", which the
+			// contract never defines (WR-04); the reconciler will requeue the
+			// still-active job instead. A failed enqueue after a successful
+			// MarkFailed must not fail the conversion — best-effort only.
+			if ferr == nil && job.CallbackURL != "" {
+				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+			}
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		}
+		// Transient: do NOT mark failed — the job stays active so asynq's own
+		// retry/backoff (HTMLRetryDelay/HTML_MAX_RETRY, Plan 01) applies.
+		// Not a terminal outcome, so it is NOT recorded in the job-outcome
+		// metric (Pitfall 6 — one asynq retry must not double-count).
+		return err
+	}
+	metrics.RecordJobOutcome(queue.QueueHTML, jobs.StatusDone, time.Since(start))
 	// Postgres-first: MarkDone already committed inside process(), so a
 	// failed enqueue must not fail the conversion — best-effort only.
 	if job.CallbackURL != "" {
