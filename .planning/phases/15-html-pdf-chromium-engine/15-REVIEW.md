@@ -30,6 +30,9 @@ fix_commits:
   CR-01: b-fixed  # CSP injected as first head child (injectCSPFirst) + 2 regression tests
   CR-02: b-fixed  # chromium PDF-validation errors wrapped in chromium: context
   CR-03: 0edb0e1  # fixed — MarginMM int→*int; buildPrintCSS omits margin on no-opts jobs, explicit margin_mm:0 still honored
+  IN-01: 06248fe  # fixed — extracted shared timeoutIsTerminal helper; isDocumentTerminal/isHTMLTerminal now delegate
+  IN-02: 932edfb  # fixed — chromium --user-data-dir pinned inside per-job workDir cleanup boundary; argv test updated
+  IN-03: no_change_needed  # constraint name jobs_engine_check live-confirmed in 15-04 item 0; IF EXISTS deliberately not added
 ---
 
 # Phase 15: Code Review Report
@@ -50,7 +53,26 @@ fix_commits:
 > invariant, and the map round-trip through `jobs.options` are unchanged;
 > new buildPrintCSS/parse tests cover no-opts→no margin, `margin_mm:0`→
 > `0mm !important`, and `margin_mm:15`→`15mm !important`.
-> Info findings (IN-01..IN-03) left as-is (out of Critical+Warning fix scope).
+> **Info-finding outcomes (2026-07-11, `--all` scope):** IN-01 FIXED in commit
+> `06248fe` — the byte-identical `isDocumentTerminal`/`isHTMLTerminal` bodies now
+> both delegate to a shared unexported `timeoutIsTerminal(err)` helper
+> (nil→false; `context.DeadlineExceeded`→true; else `isTerminal`), keeping both
+> named entrypoints (and their doc comments) so the classifiers cannot drift
+> apart on a future edit; no behavior change, all worker tests green. IN-02
+> FIXED in commit `932edfb` — chromium now runs with a per-job
+> `--user-data-dir=<workDir>/chrome-profile` so all profile/scratch/crash-dump
+> state lands INSIDE the caller's `os.RemoveAll(workDir)` cleanup boundary
+> (no writes relative to nobody's non-writable `$HOME`, no cross-job state);
+> the value is a server-derived path, never client bytes, and the
+> security-critical flags (`--proxy-server=127.0.0.1:9`,
+> `--proxy-bypass-list=<-loopback>`, `--host-resolver-rules=MAP * ~NOTFOUND`,
+> `--no-pdf-header-footer`) plus the CSP injection are untouched;
+> `TestChromiumArgvContainsRequiredFlags` updated to assert the new flag.
+> IN-03 NO CHANGE NEEDED — the migration's `DROP CONSTRAINT jobs_engine_check`
+> uses the auto-generated name that was live-confirmed against a real Postgres
+> in 15-04 item 0; `DROP CONSTRAINT IF EXISTS` was deliberately NOT added
+> (it would only mask a genuine name mismatch — an explicit verified name is
+> preferable).
 
 **Reviewed:** 2026-07-11
 **Depth:** standard
@@ -199,6 +221,13 @@ isTerminal(err)`. The duplication is intentional per the doc comments
 **Fix:** Optional — extract a shared helper both engine classifiers delegate to,
 keeping the two named entrypoints for readability.
 
+**Outcome (FIXED, commit `06248fe`):** Extracted `timeoutIsTerminal(err error)
+bool` (nil→false; `context.DeadlineExceeded`→true; else `isTerminal(err)`);
+`isDocumentTerminal` and `isHTMLTerminal` now both `return
+timeoutIsTerminal(err)`, retaining their distinct doc comments. No behavior
+change — the full worker test suite (including the timeout/terminal-signature
+cases) passes unchanged.
+
 ### IN-02: chromium runs without an explicit `--user-data-dir` under `USER nobody`
 
 **File:** `internal/convert/chromium.go:136-147`, `Dockerfile.chromium-worker:26`
@@ -213,6 +242,19 @@ or stray writes outside the temp dir.
 similar) so all chromium scratch state lands inside the `os.RemoveAll(workDir)`
 cleanup boundary.
 
+**Outcome (FIXED, commit `932edfb`):** Added
+`--user-data-dir=<workDir>/chrome-profile` to the chromium argv (server-derived
+path, never client bytes), with a doc comment noting the IN-02 hardening intent;
+all profile/scratch/crash-dump state now stays inside the caller's
+`os.RemoveAll(workDir)` boundary. The security-critical network-block flags,
+`--no-pdf-header-footer`, and the CSP injection are untouched;
+`TestChromiumArgvContainsRequiredFlags` now asserts the new flag.
+**Re-smoke note:** this flag was not part of the Plan 04/05 live smoke, so a
+re-smoke of an actual chromium render is advisable before the next release —
+the flag is low-risk and standard (a per-job profile dir is chromium's
+documented default-location override), but a live render confirmation would
+close the loop.
+
 ### IN-03: migration `DROP CONSTRAINT` lacks `IF EXISTS` and relies on the inferred constraint name
 
 **File:** `internal/db/migrations/0005_html_engine.sql:10`
@@ -224,6 +266,14 @@ on Plan 05 live acceptance, not an oversight.
 **Fix:** Optional — verify the name via `\d jobs` before shipping (the comment
 already plans this); `DROP CONSTRAINT IF EXISTS` would only mask a genuine
 name mismatch, so an explicit verified name is preferable.
+
+**Outcome (NO CHANGE NEEDED):** The planned live verification already happened —
+15-04 item 0 applied this migration against a real Postgres and confirmed the
+auto-generated constraint name `jobs_engine_check` matches the `DROP` statement
+exactly (`'html'` accepted, a bogus engine value rejected). Per the reviewer's
+own guidance, `DROP CONSTRAINT IF EXISTS` was deliberately NOT added — it would
+only mask a genuine future name mismatch, and an explicit, live-verified name is
+preferable. The SQL is left unchanged.
 
 ---
 
