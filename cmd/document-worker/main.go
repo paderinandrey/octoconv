@@ -47,10 +47,11 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 
-	// document-worker neither delivers nor signs webhooks (D-06 — cmd/worker
-	// remains the sole webhook consumer), so a missing signing secret here is
-	// non-fatal; it is passed through to worker.NewHandler only to satisfy its
-	// shared signature and is inert for HandleDocumentConvert.
+	// document-worker neither delivers nor signs webhooks — webhook delivery
+	// now lives solely in cmd/webhook-worker (D-03/D-07, Phase 16), so a
+	// missing signing secret here is non-fatal; it is passed through to
+	// worker.NewHandler only to satisfy its shared signature and is inert for
+	// HandleDocumentConvert.
 	signingSecret := []byte(os.Getenv("WEBHOOK_SIGNING_SECRET"))
 
 	qc, err := queue.NewClient()
@@ -73,9 +74,10 @@ func main() {
 		envDuration("WEBHOOK_PRESIGN_TTL", 6*time.Hour),
 	)
 
-	// D-05: the stale-job sweep loop runs solely in cmd/worker — no sweeper
-	// of any kind is constructed or run here, avoiding a double-sweep race
-	// between two independent sweep loops recovering the same stranded job.
+	// D-04/D-05: the stale-job sweep loop runs solely in cmd/webhook-worker
+	// (under a Postgres advisory lock) — no sweeper of any kind is
+	// constructed or run here, avoiding a double-sweep race between
+	// independent sweep loops recovering the same stranded job.
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeDocumentConvert, h.HandleDocumentConvert)
