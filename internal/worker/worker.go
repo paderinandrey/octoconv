@@ -142,6 +142,26 @@ func isTerminal(err error) bool {
 	return false
 }
 
+// timeoutIsTerminal is the shared body behind the timeout-aware engine
+// classifiers (isDocumentTerminal, isHTMLTerminal). It encodes the single
+// divergence those engines share with the image path: nil is never terminal;
+// a wrapped context.DeadlineExceeded (an engine-timeout expiry) IS terminal —
+// a stuck soffice/chromium render is no more likely to succeed on retry, so
+// the only reliable backstop is an immediate terminal failure (MarkFailed +
+// SkipRetry, no asynq retry) rather than burning the whole retry budget;
+// every non-timeout error falls through to the shared isTerminal classifier.
+// Extracting this keeps the two engine-scoped entrypoints from drifting apart
+// on a future edit (IN-01) while preserving their distinct doc comments.
+func timeoutIsTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return isTerminal(err)
+}
+
 // isDocumentTerminal is the document engine's engine-scoped terminal
 // classifier — DOC-08's deliberate divergence from the image engine. Unlike
 // isTerminal (which keeps treating a timeout as transient so the image path
@@ -160,16 +180,10 @@ func isTerminal(err error) bool {
 // stays true all the way up to this handler.
 //
 // Every non-timeout error is classified identically to the image path by
-// delegating to isTerminal — no document-specific duplication of the
-// no-converter/minio.NoSuchKey/LibreOffice-signature checks.
+// delegating (via timeoutIsTerminal) to isTerminal — no document-specific
+// duplication of the no-converter/minio.NoSuchKey/LibreOffice-signature checks.
 func isDocumentTerminal(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return isTerminal(err)
+	return timeoutIsTerminal(err)
 }
 
 // isHTMLTerminal is the html engine's engine-scoped terminal classifier —
@@ -181,16 +195,11 @@ func isDocumentTerminal(err error) bool {
 // process()'s fmt.Errorf("convert: %w", err)) and is classified terminal
 // here rather than retried: a stuck chromium render is no more likely to
 // succeed on retry than a stuck soffice render. Every non-timeout error is
-// classified identically to the image/document paths by delegating to the
-// shared isTerminal (which now also checks terminalChromiumSignatures).
+// classified identically to the image/document paths by delegating (via
+// timeoutIsTerminal) to the shared isTerminal (which now also checks
+// terminalChromiumSignatures).
 func isHTMLTerminal(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	return isTerminal(err)
+	return timeoutIsTerminal(err)
 }
 
 // Handler processes image conversion tasks end to end.
