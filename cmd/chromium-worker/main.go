@@ -47,11 +47,11 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 
-	// chromium-worker neither delivers nor signs webhooks (mirrors
-	// document-worker's D-06 — cmd/worker remains the sole webhook
-	// consumer), so a missing signing secret here is non-fatal; it is
-	// passed through to worker.NewHandler only to satisfy its shared
-	// signature and is inert for HandleHTMLConvert.
+	// chromium-worker neither delivers nor signs webhooks — webhook delivery
+	// now lives solely in cmd/webhook-worker (D-03/D-07, Phase 16), so a
+	// missing signing secret here is non-fatal; it is passed through to
+	// worker.NewHandler only to satisfy its shared signature and is inert for
+	// HandleHTMLConvert.
 	signingSecret := []byte(os.Getenv("WEBHOOK_SIGNING_SECRET"))
 
 	qc, err := queue.NewClient()
@@ -75,9 +75,10 @@ func main() {
 	)
 
 	// chromium-worker must NOT run the reconciler sweeper: the stale-job
-	// sweep loop runs solely in cmd/worker — no sweeper of any kind is
-	// constructed or run here, avoiding a double-sweep race between two
-	// independent sweep loops recovering the same stranded job.
+	// sweep loop runs solely in cmd/webhook-worker (under a Postgres
+	// advisory lock, D-04) — no sweeper of any kind is constructed or run
+	// here, avoiding a double-sweep race between independent sweep loops
+	// recovering the same stranded job.
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeHTMLConvert, h.HandleHTMLConvert)
