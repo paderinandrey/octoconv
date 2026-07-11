@@ -6,15 +6,30 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	// pgxpool is imported directly here — the one place in this package that
+	// breaks its otherwise pure-interface-dependency style (jobStore/enqueuer
+	// below). D-01/D-02 require Postgres session-level advisory-lock
+	// semantics (pg_try_advisory_lock tied to a single dedicated connection's
+	// lifetime), which no interface abstraction over jobStore can express.
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/metrics"
 )
+
+// advisoryLockKey is the Postgres session-level advisory-lock key used to
+// elect exactly one fleet-wide sweeper (D-01/D-02). The value is arbitrary
+// but fixed and must never collide with another subsystem's advisory-lock
+// usage — there are none today (verified: zero other pg_try_advisory_lock
+// callers in this codebase). If a second advisory-lock use is ever added, it
+// MUST use a different key.
+const advisoryLockKey int64 = 0x6F63746F
 
 // Config tunes the sweep: how stale a queued/active job must be before it is
 // considered stranded, how often to sweep, and how many recoveries a single
@@ -71,6 +86,95 @@ func (s *Sweeper) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.sweep(ctx)
+		}
+	}
+}
+
+// AdvisoryLock elects exactly one fleet-wide sweeper across replicas
+// (D-01/D-02). TryAcquire returns (true, nil) if this process now holds the
+// fleet-wide sweep lock, (false, nil) if another holder currently has it,
+// and a non-nil error when the lock state could not be determined — in
+// which case the caller MUST treat the tick as fail-safe (skip sweeping
+// rather than sweep unguarded).
+type AdvisoryLock interface {
+	TryAcquire(ctx context.Context) (bool, error)
+}
+
+// PGAdvisoryLock implements AdvisoryLock using Postgres session-level
+// pg_try_advisory_lock on a single dedicated, long-lived connection. Session
+// scope (not transaction scope) is required so the lock's lifetime is tied
+// to the connection/process, not to any single query or transaction (D-02).
+type PGAdvisoryLock struct {
+	pool *pgxpool.Pool
+	conn *pgxpool.Conn
+}
+
+// NewPGAdvisoryLock acquires one dedicated connection from pool and never
+// releases it back for the life of the process (D-02: lock release must be
+// tied to process/session lifetime, not returned to the pool where it could
+// be recycled while still holding the session lock).
+func NewPGAdvisoryLock(ctx context.Context, pool *pgxpool.Pool) (*PGAdvisoryLock, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire dedicated advisory-lock connection: %w", err)
+	}
+	return &PGAdvisoryLock{pool: pool, conn: conn}, nil
+}
+
+// TryAcquire attempts pg_try_advisory_lock(advisoryLockKey) on the dedicated
+// connection. Once this session holds the lock, subsequent calls on the SAME
+// session return true again (Postgres allows re-acquire by the owning
+// session) — the intended steady state for the elected leader.
+func (l *PGAdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
+	if l.conn == nil {
+		// Lost on a prior tick's error path — lazily re-acquire a fresh
+		// dedicated connection.
+		conn, err := l.pool.Acquire(ctx)
+		if err != nil {
+			return false, fmt.Errorf("re-acquire dedicated advisory-lock connection: %w", err)
+		}
+		l.conn = conn
+	}
+
+	var acquired bool
+	if err := l.conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", advisoryLockKey).Scan(&acquired); err != nil {
+		// The connection is now suspect. Hard-close the underlying pgconn
+		// rather than Release() it back into the shared pool: a plain
+		// Release() would hand a still-protocol-healthy connection back into
+		// general pool circulation while it may STILL hold the session-level
+		// advisory lock, tying the lock's release to pool recycling
+		// (MaxConnLifetime) instead of process life — silently blocking any
+		// worker from ever becoming sweeper leader (D-02 CRITICAL).
+		// Hard-closing guarantees Postgres releases the session lock
+		// immediately.
+		l.conn.Conn().Close(ctx)
+		l.conn = nil
+		return false, fmt.Errorf("pg_try_advisory_lock: %w", err)
+	}
+	return acquired, nil
+}
+
+// RunWithLock ticks every cfg.SweepInterval like Run, but gates each tick on
+// lock.TryAcquire: sweep only runs when this process currently holds the
+// fleet-wide advisory lock. Any TryAcquire error or a false result skips the
+// tick without sweeping (fail-safe closed — never sweep on uncertainty or
+// when another replica holds the lock, D-01/D-02).
+func (s *Sweeper) RunWithLock(ctx context.Context, lock AdvisoryLock) {
+	ticker := time.NewTicker(s.cfg.SweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ok, err := lock.TryAcquire(ctx)
+			if err != nil || !ok {
+				// Fail-safe / not-leader: skip this tick, try again next
+				// tick. No logging here — same best-effort discipline as
+				// sweep (visibility is job_events).
+				continue
+			}
 			s.sweep(ctx)
 		}
 	}
