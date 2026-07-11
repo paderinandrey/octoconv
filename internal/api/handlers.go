@@ -161,6 +161,18 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			// content rejection below rather than accept an ambiguous archive.
 		}
 	}
+	if detected == "" && source == "html" && convert.LooksLikeHTML(file, header.Size) {
+		// D-07/HTML-02: HTML has no magic bytes for Sniff's table to match,
+		// so content detection here is gated on the (still-untrusted)
+		// declared source already claiming "html" (post NormalizeFormat's
+		// htm->html alias) PLUS a fail-closed structural content check
+		// (UTF-8, no NUL, doctype/html marker). A .html-named file whose
+		// content fails LooksLikeHTML leaves detected=="" and falls through
+		// to the generic unrecognized-content 422 below (fail-closed,
+		// before any storage write) -- never silently accepted just
+		// because the extension claims html.
+		detected = "html"
+	}
 	if detected == "" && convert.IsOLECFB(file) {
 		// D-05/D-06: legacy binary Office (.doc/.xls/.ppt) and password-
 		// protected OOXML ("Agile Encryption") share the identical 8-byte
@@ -241,11 +253,16 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 
 	// opts is optional (D-02); an empty value or the literal "{}" means "no
 	// opts" (D-09) and normalizedOpts stays nil, skipping validation
-	// entirely. Otherwise: size cap, then syntax (ParseDocOpts), then
-	// applicability (ValidateApplicability, now that engine/detected/target
-	// are known) -- all BEFORE s.storage.Upload below (D-03/D-04). The API
-	// never duplicates internal/convert's validation logic; it only calls it
-	// (single validation authority, D-04/D-10).
+	// entirely. Otherwise: size cap, then engine-keyed syntax parse
+	// (ParseDocOpts/ParseHTMLOpts), then engine-keyed applicability
+	// (ValidateApplicability/ValidateHTMLApplicability, now that
+	// engine/detected/target are known) -- all BEFORE s.storage.Upload below
+	// (D-03/D-04). HTMLOpts is a structurally different closed type from
+	// DocOpts (page_size/margin_mm/landscape/print_background, not
+	// pdf_profile), so the dispatch is engine-keyed rather than a single
+	// unconditional call (HTML-03). The API never duplicates
+	// internal/convert's validation logic; it only calls it (single
+	// validation authority, D-04/D-10).
 	var normalizedOpts map[string]any
 	rawOpts := r.FormValue(formFieldOpts)
 	if rawOpts != "" && rawOpts != "{}" {
@@ -254,24 +271,48 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnprocessableEntity, "opts field too large")
 			return
 		}
-		docOpts, err := convert.ParseDocOpts([]byte(rawOpts))
-		if err != nil {
-			log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
-			writeError(w, http.StatusUnprocessableEntity, "invalid opts")
-			return
-		}
-		if err := convert.ValidateApplicability(engine, detected, target, docOpts); err != nil {
-			log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
-			writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
-			return
-		}
-		// D-08: persist the normalized struct, never the raw client bytes --
-		// round-trip through json.Marshal/Unmarshal so only the validated
-		// enum value ever reaches storage.
-		normalizedRaw, err := json.Marshal(docOpts)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to normalize opts")
-			return
+		var normalizedRaw []byte
+		switch engine {
+		case convert.EngineHTML:
+			htmlOpts, err := convert.ParseHTMLOpts([]byte(rawOpts))
+			if err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+				return
+			}
+			if err := convert.ValidateHTMLApplicability(engine, detected, target, htmlOpts); err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+				return
+			}
+			// D-08: persist the normalized struct, never the raw client
+			// bytes -- round-trip through json.Marshal so only the
+			// validated enum value ever reaches storage.
+			normalizedRaw, err = json.Marshal(htmlOpts)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
+		default:
+			docOpts, err := convert.ParseDocOpts([]byte(rawOpts))
+			if err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+				return
+			}
+			if err := convert.ValidateApplicability(engine, detected, target, docOpts); err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+				return
+			}
+			// D-08: persist the normalized struct, never the raw client
+			// bytes -- round-trip through json.Marshal so only the
+			// validated enum value ever reaches storage.
+			normalizedRaw, err = json.Marshal(docOpts)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
 		}
 		if err := json.Unmarshal(normalizedRaw, &normalizedOpts); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to normalize opts")
@@ -324,6 +365,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		enqueueErr = s.queue.EnqueueImageConvert(ctx, createdID)
 	case convert.EngineDocument:
 		enqueueErr = s.queue.EnqueueDocumentConvert(ctx, createdID)
+	case convert.EngineHTML:
+		enqueueErr = s.queue.EnqueueHTMLConvert(ctx, createdID)
 	default:
 		// Fail closed: an engine class with no known queue must never be
 		// silently dropped (T-11-02). EngineFor above only ever returns a

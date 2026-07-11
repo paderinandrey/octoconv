@@ -153,6 +153,7 @@ func TestMIMEType(t *testing.T) {
 		"odt":     "application/vnd.oasis.opendocument.text",
 		"ods":     "application/vnd.oasis.opendocument.spreadsheet",
 		"odp":     "application/vnd.oasis.opendocument.presentation",
+		"html":    "text/html",
 		"unknown": "application/octet-stream",
 	}
 	for format, want := range cases {
