@@ -4,8 +4,8 @@ milestone: v1.3
 milestone_name: Document Class v2
 status: executing
 stopped_at: Phase 15 context gathered
-last_updated: "2026-07-11T13:51:45.007Z"
-last_activity: 2026-07-11 -- Phase 15 planning complete
+last_updated: "2026-07-11T13:56:54.875Z"
+last_activity: 2026-07-11 -- Phase 15 execution started
 progress:
   total_phases: 5
   completed_phases: 3
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения и офисные документы) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 15 — html→pdf chromium engine
+**Current focus:** Phase 15 — html-pdf-chromium-engine
 
 ## Current Position
 
-Phase: 15
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-11 -- Phase 15 planning complete
+Phase: 15 (html-pdf-chromium-engine) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 15
+Last activity: 2026-07-11 -- Phase 15 execution started
 
 ## Performance Metrics
 

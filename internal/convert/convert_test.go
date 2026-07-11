@@ -15,6 +15,8 @@ func TestNormalizeFormat(t *testing.T) {
 		"JPEG":  "jpg",
 		" tif ": "tiff",
 		"webp":  "webp",
+		"htm":   "html",
+		".HTM":  "html",
 	}
 	for in, want := range cases {
 		if got := NormalizeFormat(in); got != want {

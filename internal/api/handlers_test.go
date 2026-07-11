@@ -72,6 +72,7 @@ func (f *fakeStorage) PresignGet(_ context.Context, _ string, _ time.Duration) (
 type fakeQueue struct {
 	enqueuedImage    uuid.UUID
 	enqueuedDocument uuid.UUID
+	enqueuedHTML     uuid.UUID
 }
 
 func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
@@ -81,6 +82,11 @@ func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeQueue) EnqueueDocumentConvert(_ context.Context, id uuid.UUID) error {
 	f.enqueuedDocument = id
+	return nil
+}
+
+func (f *fakeQueue) EnqueueHTMLConvert(_ context.Context, id uuid.UUID) error {
+	f.enqueuedHTML = id
 	return nil
 }
 

@@ -107,6 +107,14 @@ func TestRetryDelayFuncDispatch(t *testing.T) {
 		t.Errorf("RetryDelayFunc(document, 2) = %v, want %v", got, want)
 	}
 
+	htmlTask := asynq.NewTask(TypeHTMLConvert, nil)
+	if got, want := RetryDelayFunc(0, nil, htmlTask), 5*time.Second; got != want {
+		t.Errorf("RetryDelayFunc(html, 0) = %v, want %v", got, want)
+	}
+	if got, want := RetryDelayFunc(2, nil, htmlTask), 30*time.Second; got != want {
+		t.Errorf("RetryDelayFunc(html, 2) = %v, want %v", got, want)
+	}
+
 	base := 30 * time.Second
 	lo := time.Duration(float64(base) * 0.75)
 	hi := time.Duration(float64(base) * 1.25)
@@ -271,6 +279,77 @@ func TestDocumentUniqueTTL(t *testing.T) {
 	}
 	if DocumentUniqueTTL(maxRetry, engineTimeout+time.Second) <= DocumentUniqueTTL(maxRetry, engineTimeout) {
 		t.Errorf("DocumentUniqueTTL must grow monotonically with engineTimeout")
+	}
+}
+
+// TestHTMLConvertTaskRoundTrip asserts NewHTMLConvertTask builds a task
+// routed to TypeHTMLConvert whose payload round-trips through
+// ParseConvertPayload back to the same job id — mirrors
+// TestDocumentConvertTaskRoundTrip's shape for the html engine class.
+func TestHTMLConvertTaskRoundTrip(t *testing.T) {
+	id := uuid.New()
+	task, err := NewHTMLConvertTask(id, 3, HTMLUniqueTTL(3, 60*time.Second))
+	if err != nil {
+		t.Fatalf("NewHTMLConvertTask: %v", err)
+	}
+	if task.Type() != TypeHTMLConvert {
+		t.Errorf("task type = %q, want %q", task.Type(), TypeHTMLConvert)
+	}
+	p, err := ParseConvertPayload(task.Payload())
+	if err != nil {
+		t.Fatalf("ParseConvertPayload: %v", err)
+	}
+	if p.JobID != id {
+		t.Errorf("job id = %s, want %s", p.JobID, id)
+	}
+}
+
+// TestHTMLRetryDelaySchedule asserts HTMLRetryDelay returns the exact
+// 5s/15s/30s schedule (no jitter, mirrors DocumentRetryDelay's shape) and
+// clamps on both ends.
+func TestHTMLRetryDelaySchedule(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{n: -1, want: 5 * time.Second}, // clamps to first entry
+		{n: 0, want: 5 * time.Second},
+		{n: 1, want: 15 * time.Second},
+		{n: 2, want: 30 * time.Second},
+		{n: 99, want: 30 * time.Second}, // clamps past the end of the schedule
+	}
+	for _, tc := range cases {
+		got := HTMLRetryDelay(tc.n, nil, nil)
+		if got != tc.want {
+			t.Errorf("HTMLRetryDelay(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestHTMLUniqueTTL asserts HTMLUniqueTTL derives its result from the
+// corrected worst-case retry lifetime ((maxRetry+1) executions) exactly like
+// DocumentUniqueTTL, evaluates to exactly 290s for (3, 60s), and is
+// monotonic in both arguments.
+func TestHTMLUniqueTTL(t *testing.T) {
+	maxRetry := 3
+	engineTimeout := 60 * time.Second
+	backoffSum := 5*time.Second + 15*time.Second + 30*time.Second // i=0..2
+
+	want := time.Duration(maxRetry+1)*engineTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := HTMLUniqueTTL(maxRetry, engineTimeout)
+	if got != want {
+		t.Errorf("HTMLUniqueTTL(%d, %v) = %v, want %v", maxRetry, engineTimeout, got, want)
+	}
+	if want != 410*time.Second {
+		t.Errorf("expected worked example want = 410s, got %v", want)
+	}
+
+	// Monotonicity: raising either argument must never shrink the TTL.
+	if HTMLUniqueTTL(maxRetry+1, engineTimeout) <= HTMLUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("HTMLUniqueTTL must grow monotonically with maxRetry")
+	}
+	if HTMLUniqueTTL(maxRetry, engineTimeout+time.Second) <= HTMLUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("HTMLUniqueTTL must grow monotonically with engineTimeout")
 	}
 }
 
