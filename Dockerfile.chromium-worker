@@ -1,0 +1,32 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/chromium-worker ./cmd/chromium-worker
+
+# Runtime stage: html engine needs chromium-headless-shell's one-shot
+# --print-to-pdf mode (D-01).
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      tini \
+      chromium-headless-shell \
+      fonts-liberation2 \
+ # CJK/non-Latin font coverage (e.g. fonts-noto-cjk) is an explicit deferred
+ # scope question (DOCV3-03) -- do NOT add it here; fonts-liberation2 covers
+ # Latin text only, matching document-worker's own font scope.
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/chromium-worker /usr/local/bin/chromium-worker
+# Run unprivileged: the worker shells out to untrusted-input engines, and
+# --no-sandbox (forced by USER nobody, D-08/Pitfall 10) makes this the
+# primary privilege-containment layer for the renderer.
+USER nobody
+# tini is PID 1 so orphaned grandchildren (chromium forks zygote/GPU/renderer
+# subprocesses) get reaped after a group SIGKILL, instead of persisting as
+# permanent zombies -- KEPT pending the Task 2 live tini-vs-no-tini
+# confirmation (D-09), mirroring document-worker's own live-confirmed
+# rationale for LibreOffice's oosplash/soffice.bin fork chain.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/chromium-worker"]

@@ -119,15 +119,40 @@ func TestChromiumArgvContainsRequiredFlags(t *testing.T) {
 		`"--proxy-server=127.0.0.1:9"`,
 		`"--proxy-bypass-list=<-loopback>"`,
 		`"--host-resolver-rules=MAP * ~NOTFOUND"`,
-		`"--blink-settings=scriptEnabled=false"`,
 		`"--no-sandbox"`,
 		`"--disable-dev-shm-usage"`,
+		`"--no-pdf-header-footer"`,
 		`"file://" + renderedPath`,
 	}
 	for _, want := range required {
 		if !strings.Contains(data, want) {
 			t.Errorf("chromium.go argv missing required flag/expression: %s", want)
 		}
+	}
+	// --blink-settings=scriptEnabled=false must NOT be in argv (Plan 04 live
+	// finding: it makes the one-shot command handler silently produce no
+	// output at all in chromium-headless-shell 150.0.7871.100). JS-disable
+	// moved to the injected CSP meta tag (cspNoScriptMeta) instead.
+	if strings.Contains(data, `"--blink-settings=scriptEnabled=false"`) {
+		t.Error("chromium.go argv still contains --blink-settings=scriptEnabled=false, live-tested to break --print-to-pdf entirely (Plan 04)")
+	}
+	// --disable-javascript must NOT be relied on either -- live-tested no-op
+	// (does not actually disable script execution in this build).
+	if strings.Contains(data, `"--disable-javascript"`) {
+		t.Error("chromium.go argv contains --disable-javascript, live-tested as a no-op that does not disable JS (Plan 04)")
+	}
+}
+
+func TestChromiumInjectsCSPNoScriptMeta(t *testing.T) {
+	data, err := readSourceFile("chromium.go")
+	if err != nil {
+		t.Fatalf("read chromium.go: %v", err)
+	}
+	if !strings.Contains(data, "cspNoScriptMeta") {
+		t.Error("chromium.go no longer references cspNoScriptMeta -- D-05's JS-disable mechanism must be injected via the same CSS injection point")
+	}
+	if !strings.Contains(cspNoScriptMeta, `script-src 'none'`) {
+		t.Errorf("cspNoScriptMeta = %q, want a Content-Security-Policy with script-src 'none'", cspNoScriptMeta)
 	}
 }
 
