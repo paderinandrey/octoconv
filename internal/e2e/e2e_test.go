@@ -41,6 +41,7 @@ import (
 	"regexp"
 	"strconv"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -873,5 +874,101 @@ func TestHTMLContentRejectionE2E(t *testing.T) {
 	body := postJobExpectStatus(t, cfg.baseURL, apiKey, "nothtml.html", data, "pdf", "", http.StatusUnprocessableEntity)
 	if len(body) == 0 {
 		t.Error("422 body for nothtml.html is empty")
+	}
+}
+
+// canaryHit records one inbound connection to the canary receiver -- the
+// request path is recorded (not individually asserted) since the canary
+// fixture references it from multiple element types (img src, script
+// fetch).
+type canaryHit struct {
+	path string
+}
+
+// startCanaryReceiver generalizes startWebhookReceiver (same net.Listen +
+// host.docker.internal-addressed base URL + buffered-channel shape) to
+// record a canaryHit for ANY path, not a single fixed endpoint -- the
+// canary.html fixture references multiple paths (/canary-img,
+// /canary-fetch) and this receiver must catch all of them, since
+// TestHTMLNetworkBlockE2E's assertion is "zero hits across the whole render
+// window," not "zero hits on one specific path."
+func startCanaryReceiver(t *testing.T, host string) (string, <-chan canaryHit) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen for canary receiver: %v", err)
+	}
+
+	hits := make(chan canaryHit, 16)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- canaryHit{path: r.URL.Path}
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.Listener.Close() // discard the default loopback listener
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split canary listener addr: %v", err)
+	}
+	baseURL := fmt.Sprintf("http://%s", net.JoinHostPort(host, port))
+	return baseURL, hits
+}
+
+// TestHTMLNetworkBlockE2E is the live, direct proof of HTML-02/success
+// criterion 2 (D-04): a canary listener must record ZERO inbound
+// connections while a deliberately adversarial HTML fixture -- external IP
+// literal, loopback literal, compose-network hostnames, and a file://
+// exfiltration attempt (RESEARCH.md Pattern 2/3) -- is rendered to PDF, AND
+// the render must complete (not hang/time out). Both assertions are direct
+// evidence: zero-hits proves no fetch occurred (not "the render didn't
+// crash"), and reaching pollUntilDone's return proves the job finished
+// within the generous bound rather than hanging against the (correctly)
+// dead proxy/resolver.
+func TestHTMLNetworkBlockE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	baseURL, hits := startCanaryReceiver(t, cfg.webhookHost)
+
+	tmplBytes, err := os.ReadFile(filepath.Join("testdata", "canary.html"))
+	if err != nil {
+		t.Fatalf("read fixture canary.html: %v", err)
+	}
+	tmpl, err := template.New("canary").Parse(string(tmplBytes))
+	if err != nil {
+		t.Fatalf("parse canary.html template: %v", err)
+	}
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, struct{ BaseURL string }{BaseURL: baseURL}); err != nil {
+		t.Fatalf("execute canary.html template: %v", err)
+	}
+
+	jobID := postJob(t, cfg.baseURL, apiKey, "canary.html", rendered.Bytes(), "pdf", "", "")
+
+	// pollUntilDone fatals on "failed" and on timeout -- reaching the line
+	// below already proves the render completed within the generous bound,
+	// the "job still completes" half of D-04's assertion.
+	body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+	downloadURL, _ := body["download_url"].(string)
+	if downloadURL == "" {
+		t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+	}
+	assertDownloadIsPDF(t, downloadURL)
+
+	// Drain for any hit that may have arrived during the render window: a
+	// short bounded wait (not a blocking read), since the render already
+	// reached "done" above -- the render window has closed by construction,
+	// this is just giving any in-flight TCP handshake a moment to land in
+	// the buffered channel before we assert zero.
+	select {
+	case hit := <-hits:
+		t.Fatalf("canary received an inbound connection at path %q -- network block FAILED (success criterion 2)", hit.path)
+	case <-time.After(3 * time.Second):
+		// zero hits across the entire render window -- the success-criterion-2
+		// direct proof (D-04).
 	}
 }
