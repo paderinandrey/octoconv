@@ -29,7 +29,7 @@ status: resolved
 fix_commits:
   CR-01: b-fixed  # CSP injected as first head child (injectCSPFirst) + 2 regression tests
   CR-02: b-fixed  # chromium PDF-validation errors wrapped in chromium: context
-  CR-03: deferred # forced margin:0 default — needs opts-presence design; changing it regresses approved live-verified SC3 output
+  CR-03: 0edb0e1  # fixed — MarginMM int→*int; buildPrintCSS omits margin on no-opts jobs, explicit margin_mm:0 still honored
 ---
 
 # Phase 15: Code Review Report
@@ -38,11 +38,18 @@ fix_commits:
 > commit `dd`-range this phase — `injectCSPFirst` places the CSP as the first
 > child of `<head>` so it precedes any in-head `<script>` (D-05 restored),
 > with two regression tests; chromium PDF-validation failures now wrap in a
-> `chromium:` context. CR-03 (WARNING, forced `margin:0 !important` default)
-> is DEFERRED: distinguishing "margin unset" from "margin=0" needs an
-> HTMLOpts presence-flag design change, and altering the injected margin CSS
-> now would regress the print-opts output already live-verified and
-> user-approved at the 15-05 acceptance checkpoint — tracked as a fast-follow.
+> `chromium:` context. CR-03/WR-02 (forced `margin:0 !important` default)
+> is now FIXED in commit `0edb0e1`: `HTMLOpts.MarginMM` changed from `int` to
+> `*int` so an unset margin (nil) is distinguishable from an explicit
+> `margin_mm:0`. `buildPrintCSS` omits the `margin` declaration entirely for
+> no-opts jobs (chromium's default print margin and the client HTML's own
+> `@page` margin now apply — no forced edge-to-edge), while an explicit
+> `margin_mm:0` still emits `margin: 0mm !important` for deliberate
+> edge-to-edge output. Range-check, strictness (DisallowUnknownFields,
+> checkStrictObject, closed page_size enum), the server-constant CSS
+> invariant, and the map round-trip through `jobs.options` are unchanged;
+> new buildPrintCSS/parse tests cover no-opts→no margin, `margin_mm:0`→
+> `0mm !important`, and `margin_mm:15`→`15mm !important`.
 > Info findings (IN-01..IN-03) left as-is (out of Critical+Warning fix scope).
 
 **Reviewed:** 2026-07-11
