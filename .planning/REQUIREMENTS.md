@@ -17,9 +17,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Presets REST API
 
-- [ ] **PRAPI-01**: Клиент управляет своими (client-scope) пресетами через `/v1/presets`: create / list / show / update / deactivate; scope и client_id берутся только из auth-контекста (узкий DTO без этих полей — mass-assignment невозможен); system-scope остаётся за операторским CLI
-- [ ] **PRAPI-02**: REST-семантика зеркалит CLI через общий `internal/presets.Repo` (bump-on-update, единственная активная версия, no hard delete); 409 на дубль create; no-leak на чужие/несуществующие пресеты
-- [ ] **PRAPI-03**: `GET /v1/formats` отдаёт поддерживаемые пары форматов и engine-классы (предпосылка MCP-04)
+- [x] **PRAPI-01**: Клиент управляет своими (client-scope) пресетами через `/v1/presets`: create / list / show / update / deactivate; scope и client_id берутся только из auth-контекста (узкий DTO без этих полей — mass-assignment невозможен); system-scope остаётся за операторским CLI
+- [x] **PRAPI-02**: REST-семантика зеркалит CLI через общий `internal/presets.Repo` (bump-on-update, единственная активная версия, no hard delete); 409 на дубль create; no-leak на чужие/несуществующие пресеты
+- [x] **PRAPI-03**: `GET /v1/formats` отдаёт поддерживаемые пары форматов и engine-классы (предпосылка MCP-04)
 
 ### CFB Classification
 
@@ -59,9 +59,9 @@ Deferred to future release.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PRAPI-01 | Phase 20 | Pending |
-| PRAPI-02 | Phase 20 | Pending |
-| PRAPI-03 | Phase 20 | Pending |
+| PRAPI-01 | Phase 20 | Complete |
+| PRAPI-02 | Phase 20 | Complete |
+| PRAPI-03 | Phase 20 | Complete |
 | MCP-01 | Phase 21 | Pending |
 | MCP-02 | Phase 21 | Pending |
 | MCP-03 | Phase 21 | Pending |
