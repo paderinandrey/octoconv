@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,8 +79,16 @@ func (f *fakeStore) RecordWebhookGapRecovered(ctx context.Context, id uuid.UUID,
 	return nil
 }
 
-// fakeEnqueuer is an in-memory enqueuer implementation for unit tests.
+// fakeEnqueuer is an in-memory enqueuer implementation for unit tests. The
+// synchronous unit tests below read the call-counter slices directly after
+// sweep() returns (single-threaded, race-free); the soak test in
+// reconciler_soak_test.go, however, reads a counter while a live Sweeper.Run
+// goroutine is concurrently appending to it, so the slices are guarded by mu
+// and exposed only through locked snapshot accessors for that concurrent
+// reader.
 type fakeEnqueuer struct {
+	mu sync.Mutex
+
 	enqueueImageErr    error
 	imageCalls         []uuid.UUID
 	webhookCalls       []uuid.UUID
@@ -91,23 +100,69 @@ type fakeEnqueuer struct {
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.imageCalls = append(f.imageCalls, id)
 	return f.enqueueImageErr
 }
 
 func (f *fakeEnqueuer) EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.webhookCalls = append(f.webhookCalls, id)
 	return f.enqueueWebhookErr
 }
 
 func (f *fakeEnqueuer) EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.documentCalls = append(f.documentCalls, id)
 	return f.enqueueDocumentErr
 }
 
 func (f *fakeEnqueuer) EnqueueHTMLConvert(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.htmlCalls = append(f.htmlCalls, id)
 	return f.enqueueHTMLErr
+}
+
+// imageCallIDs returns a locked snapshot copy of imageCalls — used by the
+// soak test to read the counter concurrently with a running Sweeper.Run
+// goroutine without racing on the underlying slice.
+func (f *fakeEnqueuer) imageCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.imageCalls))
+	copy(out, f.imageCalls)
+	return out
+}
+
+// webhookCallIDs returns a locked snapshot copy of webhookCalls.
+func (f *fakeEnqueuer) webhookCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.webhookCalls))
+	copy(out, f.webhookCalls)
+	return out
+}
+
+// documentCallIDs returns a locked snapshot copy of documentCalls.
+func (f *fakeEnqueuer) documentCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.documentCalls))
+	copy(out, f.documentCalls)
+	return out
+}
+
+// htmlCallIDs returns a locked snapshot copy of htmlCalls.
+func (f *fakeEnqueuer) htmlCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.htmlCalls))
+	copy(out, f.htmlCalls)
+	return out
 }
 
 func testConfig() Config {
