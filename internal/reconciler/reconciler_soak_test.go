@@ -97,7 +97,7 @@ func TestSoakRecoversStrandedQueuedJob(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
-		if j.Status == jobs.StatusQueued && len(enq.imageCalls) >= 1 {
+		if j.Status == jobs.StatusQueued && len(enq.imageCallIDs()) >= 1 {
 			return // recovered under genuine elapsed wall-clock time
 		}
 		time.Sleep(100 * time.Millisecond)
