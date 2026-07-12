@@ -8,11 +8,17 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current State (after v1.4, shipped 2026-07-13)
+## Current Milestone: v1.5 MCP Access & Document Fidelity
 
-**Shipped:** v1.4 CI, Presets & Debt Cleanup — 3 фазы (17–19), 8 планов, 15 задач, 54 коммита, ~2 дня. Каждый push теперь проходит 4-уровневый GitHub Actions (gate → -race → 5-образная bake-сборка с gha-кэшем → живой compose-E2E со всеми тремя движками); клиенты создают задачи по именованным пресетам (`preset=<name>`, CLI manage-presets, спящий DDL ожил без миграций); хвост v1.3-долга закрыт, полный `-race` с живой БД — 23/23 без skip.
+**Goal:** Агенты и внутренние сервисы получают OctoConv как MCP-инструмент и self-service API пресетов, а документный класс добирает строгую достоверность: настоящая ISO-валидация PDF/A и внятное различение «запаролен» vs «устарел».
 
-**Next milestone goals:** не определены — `/gsd:new-milestone`. Кандидаты: SEED-003 (MCP-сервер поверх API — триггер сработал: пресеты отгружены), DOCV3-01..03, PRST-V2-01 (REST CRUD пресетов), новые движки (av/archive/probe), K8s+KEDA. Операционный хвост: включить branch-protection required-checks (gate/race/docker-build) в GitHub UI.
+**Target features:**
+- MCP-сервер (SEED-003): cmd/mcp-server, stdio-транспорт, тонкая обёртка над HTTP API; convert_file (блокирующий, preset-aware), get_job_status/download_result, list_supported_formats, list_presets; официальный modelcontextprotocol/go-sdk
+- REST CRUD пресетов (PRST-V2-01): /v1/presets под API-ключом — self-service client-scope пресеты; system-scope остаётся за операторским CLI
+- veraPDF-валидация (DOCV3-01): полная ISO 19005 проверка PDF/A-выходов вместо OutputIntent-sanity
+- CFB-различение (DOCV3-02): парсинг CFB-директории — разные 422 для «запаролен» и «legacy»
+
+**Key context:** MCP — новая территория (research first). Первые два кластера строятся на пресетах v1.4; вторые два углубляют document-класс. CI v1.4 гоняет каждый пуш. Прошлое состояние: v1.4 shipped 2026-07-13 (см. Context).
 
 ## Requirements
 
@@ -58,9 +64,12 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Пусто — v1.4 закрыт; следующий скоуп определит /gsd:new-milestone. -->
+<!-- Milestone v1.5 (MCP Access & Document Fidelity). -->
 
-(нет активных требований — ожидается новый milestone)
+- [ ] Агент может конвертировать файл одним MCP-вызовом (convert_file, stdio) через существующий API с ключом клиента
+- [ ] Клиент управляет своими пресетами через REST /v1/presets (self-service, client-scope)
+- [ ] PDF/A-выходы проходят полную ISO 19005 (veraPDF) валидацию
+- [ ] CFB-входы получают различённые 422: «запаролен» vs «устаревший формат»
 
 ### Out of Scope
 
@@ -141,4 +150,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-13 after v1.4 milestone*
+*Last updated: 2026-07-13 after v1.5 milestone start*
