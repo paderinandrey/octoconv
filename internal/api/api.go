@@ -29,6 +29,21 @@ type PresetRepo interface {
 	Resolve(ctx context.Context, clientID uuid.UUID, name string) (*presets.Preset, error)
 }
 
+// PresetAdmin is the SECOND, separate interface (D-08) the /v1/presets REST
+// handlers depend on: client-scope CRUD plus the merged effective-view reads
+// (D-09/D-10). It exists alongside PresetRepo (interface segregation
+// preserved, ARCHITECTURE Anti-Pattern 3) — do not widen PresetRepo instead.
+// Both are backed by the same *presets.Repo.
+type PresetAdmin interface {
+	Create(ctx context.Context, p presets.CreateParams) (uuid.UUID, int, error)
+	Update(ctx context.Context, scope string, clientID *uuid.UUID, name, targetFormat string, options map[string]any, description string) (int, error)
+	Deactivate(ctx context.Context, scope string, clientID *uuid.UUID, name string) error
+	Get(ctx context.Context, scope string, clientID *uuid.UUID, name string) (*presets.Preset, error)
+	List(ctx context.Context, scope string, clientID *uuid.UUID, includeInactive bool) ([]presets.Preset, error)
+	ListForClient(ctx context.Context, clientID *uuid.UUID, includeInactive bool) ([]presets.Preset, error)
+	GetForClient(ctx context.Context, clientID *uuid.UUID, name string) (*presets.Preset, error)
+}
+
 // Storage is the subset of the storage client the API depends on.
 type Storage interface {
 	Upload(ctx context.Context, key string, r io.Reader, size int64, contentType string) error
@@ -63,6 +78,7 @@ type Server struct {
 	storage       Storage
 	queue         Enqueuer
 	presets       PresetRepo
+	presetAdmin   PresetAdmin
 	resolver      auth.ClientResolver
 	health        HealthDeps
 	maxUploadByte int64
@@ -96,7 +112,9 @@ type Config struct {
 // and Config reserved for tunables only. health carries the three
 // dependency pingers /healthz probes (OBS-02). presets is the narrow
 // PresetRepo used by handleCreateJob to resolve preset=<name> (D-09).
-func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, resolver auth.ClientResolver, health HealthDeps, cfg Config) *Server {
+// presetAdmin is the second, separate interface (D-08) the /v1/presets REST
+// handlers depend on — both are typically backed by the same *presets.Repo.
+func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, presetAdmin PresetAdmin, resolver auth.ClientResolver, health HealthDeps, cfg Config) *Server {
 	if cfg.PresignTTL == 0 {
 		cfg.PresignTTL = 15 * time.Minute
 	}
@@ -120,6 +138,7 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, r
 		storage:                      storage,
 		queue:                        queue,
 		presets:                      presets,
+		presetAdmin:                  presetAdmin,
 		resolver:                     resolver,
 		health:                       health,
 		maxUploadByte:                cfg.MaxUploadBytes,
