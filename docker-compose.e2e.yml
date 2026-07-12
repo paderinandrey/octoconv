@@ -20,27 +20,34 @@ services:
       WEBHOOK_ALLOW_INSECURE_HTTP: "true"
     # validateCallbackURL runs inside the api process at job-creation time
     # (net.LookupHost), so api itself needs the host-gateway alias too — not
-    # just worker/document-worker which actually deliver the webhook (DEBT-01/
-    # WR-02). Without this, plain-Linux docker cannot resolve
+    # just the webhook-worker services which actually deliver the webhook
+    # (DEBT-01/WR-02). Without this, plain-Linux docker cannot resolve
     # host.docker.internal and every callback_url is rejected with 400 before
     # any conversion runs.
+    #
+    # WEBHOOK_ALLOW_PRIVATE_IPS/WEBHOOK_ALLOW_INSECURE_HTTP stay ONLY here on
+    # the api service — that's the creation-time SSRF guard (validateCallbackURL),
+    # not a webhook-worker concern; do NOT add them to webhook-worker-1/-2.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  # worker delivers webhooks (HandleWebhookDeliver) — it is the process that
-  # actually dials the E2E test's host-bound receiver.
-  worker:
+  # webhook-worker-1/-2 deliver webhooks (HandleWebhookDeliver, Phase 16) —
+  # they are the processes that actually dial the E2E test's host-bound
+  # receiver. Neither the image worker nor document-worker deliver webhooks
+  # anymore (D-03/D-06), so their overrides below were removed.
+  webhook-worker-1:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-  document-worker:
+  webhook-worker-2:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   # chromium-worker needs the host-gateway alias for the Plan 04/05
   # network-block canary test (D-04) — the canary receiver runs in the Go
   # E2E test process on the host, reachable at host.docker.internal from
-  # inside the compose network.
+  # inside the compose network. Unrelated to webhook delivery — retained
+  # unchanged.
   chromium-worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"

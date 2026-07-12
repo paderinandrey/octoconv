@@ -139,6 +139,40 @@ services:
       DOCUMENT_ENGINE_TIMEOUT: "300s"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      METRICS_ADDR: "127.0.0.1:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+
+  # Two symmetric webhook-worker replicas (not deploy.replicas, which
+  # docker-compose ignores without swarm mode) -- this is the real ≥2-consumer
+  # redundancy required by D-05/T-16-09/SC2: killing either one still leaves
+  # the other draining the webhook queue. Both are identical, no
+  # primary/secondary distinction.
+  webhook-worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook-worker
+    container_name: octoconv-webhook-worker-1
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://octo:octo-pass@postgres:5432/octo_db
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: octoconv
+      S3_USE_SSL: "false"
+      WEBHOOK_WORKER_CONCURRENCY: "4"
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
       WEBHOOK_PRESIGN_TTL: "6h"
       RECONCILER_QUEUED_STALE_AFTER: "90s"
@@ -146,11 +180,36 @@ services:
       RECONCILER_SWEEP_INTERVAL: "1m"
       RECONCILER_MAX_RECOVERIES: "3"
       METRICS_ADDR: "127.0.0.1:9090"
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 1g
+
+  webhook-worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook-worker
+    container_name: octoconv-webhook-worker-2
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://octo:octo-pass@postgres:5432/octo_db
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: octoconv
+      S3_USE_SSL: "false"
+      WEBHOOK_WORKER_CONCURRENCY: "4"
+      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
+      WEBHOOK_PRESIGN_TTL: "6h"
+      RECONCILER_QUEUED_STALE_AFTER: "90s"
+      RECONCILER_ACTIVE_STALE_AFTER: "5m"
+      RECONCILER_SWEEP_INTERVAL: "1m"
+      RECONCILER_MAX_RECOVERIES: "3"
+      METRICS_ADDR: "127.0.0.1:9090"
 
   document-worker:
     build:
@@ -184,13 +243,6 @@ services:
       DOCUMENT_MAX_RETRY: "3"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
-      # document-worker only PRODUCES webhook-delivery tasks; signing happens
-      # in cmd/worker's HandleWebhookDeliver (internal/worker/worker.go). These
-      # two vars are read at startup (cmd/document-worker/main.go) but are
-      # currently inert here -- wired for parity/explicitness, revisited by
-      # the v1.3 webhook-decoupling phase (WEBH-01) (DEBT-05).
-      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
-      WEBHOOK_PRESIGN_TTL: "6h"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -230,13 +282,6 @@ services:
       ENGINE_TIMEOUT: "120s"
       DOCUMENT_MAX_RETRY: "3"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
-      # chromium-worker only PRODUCES webhook-delivery tasks; signing happens
-      # in cmd/worker's HandleWebhookDeliver (internal/worker/worker.go).
-      # These two vars are read at startup but are currently inert here --
-      # wired for parity/explicitness, same DEBT-05 rationale as
-      # document-worker's own block above.
-      WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
-      WEBHOOK_PRESIGN_TTL: "6h"
       METRICS_ADDR: "127.0.0.1:9090"
     # /dev/shm sizing as a belt-and-suspenders compensating control
     # alongside the --disable-dev-shm-usage argv flag (D-09/Pitfall C) --
