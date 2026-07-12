@@ -2,13 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: MCP Access & Document Fidelity
-status: planning
-last_updated: "2026-07-13T00:00:00.000Z"
-last_activity: 2026-07-13
+status: executing
+stopped_at: Roadmap complete (Phases 20-23), ready to plan Phase 20
+last_updated: "2026-07-12T23:13:10.379Z"
+last_activity: 2026-07-12 -- Phase 20 execution started
 progress:
   total_phases: 4
   completed_phases: 0
-  total_plans: 0
+  total_plans: 2
   completed_plans: 0
   percent: 0
 ---
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-13 after v1.5 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 20 — Presets REST CRUD & Format Discovery
+**Current focus:** Phase 20 — presets-rest-format-discovery
 
 ## Current Position
 
-Phase: 20 — Presets REST CRUD & Format Discovery
-Plan: —
-Status: Pending (roadmap complete, ready to plan Phase 20)
-Last activity: 2026-07-13 — Milestone v1.5 roadmap created (Phases 20-23)
+Phase: 20 (presets-rest-format-discovery) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 20
+Last activity: 2026-07-12 -- Phase 20 execution started
 
 ## Performance Metrics
 
