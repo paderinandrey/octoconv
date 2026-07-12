@@ -130,7 +130,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 - [x] 16-02-PLAN.md — cmd/webhook-worker binary (with storage) + Dockerfile; remove webhook/sweeper from cmd/worker
 - [x] 16-03-PLAN.md — Two named webhook-worker compose services + strip webhook env from image worker + .env.example
 - [x] 16-04-PLAN.md — Live e2e acceptance (SC1/SC2/SC3) with human-verify checkpoint
-- [ ] 16-05-PLAN.md — Gap closure: fix advisory-lock conn leak (CR-01) + add PGAdvisoryLock.Close() for clean shutdown (WR-01)
+- [x] 16-05-PLAN.md — Gap closure: fix advisory-lock conn leak (CR-01) + add PGAdvisoryLock.Close() for clean shutdown (WR-01)
 
 ## Progress
 
