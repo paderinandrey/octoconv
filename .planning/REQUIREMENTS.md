@@ -37,7 +37,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Webhook Reliability
 
-- [ ] **WEBH-01**: Webhook-доставка работает при деплое любого подмножества engine-воркеров — отсутствие `cmd/worker` (image) не приводит к молчаливой потере вебхуков; выживает падение любого одного процесса
+- [x] **WEBH-01**: Webhook-доставка работает при деплое любого подмножества engine-воркеров — отсутствие `cmd/worker` (image) не приводит к молчаливой потере вебхуков; выживает падение любого одного процесса
 
 ## v2 Requirements
 
@@ -80,7 +80,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HTML-01 | Phase 15 | Complete |
 | HTML-02 | Phase 15 | Complete |
 | HTML-03 | Phase 15 | Complete |
-| WEBH-01 | Phase 16 | Pending |
+| WEBH-01 | Phase 16 | Complete |
 
 **Coverage:**
 - v1 requirements: 14 total
