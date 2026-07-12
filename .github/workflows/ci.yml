@@ -1,0 +1,141 @@
+name: ci
+
+on: [push, pull_request]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Tier 1: fast gate — gofmt/vet/build/test, no external services.
+  # internal/e2e self-skips here (E2E_BASE_URL unset), keeping this tier
+  # offline-safe (SC1).
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./... -timeout 5m
+
+  # Tier 2: race detector. No DB service — DATABASE_URL-gated tests (e.g. the
+  # reconciler soak test) self-skip offline; DEBT-07 already made the rest
+  # race-clean (SC2). Explicit -timeout override per Pitfall 7 — never the
+  # 10-minute default, since -race overhead can push a real-wall-clock test
+  # past it.
+  race:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go test -race ./... -timeout 10m
+
+  # Tier 3: build all 6 compose bake targets, verify they build, warm the GHA
+  # layer cache per-target (Pitfalls 1/3/4). Verification-only: load: false,
+  # no compose stack is brought up here.
+  docker-build:
+    needs: race
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/bake-action@v7
+        with:
+          files: docker-compose.yml
+          load: false
+          set: |
+            api.cache-to=type=gha,mode=max,scope=api
+            api.cache-from=type=gha,scope=api
+            worker.cache-to=type=gha,mode=max,scope=worker
+            worker.cache-from=type=gha,scope=worker
+            document-worker.cache-to=type=gha,mode=max,scope=document-worker
+            document-worker.cache-from=type=gha,scope=document-worker
+            chromium-worker.cache-to=type=gha,mode=max,scope=chromium-worker
+            chromium-worker.cache-from=type=gha,scope=chromium-worker
+            webhook-worker-1.cache-to=type=gha,mode=max,scope=webhook-worker
+            webhook-worker-1.cache-from=type=gha,scope=webhook-worker
+            webhook-worker-2.cache-to=type=gha,mode=max,scope=webhook-worker
+            webhook-worker-2.cache-from=type=gha,scope=webhook-worker
+
+  # Tier 4: live E2E against the real compose stack (docker-compose.yml +
+  # docker-compose.e2e.yml — the ONLY job referencing the .e2e.yml override,
+  # confining its SSRF-guard relaxation to this test-only context).
+  # ADVISORY on PR (continue-on-error true), REQUIRED on main-push (SC4).
+  e2e:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - uses: docker/setup-buildx-action@v4
+      # Reload images from the docker-build-tier-warmed GHA cache (near-instant:
+      # same scopes as above).
+      - uses: docker/bake-action@v7
+        with:
+          files: docker-compose.yml
+          load: true
+          set: |
+            api.cache-from=type=gha,scope=api
+            worker.cache-from=type=gha,scope=worker
+            document-worker.cache-from=type=gha,scope=document-worker
+            chromium-worker.cache-from=type=gha,scope=chromium-worker
+            webhook-worker-1.cache-from=type=gha,scope=webhook-worker
+            webhook-worker-2.cache-from=type=gha,scope=webhook-worker
+      - name: Bring up compose stack
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
+        # deliberately NOT --build here: images are already loaded and tagged
+        # by bake above under the same {project}-{service} names compose
+        # expects.
+      - name: Wait for API readiness
+        run: curl -fsS --retry 30 --retry-all-errors --retry-delay 2 http://localhost:8090/healthz
+      - name: Run migrations
+        run: go run ./cmd/migrate
+        env:
+          DATABASE_URL: postgres://octo:octo-pass@localhost:5434/octo_db
+      - name: Run E2E suite
+        run: go test ./internal/e2e/... -timeout 30m
+        env:
+          E2E_BASE_URL: http://localhost:8090
+          DATABASE_URL: postgres://octo:octo-pass@localhost:5434/octo_db
+          API_KEY_SALT: dev-only-change-me-in-real-deploys
+          WEBHOOK_SIGNING_SECRET: dev-only-change-me-in-real-deploys
+          # presigned host minio:9000 isn't runner-resolvable from the host
+          # process running `go test`; redirect the presigned-download dial
+          # to the published MinIO port instead.
+          E2E_S3_DIAL_ADDR: 127.0.0.1:9100
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color > compose-logs.txt
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: compose-logs
+          path: compose-logs.txt
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
