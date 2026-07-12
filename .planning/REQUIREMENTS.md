@@ -9,10 +9,10 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### CI Pipeline
 
-- [ ] **CI-01**: Каждый push/PR проходит базовый gate — gofmt, go vet, go build, go test ./... (required check)
-- [ ] **CI-02**: CI гоняет `go test ./... -race` полным пакетным прогоном — чистый (required; зависит от DEBT-07)
-- [ ] **CI-03**: Все 5 Docker-образов (api, worker, document-worker, chromium-worker, webhook-worker) собираются в CI через bake по docker-compose.yml с gha layer-кэшем (per-target scope, required)
-- [ ] **CI-04**: Live E2E: полный compose-стек поднимается в CI и `internal/e2e` проходит против него — advisory на PR, required на main; teardown через `if: always()`, логи стека выгружаются артефактом при падении, устаревшие раны отменяются concurrency-группой (зависит от DEBT-08)
+- [x] **CI-01**: Каждый push/PR проходит базовый gate — gofmt, go vet, go build, go test ./... (required check)
+- [x] **CI-02**: CI гоняет `go test ./... -race` полным пакетным прогоном — чистый (required; зависит от DEBT-07)
+- [x] **CI-03**: Все 5 Docker-образов (api, worker, document-worker, chromium-worker, webhook-worker) собираются в CI через bake по docker-compose.yml с gha layer-кэшем (per-target scope, required)
+- [x] **CI-04**: Live E2E: полный compose-стек поднимается в CI и `internal/e2e` проходит против него — advisory на PR, required на main; teardown через `if: always()`, логи стека выгружаются артефактом при падении, устаревшие раны отменяются concurrency-группой (зависит от DEBT-08)
 
 ### Presets
 
@@ -67,10 +67,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PRST-02 | Phase 18 | Complete |
 | PRST-03 | Phase 18 | Complete |
 | PRST-04 | Phase 18 | Complete |
-| CI-01 | Phase 19 | Pending |
-| CI-02 | Phase 19 | Pending |
-| CI-03 | Phase 19 | Pending |
-| CI-04 | Phase 19 | Pending |
+| CI-01 | Phase 19 | Complete |
+| CI-02 | Phase 19 | Complete |
+| CI-03 | Phase 19 | Complete |
+| CI-04 | Phase 19 | Complete |
 
 **Coverage:**
 - v1 requirements: 11 total
