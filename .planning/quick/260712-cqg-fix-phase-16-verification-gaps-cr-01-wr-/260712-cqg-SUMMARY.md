@@ -1,6 +1,7 @@
 ---
 phase: quick-260712-cqg
 plan: 01
+status: complete
 subsystem: infra
 tags: [postgres, pgxpool, advisory-lock, graceful-shutdown, reconciler, webhook-worker]
 
