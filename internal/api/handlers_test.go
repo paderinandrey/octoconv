@@ -19,6 +19,7 @@ import (
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/presets"
 )
 
 // testClientKey is the raw key fakeResolver accepts; requests present it via
@@ -88,6 +89,37 @@ func (f *fakeQueue) EnqueueDocumentConvert(_ context.Context, id uuid.UUID) erro
 func (f *fakeQueue) EnqueueHTMLConvert(_ context.Context, id uuid.UUID) error {
 	f.enqueuedHTML = id
 	return nil
+}
+
+// fakePresetRepo implements api.PresetRepo. It supports a DIFFERENT result on
+// the SECOND (and later) Resolve call so the pre-Create active re-check
+// (Pitfall 8) can be simulated: resolve/resolveErr are the default result
+// returned on every call; when recheckSet is true, the second-and-later call
+// returns recheckResolve/recheckErr instead.
+type fakePresetRepo struct {
+	resolve    *presets.Preset
+	resolveErr error
+
+	recheckSet     bool
+	recheckResolve *presets.Preset
+	recheckErr     error
+
+	calls int
+}
+
+func (f *fakePresetRepo) Resolve(_ context.Context, _ uuid.UUID, _ string) (*presets.Preset, error) {
+	f.calls++
+	if f.calls >= 2 && f.recheckSet {
+		return f.recheckResolve, f.recheckErr
+	}
+	return f.resolve, f.resolveErr
+}
+
+// defaultFakePresetRepo returns presets.ErrNotFound on every call -- the
+// no-preset default used by every existing (pre-18-03) test so their
+// behavior is unaffected by the new NewServer positional argument.
+func defaultFakePresetRepo() *fakePresetRepo {
+	return &fakePresetRepo{resolveErr: presets.ErrNotFound}
 }
 
 // fakePinger implements api.Pinger: returns err (nil = healthy) from Ping.
@@ -315,12 +347,40 @@ func multipartBodyWithOpts(t *testing.T, filename, target string, data []byte, o
 	return &b, w.FormDataContentType()
 }
 
+// multipartBodyWithPreset writes a "preset" form field instead of "target",
+// and an optional "opts" form field -- used by the D-01 mutual-exclusivity
+// tests (preset+target, preset+opts) and the preset-resolution tests.
+func multipartBodyWithPreset(t *testing.T, filename, preset, target string, data []byte, opts string) (*bytes.Buffer, string) {
+	t.Helper()
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	if filename != "" {
+		fw, err := w.CreateFormFile("file", filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = fw.Write(data)
+	}
+	if preset != "" {
+		_ = w.WriteField("preset", preset)
+	}
+	if target != "" {
+		_ = w.WriteField("target", target)
+	}
+	if opts != "" {
+		_ = w.WriteField("opts", opts)
+	}
+	_ = w.Close()
+	return &b, w.FormDataContentType()
+}
+
 // newTestServer wires a Server with a fakeResolver that accepts
 // testClientKey; it returns the resolver too so tests can assert against its
-// fixed client id.
+// fixed client id. The PresetRepo slot defaults to ErrNotFound on every call
+// so existing non-preset tests are unaffected (D-09/Task 3).
 func newTestServer(repo Repo, store Storage, q Enqueuer) (*Server, *fakeResolver) {
 	resolver := newFakeResolver()
-	return NewServer(repo, store, q, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20}), resolver
+	return NewServer(repo, store, q, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20}), resolver
 }
 
 // authed sets the Authorization header requests need to pass auth.Middleware.
@@ -506,7 +566,7 @@ func TestCreateJob_DimensionLimitExceeded(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1_000_000})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1_000_000})
 
 	body, ct := multipartBody(t, "in.png", "webp", oversizedPNGFixture())
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -650,7 +710,7 @@ func TestCreateJob_DocumentSkipsDimensionCheck(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1})
 
 	body, ct := multipartBody(t, "in.docx", "pdf", docxFixture(t))
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -672,7 +732,7 @@ func TestCreateJob_ZipBombRejected(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{
 		MaxUploadBytes:               1 << 20,
 		MaxDocumentUncompressedBytes: 1 << 20, // 1 MiB test limit
 	})
@@ -829,7 +889,7 @@ func TestHealthz_Degraded(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resolver := newFakeResolver()
-			srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, resolver, tc.health, Config{MaxUploadBytes: 1 << 20})
+			srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, tc.health, Config{MaxUploadBytes: 1 << 20})
 
 			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 			rec := httptest.NewRecorder()
@@ -866,7 +926,7 @@ func TestGetJob_DonePresigned(t *testing.T) {
 		outputs: []jobs.Output{{Ordinal: 0, ObjectKey: "results/x/0-out.webp"}},
 	}
 	store := &fakeStorage{presigned: "https://example/download"}
-	srv := NewServer(repo, store, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1146,7 +1206,7 @@ func TestGetJob_OptsEcho(t *testing.T) {
 		Status:   jobs.StatusQueued,
 		Opts:     map[string]any{"pdf_profile": "pdf/a-2b"},
 	}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1169,7 +1229,7 @@ func TestGetJob_NoOptsOmitted(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
 	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1189,7 +1249,7 @@ func TestGetJob_SameClient_OK(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
 	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1412,5 +1472,258 @@ func TestCreateJob_DocumentOptsOnHTMLRejected(t *testing.T) {
 	}
 	if repo.created != nil {
 		t.Error("must not create job for a document opts value (pdf_profile) on an html job")
+	}
+}
+
+// --- preset resolution tests (Plan 18-03: PRST-02/03/04, D-01/D-03/D-06/D-07/D-08, Pitfall 8) ---
+
+// TestCreateJob_PresetResolvedImage verifies PRST-02/D-07/D-08: preset=<name>
+// (no target) resolves to the preset's target_format, converts, and persists
+// provenance into CreateParams.
+func TestCreateJob_PresetResolvedImage(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	q := &fakeQueue{}
+	resolver := newFakeResolver()
+	presetRepo := &fakePresetRepo{resolve: &presets.Preset{
+		ID: uuid.New(), Name: "thumb", Version: 2, TargetFormat: "webp",
+	}}
+	srv := NewServer(repo, store, q, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), "")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil {
+		t.Fatal("expected job to be created")
+	}
+	if repo.created.TargetFormat != "webp" {
+		t.Errorf("TargetFormat = %q, want webp (preset-resolved)", repo.created.TargetFormat)
+	}
+	if repo.created.PresetName != "thumb" || repo.created.PresetVersion != 2 {
+		t.Errorf("provenance = %+v, want PresetName=thumb PresetVersion=2", repo.created)
+	}
+	if q.enqueuedImage != repo.createdID {
+		t.Errorf("enqueuedImage = %s, want %s", q.enqueuedImage, repo.createdID)
+	}
+}
+
+// TestCreateJob_PresetAndTargetMutuallyExclusive verifies D-01: supplying
+// preset together with an explicit target is rejected 422, before any
+// upload or preset lookup.
+func TestCreateJob_PresetAndTargetMutuallyExclusive(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	presetRepo := &fakePresetRepo{resolve: &presets.Preset{ID: uuid.New(), Name: "thumb", Version: 1, TargetFormat: "webp"}}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "webp", pngBytesFixture(), "")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload for preset+target")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for preset+target")
+	}
+	if presetRepo.calls != 0 {
+		t.Errorf("presetRepo.calls = %d, want 0 (mutual-exclusivity gate runs before any preset lookup)", presetRepo.calls)
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "either preset or target") {
+		t.Errorf("error = %q, want a mutual-exclusivity message", resp["error"])
+	}
+}
+
+// TestCreateJob_PresetAndOptsMutuallyExclusive verifies D-01: supplying
+// preset together with a non-empty opts field is rejected 422.
+func TestCreateJob_PresetAndOptsMutuallyExclusive(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	presetRepo := &fakePresetRepo{resolve: &presets.Preset{ID: uuid.New(), Name: "thumb", Version: 1, TargetFormat: "webp"}}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), `{"pdf_profile":"pdf/a-2b"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload for preset+opts")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for preset+opts")
+	}
+}
+
+// TestCreateJob_UnknownPreset422NoLeak verifies D-03/Pitfall 12: a
+// nonexistent preset AND a (simulated) cross-client/inactive preset both
+// collapse to ErrNotFound inside Resolve and return the IDENTICAL 422 body
+// -- byte-for-byte, not just the same status code.
+func TestCreateJob_UnknownPreset422NoLeak(t *testing.T) {
+	cases := []struct {
+		name       string
+		presetRepo *fakePresetRepo
+	}{
+		{name: "nonexistent", presetRepo: &fakePresetRepo{resolveErr: presets.ErrNotFound}},
+		{name: "cross-client-or-inactive", presetRepo: &fakePresetRepo{resolveErr: presets.ErrNotFound}},
+	}
+
+	bodies := make([][]byte, 0, len(cases))
+	for _, tc := range cases {
+		repo := &fakeRepo{}
+		store := &fakeStorage{}
+		resolver := newFakeResolver()
+		srv := NewServer(repo, store, &fakeQueue{}, tc.presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+		body, ct := multipartBodyWithPreset(t, "in.png", "ghost", "", pngBytesFixture(), "")
+		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: status = %d, want 422; body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		var resp map[string]string
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		if resp["error"] != errUnknownPreset {
+			t.Errorf("%s: error = %q, want %q", tc.name, resp["error"], errUnknownPreset)
+		}
+		if repo.created != nil {
+			t.Errorf("%s: must not create job for an unresolvable preset", tc.name)
+		}
+		bodies = append(bodies, rec.Body.Bytes())
+	}
+	if !bytes.Equal(bodies[0], bodies[1]) {
+		t.Errorf("nonexistent vs cross-client/inactive response bodies differ: %q vs %q (D-03/Pitfall 12 no-leak violation)", bodies[0], bodies[1])
+	}
+}
+
+// TestCreateJob_PresetOptsRevalidated verifies D-06: a preset's stored opts
+// (containing a field the current allowlist rejects) are re-run through
+// ParseDocOpts at USE time, not trusted -- a stale preset fails job creation.
+func TestCreateJob_PresetOptsRevalidated(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	presetRepo := &fakePresetRepo{resolve: &presets.Preset{
+		ID: uuid.New(), Name: "stale", Version: 1, TargetFormat: "pdf",
+		Options: map[string]any{"EncryptFile": true}, // unknown key, since-invalidated
+	}}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.docx", "stale", "", docxFixture(t), "")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not upload before opts re-validation rejects a stale preset")
+	}
+	if repo.created != nil {
+		t.Error("must not create job for a preset with since-invalidated opts")
+	}
+}
+
+// TestCreateJob_PresetDeactivatedDuringCreate verifies Pitfall 8: the preset
+// resolves successfully on the FIRST Resolve (so resolution, opts
+// validation, and upload all succeed), but the pre-Create re-check
+// (SECOND Resolve) reports ErrNotFound -- simulating deactivation in the
+// resolve-to-insert window. The job must be rejected 422 and repo.Create
+// must NEVER be invoked; the already-uploaded object is left in place
+// (mirrors the existing repo.Create-failure no-cleanup path).
+func TestCreateJob_PresetDeactivatedDuringCreate(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	presetRepo := &fakePresetRepo{
+		resolve:    &presets.Preset{ID: uuid.New(), Name: "thumb", Version: 1, TargetFormat: "webp"},
+		recheckSet: true,
+		recheckErr: presets.ErrNotFound,
+	}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), "")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["error"] != errUnknownPreset {
+		t.Errorf("error = %q, want %q", resp["error"], errUnknownPreset)
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must NEVER be invoked when the preset is deactivated between resolve and insert")
+	}
+	if !store.uploaded {
+		t.Error("upload happens before the pre-Create re-check; the object is left uploaded for TTL cleanup")
+	}
+	if presetRepo.calls < 2 {
+		t.Errorf("presetRepo.calls = %d, want >= 2 (resolution + pre-Create re-check)", presetRepo.calls)
+	}
+}
+
+// TestCreateJob_PresetHTMLOptsResolved proves the engine-keyed opts dispatch
+// handles preset-sourced HTML opts identically to ad-hoc HTML opts.
+func TestCreateJob_PresetHTMLOptsResolved(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	q := &fakeQueue{}
+	presetRepo := &fakePresetRepo{resolve: &presets.Preset{
+		ID: uuid.New(), Name: "a4pdf", Version: 1, TargetFormat: "pdf",
+		Options: map[string]any{"page_size": "a4"},
+	}}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, q, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	body, ct := multipartBodyWithPreset(t, "in.html", "a4pdf", "", htmlFixture(), "")
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.Opts["page_size"] != "a4" {
+		t.Errorf("CreateParams.Opts = %+v, want page_size=a4", repo.created)
+	}
+	if q.enqueuedHTML != repo.createdID {
+		t.Errorf("enqueuedHTML = %s, want %s", q.enqueuedHTML, repo.createdID)
 	}
 }
