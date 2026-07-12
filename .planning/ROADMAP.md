@@ -100,7 +100,11 @@ veraPDF are independent document-track deepenings, with veraPDF (highest uncerta
   2. REST behavior mirrors the CLI through the shared `internal/presets.Repo`: update bumps the version and echoes the new number, a duplicate active-create returns 409, and there is no hard delete (deactivate only).
   3. Requesting another client's or a non-existent preset returns the no-leak response (404-style, never 403, never revealing existence).
   4. `GET /v1/formats` returns the supported (source, target) format pairs and their engine classes from a read-only registry walk.
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 20-01-PLAN.md — PresetAdmin interface + /v1/presets CRUD + /v1/formats registry walk + unit/handler tests
+- [ ] 20-02-PLAN.md — live acceptance hard gate: curl-driven REST CRUD + formats proof against the compose stack
 
 ### Phase 21: MCP Server
 **Goal**: Agents (e.g. a Claude Code session) can convert files and discover capabilities through a stdio MCP server that holds zero privileged access and is a pure HTTP client of the existing public API.
