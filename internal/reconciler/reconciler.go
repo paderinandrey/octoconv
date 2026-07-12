@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -108,6 +109,10 @@ type AdvisoryLock interface {
 type PGAdvisoryLock struct {
 	pool *pgxpool.Pool
 	conn *pgxpool.Conn
+	// mu serializes TryAcquire against a shutdown-time Close() invoked from a
+	// different goroutine (main's defer chain races the not-yet-returned
+	// sweeper goroutine's final tick).
+	mu sync.Mutex
 }
 
 // NewPGAdvisoryLock acquires one dedicated connection from pool and never
@@ -127,6 +132,13 @@ func NewPGAdvisoryLock(ctx context.Context, pool *pgxpool.Pool) (*PGAdvisoryLock
 // session return true again (Postgres allows re-acquire by the owning
 // session) — the intended steady state for the elected leader.
 func (l *PGAdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
+	// Held across the entire body (lazy re-acquire, the query, and the error
+	// path) because Close() may run concurrently at shutdown and must not
+	// Release the conn mid-query. Contention is near-zero (TryAcquire fires
+	// once per sweep interval, Close once at shutdown).
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if l.conn == nil {
 		// Lost on a prior tick's error path — lazily re-acquire a fresh
 		// dedicated connection.
@@ -147,12 +159,31 @@ func (l *PGAdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
 		// (MaxConnLifetime) instead of process life — silently blocking any
 		// worker from ever becoming sweeper leader (D-02 CRITICAL).
 		// Hard-closing guarantees Postgres releases the session lock
-		// immediately.
-		l.conn.Conn().Close(ctx)
+		// immediately. Hard-close and Release are complementary, not
+		// mutually exclusive (16-REVIEW.md CR-01): Close() alone would leave
+		// the now-dead resource pinned in the pool forever (a permanent slot
+		// leak), so Release() it after closing to reclaim the pgxpool slot.
+		conn := l.conn
 		l.conn = nil
+		conn.Conn().Close(ctx)
+		conn.Release()
 		return false, fmt.Errorf("pg_try_advisory_lock: %w", err)
 	}
 	return acquired, nil
+}
+
+// Close releases the dedicated connection and with it the session-level
+// advisory lock; safe to call once at shutdown. TryAcquire must not be
+// called afterwards. This is what lets pool.Close() return in bounded time
+// (WR-01) instead of blocking forever on a never-released pgxpool slot.
+// Idempotent: a nil l.conn (already closed, or never acquired) is a no-op.
+func (l *PGAdvisoryLock) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.conn != nil {
+		l.conn.Release()
+		l.conn = nil
+	}
 }
 
 // RunWithLock ticks every cfg.SweepInterval like Run, but gates each tick on

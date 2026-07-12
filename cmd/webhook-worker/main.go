@@ -94,6 +94,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("advisory lock: %v", err)
 	}
+	// Registered AFTER defer pool.Close() (line ~39) so that under LIFO it
+	// runs FIRST — releasing the dedicated advisory-lock connection before
+	// pool.Close() waits on it. Otherwise pool.Close() blocks forever on the
+	// never-released connection (WR-01).
+	defer lock.Close()
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeWebhookDeliver, h.HandleWebhookDeliver)
