@@ -5,7 +5,7 @@ milestone_name: Document Class v2
 status: executing
 stopped_at: Phase 16 context gathered
 last_updated: "2026-07-12T05:02:27.793Z"
-last_activity: 2026-07-12 -- Phase 16 execution started
+last_activity: 2026-07-12 -- Completed quick task 260712-cqg (CR-01/WR-01 advisory-lock lifecycle fix)
 progress:
   total_phases: 5
   completed_phases: 4
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
 Phase: 16 (webhook-delivery-decoupling) — EXECUTING
 Plan: 1 of 4
 Status: Executing Phase 16
-Last activity: 2026-07-12 -- Phase 16 execution started
+Last activity: 2026-07-12 - Completed quick task 260712-cqg: Fix Phase 16 verification gaps CR-01/WR-01 (advisory-lock connection lifecycle)
 
 ## Performance Metrics
 
@@ -75,6 +75,12 @@ Decisions are logged in PROJECT.md Key Decisions table (v1.2 outcomes recorded t
 - Phase 13: CFB legacy-vs-encrypted distinction depth (generic reject message vs. CFB-directory-stream parsing) — flagged by research, needs a Key Decision before implementation.
 - Phase 15: chromium network-blocking mechanism (CDP-driven interception vs. CLI-flag + container/network egress restriction) — flagged as the milestone's highest-risk open question.
 - Phase 16: webhook-consumer redundancy topology (fixed replica count vs. leader election vs. sweeper extracted to its own singleton process).
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260712-cqg | Fix Phase 16 verification gaps CR-01/WR-01: advisory-lock connection lifecycle (Release pool slot on TryAcquire error; add PGAdvisoryLock.Close and call at webhook-worker shutdown) | 2026-07-12 | 1f8b22b | [260712-cqg-fix-phase-16-verification-gaps-cr-01-wr-](./quick/260712-cqg-fix-phase-16-verification-gaps-cr-01-wr-/) |
 
 ### Pending Todos
 
