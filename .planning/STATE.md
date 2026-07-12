@@ -2,33 +2,33 @@
 gsd_state_version: 1.0
 milestone: v1.4
 milestone_name: CI, Presets & Debt Cleanup
-status: executing
+status: Awaiting next milestone
 stopped_at: Roadmap complete (Phases 17-19), ready to plan Phase 17
-last_updated: "2026-07-12T20:05:19.129Z"
-last_activity: 2026-07-12 -- Phase 19 execution started
+last_updated: "2026-07-12T21:54:28.038Z"
+last_activity: 2026-07-12 — Milestone v1.4 completed and archived
 progress:
   total_phases: 3
   completed_phases: 3
   total_plans: 8
   completed_plans: 8
-  percent: 67
+  percent: 100
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-12 after v1.3 milestone)
+See: .planning/PROJECT.md (updated 2026-07-13 after v1.4 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 **Current focus:** Phase 19 — ci-pipeline
 
 ## Current Position
 
-Phase: 19 (ci-pipeline) — EXECUTING
-Plan: 1 of 2
-Status: Executing Phase 19
-Last activity: 2026-07-12 -- Phase 19 execution started
+Phase: Milestone v1.4 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-12 — Milestone v1.4 completed and archived
 
 ## Performance Metrics
 
@@ -106,6 +106,10 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03) | v1.3 requirements definition (2026-07-10) |
 | accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried into v1.3) | v1.2 requirements definition (2026-07-09) |
 | seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
+| seed | SEED-003: MCP-сервер для OctoConv | Dormant — trigger ACTIVE (presets shipped) | v1.4 planning (2026-07-12) |
+| tech_debt | CACHED-hit log confirmation for CI docker-build (needs gh auth) | Operator-accepted residual | v1.4 close (2026-07-13) |
+| ops | Branch-protection required-checks (gate/race/docker-build) — manual GitHub UI step | Open operational follow-up | v1.4 close (2026-07-13) |
+| tech_debt | presets D-04 single-active-version: application-transactional only, no DB backstop | Accepted residual | v1.4 close (2026-07-13) |
 | seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | ✓ Implemented (v1.3 Phase 16, WEBH-01) | v1.2 close (2026-07-10) |
 | tech_debt | Dead webhook wiring in cmd/document-worker & cmd/chromium-worker (WR-02/WR-03 из 16-REVIEW) | Now DEBT-06, mapped to Phase 17 | v1.3 close (2026-07-12) |
 | tech_debt | fakeEnqueuer data race under full-package -race (internal/reconciler test helpers) | Now DEBT-07, mapped to Phase 17 | v1.3 close (2026-07-12) |
@@ -119,4 +123,4 @@ Resume file: .planning/ROADMAP.md
 
 ## Operator Next Steps
 
-- Plan the first v1.4 phase with `/gsd:plan-phase 17`
+- Start the next milestone with /gsd-new-milestone

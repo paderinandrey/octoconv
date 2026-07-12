@@ -122,6 +122,44 @@
 
 ---
 
+## Milestone: v1.4 — CI, Presets & Debt Cleanup
+
+**Shipped:** 2026-07-13
+**Phases:** 3 (17–19) | **Plans:** 8 | **Timeline:** ~2 дня (2026-07-12 → 2026-07-13), 54 коммита, +2261/−60 строк (без .planning)
+
+### What Was Built
+- Debt-first opening: dead webhook wiring removed, fakeEnqueuer race-safe, image E2E test — plus a bonus terminal-Close fix (DEFER-17-01) discovered BY a phase hard gate hanging on a Phase 16 test (Phase 17)
+- Named presets end-to-end: internal/presets (SQL-level shadowing/no-leak), manage-presets CLI, preset= in POST /v1/jobs with XOR/re-validation/TOCTOU re-check, provenance into dormant DDL columns — zero migrations, zero new deps (Phase 18)
+- 4-tier GitHub Actions CI live on a public repo: gate → -race → 6-target bake with per-scope gha cache → full compose E2E; first-ever run failed exactly one tier and thereby proved the failure-path machinery (logs artifact, if:always teardown) while exposing a real E2E-env config bug (429 rate-limit cascade) (Phase 19)
+
+### What Worked
+- **Live hard gates as plan requirements (v1.3 lesson institutionalized)**: every phase's checker demanded unconditional live proofs; Phase 17's gate hang surfaced a real latent bug (lazy re-acquire after Close) that three prior green runs had missed by timing luck.
+- **The pipeline's first failure was its first success**: run 1's e2e failure exercised artifact upload + teardown exactly as designed and handed over a 5.6KB compose-log that pinpointed the 429 cascade in minutes (fetched via nightly.link despite no gh auth).
+- **Empirical validation of plan self-checks**: the checker executed the plans' own verify commands against mocks and caught two would-never-pass gates (broken yq pipeline, wrong grep count); the orchestrator then caught a third (PyYAML absent) the same way. Plans whose gates are themselves tested don't wedge executors.
+- **Anonymous-evidence improvisation**: public-repo API polling → rate-limited → un-quota'd badge endpoint → nightly.link artifacts. The observation plan degraded gracefully three times without losing evidentiary rigor.
+
+### What Was Inefficient
+- **Docker daemon (OrbStack) wedged during the first 18-04 attempt** — 10-minute executor stall, then a misdiagnosed restart (Docker Desktop isn't installed; OrbStack is). Lesson recorded: identify the actual container runtime before restarting it; give executors a kill-after-120s rule for docker commands.
+- **GitHub anonymous API quota (60/hr) burned by 30s polling** — switch to badge/nightly.link earlier, or get gh auth up front for CI-heavy phases.
+- **Production rate limits as E2E blocker was foreseeable**: PITFALLS.md flagged healthcheck timing but nobody modeled the suite's polling RPM against RATE_LIMIT_IP_RPM=60 on a faster runner. Local greenness is not CI greenness.
+
+### Patterns Established
+- **checkpoint:human-verify with graceful downgrade**: plan encodes gh-authenticated watch → anonymous API → badge → human, in that order; the operator only sees the checkpoint when automation is truly exhausted.
+- **Test-only compose override as the single home for E2E relaxations** (SSRF opt-outs since v1.2, now rate limits) — production compose is never touched by test needs.
+- **Orchestrator-inline execution for push-main plans**: worktree isolation is structurally wrong for a plan whose action IS pushing main; executed inline with the same gates and SUMMARY discipline.
+
+### Key Lessons
+1. Hard gates don't just verify — they discover: two of this milestone's three real bugs (terminal-Close, 429 cascade) were found by gates, not by planning or review.
+2. Plan self-verification commands must themselves be executed before execution (against mocks) — three broken gates in one phase proved this is cheap and always worth it.
+3. CI environments differ from dev in speed, not just OS: rate limits, quotas and timing assumptions all need a "×10 faster machine" sanity pass.
+
+### Cost Observations
+- Model mix: planner on Opus, checker/executor/verifier/integration on Sonnet — unchanged.
+- Sessions: ~1 background session end-to-end (plus the operator's checkpoint replies).
+- Notable: zero post-merge test failures across all waves — five consecutive milestones now; and the milestone closed within ~26 часов календарного времени.
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -132,6 +170,7 @@
 | v1.1 | ~1 | 3 | Same-day tech-debt close; first zero-carry-over audit (no retro section written) |
 | v1.2 | ~2 | 4 | First multi-engine milestone; verify → gap-plan → re-verify loop exercised for real (Content-Type parity); first committed live E2E suite |
 | v1.3 | ~4 | 5 | Third engine class; review-fixes-before-verifier discipline adopted; first parallel-session reconciliation (quick-task vs gap-plan) |
+| v1.4 | ~1 | 3 | First live CI on GitHub; unconditional live hard gates institutionalized; plan self-checks empirically validated pre-execution |
 
 ### Cumulative Quality
 
@@ -141,9 +180,11 @@
 | v1.1 | 4/4 satisfied | 0 | 0 — first zero-carry-over close |
 | v1.2 | 10/10 satisfied | 0 | 4 advisory (WR-02/03/04 + gofmt nit), all documented in 11-REVIEW.md and STATE.md |
 | v1.3 | 14/14 satisfied | 0 | 3 advisory (dead webhook wiring in document/chromium workers, fakeEnqueuer -race, no image E2E), documented in v1.3-MILESTONE-AUDIT.md |
+| v1.4 | 11/11 satisfied | 0 | 4 advisory (CACHED-residual, branch-protection manual step, D-04 invariant, manual acceptance script), documented in v1.4-MILESTONE-AUDIT.md |
 
 ### Top Lessons (Verified Across Milestones)
 
 1. Blocking-human checkpoints must reject relayed approval from any agent, including the orchestrator — confirmed working as intended in v1.0.
 2. Live, real-infrastructure verification (not just unit tests or narrative trust) is the deciding factor in audit confidence — established in v1.0, worth preserving as milestones grow larger and re-verifying everything live becomes more expensive.
 3. Fix code-review findings that overlap verification criteria before spawning the verifier — learned in v1.2 (paid a gap cycle), applied in v1.3 (two first-pass verifications).
+4. Live hard gates discover bugs planning cannot — confirmed across v1.3 (chromium research corrections) and v1.4 (terminal-Close hang, CI 429 cascade); make them unconditional in every plan that touches infrastructure.

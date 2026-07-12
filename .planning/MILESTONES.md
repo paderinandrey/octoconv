@@ -1,5 +1,22 @@
 # Milestones
 
+## v1.4 CI, Presets & Debt Cleanup (Shipped: 2026-07-12)
+
+**Phases completed:** 3 phases, 8 plans, 15 tasks
+
+**Key accomplishments:**
+
+- Removed dead webhook.NewRepo/NewDeliverer/WEBHOOK_SIGNING_SECRET wiring from cmd/document-worker and cmd/chromium-worker (mirroring cmd/worker's nil-safe pattern), and made fakeEnqueuer's call counters mutex-guarded so `go test ./internal/reconciler/... -race` runs the soak test clean against a live Postgres.
+- Added TestImageConversionE2E (png->jpg via libvips) to internal/e2e, closing the last gap in the E2E format matrix — live-verified PASS against a real docker-compose stack with HMAC webhook confirmation.
+- New `internal/presets` package with SQL-only scope-precedence preset resolution (shadowing + no-leak), bump-on-update versioning, and jobs.preset_name/preset_version provenance wiring — all backed by 11 DB-gated tests against live Postgres.
+- Operator CLI (`cmd/manage-presets`) for create/update/list/show/deactivate of system- and client-scoped presets, backed by a new `internal/presets.ValidateOptsJSON` helper that fail-early-rejects opts matching neither the document nor HTML print allowlist schema (D-11).
+- POST /v1/jobs now accepts `preset=<name>` which resolves through a narrow PresetRepo interface to target_format+opts, enforcing mutual exclusivity with explicit target/opts, a single non-leaking 422 for any resolution miss, full re-validation of stored opts through the existing engine-keyed parsers, and a pre-insert TOCTOU re-check that rejects a preset deactivated in the resolve-to-create window.
+- scripts/presets-acceptance.sh — a 33-assertion live hard gate proving all five manage-presets CLI verbs plus preset resolution/provenance/shadowing/no-leak/re-validation against the real compose stack, passing twice in a row (fresh run + idempotent re-run) with a rebuilt api image.
+- Authored `.github/workflows/ci.yml` — OctoConv's first-ever CI workflow, a 4-tier needs-chained pipeline (gate → race → docker-build → e2e) covering CI-01..CI-04, with every tier's exact commands locally hard-gated green before any push.
+- Executed inline by the orchestrator
+
+---
+
 ## v1.3 Document Class v2 (Shipped: 2026-07-12)
 
 **Phases completed:** 5 phases, 17 plans, 44 tasks
