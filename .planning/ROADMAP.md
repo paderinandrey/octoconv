@@ -113,7 +113,9 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
   2. `go test ./... -race` runs as a full-package required check and is green on the v1.4 codebase (tier 2).
   3. All 5 Docker images (api, worker, document-worker, chromium-worker, webhook-worker) build in CI via `docker buildx bake` over `docker-compose.yml` with per-target `type=gha` layer cache — CACHED layers appear on a second identical run, and a disk-cleanup step keeps the LibreOffice+Chromium build within runner disk.
   4. Live E2E brings up the full compose stack and runs `internal/e2e` against it — advisory on PR, required on main; teardown runs under `if: always()` even when tests fail, stack logs upload as an artifact on failure, and stale runs are cancelled by a concurrency group.
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 19-01-PLAN.md — Author .github/workflows/ci.yml (gate → race → docker-build → e2e) + local hard gates (YAML parse, bake --print dry-run, tier-1/2 replay, SC1 negative proof) [wave 1]
+- [ ] 19-02-PLAN.md — Push to main + live-run observation (scripted gh watch OR human-verify checkpoint) + CACHED-second-run proof + branch-protection follow-up doc [wave 2]
 
 **Operational follow-up (not a code deliverable):** After Phase 19 lands, branch-protection required-checks must be configured manually in GitHub — the workflow file alone does not gate merges.
 
@@ -139,7 +141,7 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 | 16. Webhook Delivery Decoupling | v1.3 | 5/5 | Complete | 2026-07-12 |
 | 17. Tech Debt Cleanup | v1.4 | 2/2 | Complete | 2026-07-12 |
 | 18. Presets | v1.4 | 4/4 | Complete | 2026-07-12 |
-| 19. CI Pipeline | v1.4 | 0/? | Not started | - |
+| 19. CI Pipeline | v1.4 | 0/2 | Not started | - |
 
 ---
 
