@@ -44,3 +44,12 @@ fix the `Close()` / `TryAcquire()` race in `PGAdvisoryLock` (e.g., have `Close()
 calling `Close()`), then re-verify the full-package `-race` run passes without `-skip`.
 
 **Status:** Deferred, not fixed (out of scope for 17-01).
+
+---
+
+**RESOLVED (same phase, orchestrator follow-up):** fixed by making `PGAdvisoryLock.Close()`
+terminal via a `closed` flag — `TryAcquire` after `Close` now errors (fail-safe closed)
+instead of lazily resurrecting a dedicated connection. Regression test
+`TestPGAdvisoryLockCloseIsTerminal` added. Proven by the full unskipped package run:
+`DATABASE_URL=... go test ./internal/reconciler/... -race -count=1` → 23/23 PASS incl.
+`TestPGAdvisoryLockTryAcquireCloseRace` (previously hanging) — 2026-07-12.

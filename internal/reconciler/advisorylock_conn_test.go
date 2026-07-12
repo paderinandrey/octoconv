@@ -148,3 +148,27 @@ func TestPGAdvisoryLockTryAcquireCloseRace(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// TestPGAdvisoryLockCloseIsTerminal proves Close() cannot be undone by a
+// later TryAcquire (DEFER-17-01): before the `closed` flag, a TryAcquire
+// arriving after Close hit the lazy re-acquire branch and pinned a fresh
+// dedicated connection that nothing ever released, so pool.Close() blocked
+// forever on the resurrected slot. Now TryAcquire after Close must error,
+// acquire nothing, and leave the pool drainable.
+func TestPGAdvisoryLockCloseIsTerminal(t *testing.T) {
+	pool := newSoakTestPool(t)
+	ctx := context.Background()
+
+	baseline := pool.Stat().AcquiredConns()
+
+	lock, err := NewPGAdvisoryLock(ctx, pool)
+	if err != nil {
+		t.Fatalf("NewPGAdvisoryLock: %v", err)
+	}
+	lock.Close()
+
+	if _, err := lock.TryAcquire(ctx); err == nil {
+		t.Fatal("TryAcquire after Close: want error, got nil (lock resurrected)")
+	}
+	waitAcquiredConns(t, pool, baseline)
+}

@@ -113,6 +113,11 @@ type PGAdvisoryLock struct {
 	// different goroutine (main's defer chain races the not-yet-returned
 	// sweeper goroutine's final tick).
 	mu sync.Mutex
+	// closed makes Close terminal: without it, a TryAcquire racing past a
+	// completed Close would lazily re-acquire a fresh dedicated connection
+	// that nothing ever releases, and pool.Close() would block forever on
+	// the resurrected slot (DEFER-17-01).
+	closed bool
 }
 
 // NewPGAdvisoryLock acquires one dedicated connection from pool and never
@@ -138,6 +143,13 @@ func (l *PGAdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
 	// once per sweep interval, Close once at shutdown).
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.closed {
+		// Terminal: after Close() the lock must never resurrect a dedicated
+		// connection (it would leak and stall pool.Close, DEFER-17-01).
+		// Fail-safe closed — the caller skips this sweep tick.
+		return false, fmt.Errorf("advisory lock is closed")
+	}
 
 	if l.conn == nil {
 		// Lost on a prior tick's error path — lazily re-acquire a fresh
@@ -173,13 +185,15 @@ func (l *PGAdvisoryLock) TryAcquire(ctx context.Context) (bool, error) {
 }
 
 // Close releases the dedicated connection and with it the session-level
-// advisory lock; safe to call once at shutdown. TryAcquire must not be
-// called afterwards. This is what lets pool.Close() return in bounded time
-// (WR-01) instead of blocking forever on a never-released pgxpool slot.
-// Idempotent: a nil l.conn (already closed, or never acquired) is a no-op.
+// advisory lock; safe to call at shutdown. Close is TERMINAL: any concurrent
+// or subsequent TryAcquire returns an error instead of lazily re-acquiring a
+// connection that nothing would release (DEFER-17-01). This is what lets
+// pool.Close() return in bounded time (WR-01) instead of blocking forever on
+// a never-released pgxpool slot. Idempotent.
 func (l *PGAdvisoryLock) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.closed = true
 	if l.conn != nil {
 		l.conn.Release()
 		l.conn = nil
