@@ -972,3 +972,65 @@ func TestHTMLNetworkBlockE2E(t *testing.T) {
 		// direct proof (D-04).
 	}
 }
+
+// TestImageConversionE2E drives the image engine (libvips) png->jpg happy
+// path through the LIVE pipeline: multipart upload -> poll to done ->
+// presigned download (convert.Sniff-verified as jpg) -> a signed webhook
+// arrives (DEBT-08) -- the last gap in the E2E format matrix, mirroring
+// TestDocumentConversionE2E's single-pair-plus-webhook shape but for the
+// image engine.
+func TestImageConversionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	data, err := os.ReadFile(filepath.Join("testdata", "sample.png"))
+	if err != nil {
+		t.Fatalf("read fixture sample.png: %v", err)
+	}
+
+	callbackURL, received := startWebhookReceiver(t, cfg.webhookHost)
+
+	jobID := postJob(t, cfg.baseURL, apiKey, "sample.png", data, "jpg", callbackURL, "")
+
+	// libvips conversion is fast; a comfortable bound well above the image
+	// queue's expected turnaround, unlike the document/html engines' 5-minute
+	// cold-start allowance.
+	body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 2*time.Minute)
+
+	downloadURL, _ := body["download_url"].(string)
+	if downloadURL == "" {
+		t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+	}
+	assertDownloadIsImage(t, downloadURL, "jpg")
+
+	assertSignedWebhook(t, received, jobID)
+}
+
+// assertDownloadIsImage fetches the presigned URL (no auth header -- the URL
+// is self-authorizing) and asserts the downloaded bytes sniff (via
+// convert.Sniff, the magic-byte detector for raster images -- NOT
+// SniffContainer, which structurally validates ZIP/office containers) as
+// wantFormat.
+func assertDownloadIsImage(t *testing.T, downloadURL, wantFormat string) {
+	t.Helper()
+	resp, err := downloadClient().Get(downloadURL)
+	if err != nil {
+		t.Fatalf("GET download_url: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		t.Fatalf("GET download_url status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read download body: %v", err)
+	}
+	detected, _, err := convert.Sniff(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("convert.Sniff(download): %v", err)
+	}
+	if detected != wantFormat {
+		t.Fatalf("downloaded image format = %q, want %q", detected, wantFormat)
+	}
+}
