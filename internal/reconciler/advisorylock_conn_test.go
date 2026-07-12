@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,4 +100,51 @@ func TestPGAdvisoryLockCloseReleasesSlot(t *testing.T) {
 
 	// Idempotency: a second Close() must not panic (l.conn is already nil).
 	lock.Close()
+}
+
+// TestPGAdvisoryLockTryAcquireCloseRace proves the sync.Mutex serializing
+// PGAdvisoryLock's l.conn field: a background goroutine hammers TryAcquire
+// (reproducing the sweeper goroutine's RunWithLock tick) concurrently with a
+// Close() on the main goroutine (reproducing main's deferred shutdown call).
+// It makes no behavioral assertion beyond completing cleanly and leaking no
+// goroutine — its entire purpose is to give `go test -race` a genuine
+// interleaving on l.conn to catch. Without the mu sync.Mutex guarding both
+// methods' bodies, this run fails under -race; with it, the run is clean
+// because Close() waits for any in-flight TryAcquire to finish before it
+// releases the connection.
+func TestPGAdvisoryLockTryAcquireCloseRace(t *testing.T) {
+	pool := newSoakTestPool(t)
+	ctx := context.Background()
+
+	lock, err := NewPGAdvisoryLock(ctx, pool)
+	if err != nil {
+		t.Fatalf("NewPGAdvisoryLock: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Short-lived context per attempt: tolerate ANY error (including
+			// context deadline/cancellation), since the point is concurrent
+			// access to l.conn, not a particular TryAcquire outcome.
+			acqCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+			_, _ = lock.TryAcquire(acqCtx)
+			cancel()
+		}
+	}()
+
+	// Let the loop goroutine get in flight before racing Close() against it.
+	time.Sleep(5 * time.Millisecond)
+	lock.Close()
+
+	close(stop)
+	wg.Wait()
 }
