@@ -1,235 +1,124 @@
 # Stack Research
 
-**Domain:** GitHub Actions CI pipeline (4-tier: gate → race → Docker build → live E2E) + presets CLI dependency confirmation
-**Researched:** 2026-07-12
-**Confidence:** HIGH (all GitHub Action versions verified live via GitHub's Releases API on 2026-07-12; runner specs verified via official GitHub docs and `actions/runner-images`)
+**Domain:** MCP stdio server, PDF/A ISO validation, OLE-CFB structural parsing (OctoConv v1.5)
+**Researched:** 2026-07-13
+**Confidence:** HIGH (MCP SDK, mscfb — verified via GitHub API + pkg.go.dev), MEDIUM (veraPDF packaging — verified via Docker Hub API + official Dockerfile, no first-party latency benchmark found)
 
-This is an **additive** stack note for OctoConv v1.4 "CI, Presets & Debt Cleanup". It supersedes the previous milestone's STACK.md content (v1.3 "Document Class v2" — chromium/LibreOffice/webhook-worker research, now shipped and validated). It does not revisit the fixed core stack (Go 1.26, chi, asynq/Redis, PostgreSQL 18, MinIO — Notion spec, out of scope) or any existing engine/worker code. Everything below is either (a) net-new GitHub Actions tooling for the CI pipeline, or (b) an explicit confirmation that presets need **zero new Go dependencies**.
+This is an **additive** stack note for OctoConv v1.5 "MCP Access & Document Fidelity". It supersedes the previous milestone's STACK.md content (v1.4 "CI, Presets & Debt Cleanup" — GitHub Actions tooling, now shipped). It does not revisit the fixed core stack (Go 1.26, chi, asynq/Redis, PostgreSQL 18, MinIO — Notion spec, out of scope) or any existing engine/worker code. Everything below is net-new tooling for: (1) `cmd/mcp-server`, (2) PDF/A ISO 19005 validation, (3) OLE-CFB directory parsing, and an explicit confirmation that (4) REST `/v1/presets` needs **zero new Go dependencies**.
 
 ## Recommended Stack
 
-### Core Technologies (GitHub Actions)
+### Core Technologies
 
 | Technology | Version | Purpose | Why Recommended |
 |------------|---------|---------|-----------------|
-| `actions/checkout` | `v7` (v7.0.0, released 2026-06-18) | Clone repo into runner workspace | Current major release as of research date. `v6.0.3` (2026-06-02) is also actively maintained as a fallback. |
-| `actions/setup-go` | `v6` (v6.5.0, released 2026-06-24) | Install Go 1.26 toolchain; built-in module/build cache | Use `go-version-file: go.mod` so CI always tracks whatever `go.mod`'s `go 1.26.4` directive says, with no second version string to keep in sync. Built-in caching (`cache: true`, the default) removes the need for a hand-rolled `actions/cache` step for Go — one less moving part. |
-| `docker/setup-buildx-action` | `v4` (v4.2.0, released 2026-07-02) | Provision a BuildKit builder | Required before `docker/bake-action` — bake does **not** set up Buildx itself (verified against the action's own README/example workflow). Without this, Buildx falls back to a builder that can't use the `type=gha` cache backend. |
-| `docker/bake-action` | `v7` (v7.3.0, released 2026-07-01) | Build multiple images from one definition in one invocation | OctoConv's `docker-compose.yml` **already declares all 5 build targets** (`api`, `worker`, `document-worker`, `chromium-worker`, and `webhook-worker-1`/`-2` sharing `Dockerfile.webhook-worker`). Bake can consume a compose file directly as its target definition (`files: docker-compose.yml`) — no parallel Dockerfile list needs to be maintained inside the workflow YAML. Materially less duplication than 5 separate `docker/build-push-action` steps. |
-| `actions/upload-artifact` | `v7` (v7.0.1, released 2026-04-10) | Upload compose logs on E2E failure | Standard mechanism for post-mortem debugging of a failed live-infra run. `v3.x` is legacy/EOL — do not use. |
+| `github.com/modelcontextprotocol/go-sdk` | v1.6.1 (latest stable tag; `v1.7.0-pre.2` exists but targets an unfinalized protocol revision — do not use) | Official Go MCP server/client SDK, `cmd/mcp-server` stdio transport | Official SDK maintained by the MCP org in collaboration with Google (`modelcontextprotocol/go-sdk`, 4,788★, pushed 2026-07-10 — active). Requires Go 1.25+ (its own `go.mod` declares `go 1.25.0`) — compatible with OctoConv's 1.26.4. The `mcp.NewServer`/`mcp.AddTool`/`&mcp.StdioTransport{}` API is settled v1.x, not experimental. Reflection-based typed-struct tool schemas (via `jsonschema:"..."` struct tags) match this codebase's existing "typed Go structs over hand-authored JSON" conventions. Ships `ProgressNotificationParams` + `ServerSession.NotifyProgress` and `ServerOptions.KeepAlive` — directly relevant because `convert_file` is a **blocking** tool call that can run for tens of seconds to minutes on document/chromium jobs. |
+| verapdf CLI (bundled into `Dockerfile.document-worker`, not a Go module) | `verapdf/cli:1.30.2` (Docker Hub `latest` tag as of 2026-06-03; veraPDF uses even-minor = stable-release convention, so 1.30.x is the current stable line) | ISO 19005 (PDF/A) conformance validation, replacing the existing OutputIntent sanity check | veraPDF is the open-source reference validator behind the PDF Association's own conformance test corpus — treated as *the* authoritative ISO 19005 checker industry-wide (used by national archives/libraries). No credible pure-Go or dependency-free alternative exists (confirmed by targeted search — see "What NOT to Use"). It is invoked as an external CLI process, which matches the codebase's existing hardened-exec pattern (`internal/convert/exec.go` — `Setpgid` + timeout + process-group kill), so integration needs zero new execution abstraction. |
+| `github.com/richardlehane/mscfb` | v1.0.7 (released 2026-06-06 — actively maintained, not a stale/abandoned project) | Parse the OLE-CFB directory (header + FAT/DIFAT sector chain + mini-FAT + 128-byte directory entries) to enumerate stream names for legacy-vs-encrypted classification | Small (71★, effectively single-maintainer), but the author (richardlehane) is a recognized digital-preservation tooling author (same lineage as `siegfried`, a widely-used PRONOM format-identification tool) — a credibility signal beyond raw star count. Apache-2.0, one small transitive dependency (`richardlehane/msoleps`, same author). It is the only credible off-the-shelf Go CFB directory reader found; see "Alternatives Considered" for why a zero-dep hand-rolled parser is feasible but not recommended for this specific fail-closed security check. |
+| chi + pgx (existing, no version change) | v5.3.0 / v5.10.0 (already in `go.mod`) | REST `/v1/presets` CRUD (PRST-V2-01) | **Confirmed: no new dependency needed.** `internal/presets` (shipped in Phase 18, v1.4) already owns the SQL layer (client/system-scope shadowing, bump-on-update, re-validation). This milestone only adds `internal/api` handlers + chi routes on top of the existing `Repo`/`Server`/`writeJSON`/`writeError` conventions and the already-mandatory API-key middleware on all `/v1/*` — a pure application-layer addition, not a new library surface. |
 
-### Supporting Actions
+### Supporting Libraries
 
-| Action | Version | Purpose | When to Use |
-|--------|---------|---------|-------------|
-| `actions/cache` | `v6` (v6.1.0, released 2026-06-26) | Generic key/value cache | **Not needed here.** `actions/setup-go`'s built-in cache covers Go, and the `type=gha` Buildx backend covers Docker layers. Keep in reserve only for something neither of those covers (e.g. a separately-downloaded CLI tool). |
-| `docker/metadata-action` | `v6` (v6.2.0, released 2026-07-02) | Derive image tags/labels for a registry push | **Not needed.** This pipeline never pushes OctoConv's images anywhere (see "What NOT to Add") — compose's default `{project}-{service}` image naming is sufficient. |
-| `docker/login-action` | n/a (not adopted) | Authenticate to a registry | **Not needed for OctoConv's own images.** Narrow, deferred use only: if anonymous Docker Hub pulls of `postgres:18`/`redis:8`/`minio/minio:latest` start hitting 429 rate limits on shared GitHub runner IP ranges (a real, documented phenomenon — see Pitfalls), add a free Docker Hub account + `docker/login-action` at that point. Don't add it preemptively. |
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|-------------|
+| `github.com/richardlehane/msoleps` | v1.0.3 (transitive, pulled in automatically by mscfb's `go.mod`) | OLE property-set (MSOLEPS) parsing | Not called directly by OctoConv — mscfb's `go.mod` requires it, but only `Reader.Next()`/`File.Name` are needed for stream-name enumeration. Just be aware it lands in `go.sum` after adding mscfb; it is not itself a decision point. |
+| `github.com/google/jsonschema-go` | v0.4.3 (transitive, pulled in by go-sdk) | Backs the reflection-based tool-schema generation inside `mcp.AddTool` | Not called directly; relevant only if debugging generated JSON-schema output for `convert_file`/`list_presets`/`list_supported_formats` tool definitions. |
 
-### Development Tools (confirms zero new Go dependencies for presets)
+### Development Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| Go stdlib (`flag`, `os`) + existing `internal/db` (pgx) | `cmd/manage-presets` CLI | **Confirmed: no new Go module needed.** The `presets` table already exists in the DDL (documented as unused since the original schema design — see `.planning/PROJECT.md` Context). `cmd/manage-presets` follows the exact structural pattern of the existing `cmd/manage-clients` (stdlib flag parsing, direct pgx pool access, no framework). The `preset` field on `POST /v1/jobs` is a server-side name→stored-`opts` lookup that reuses the validated-`opts` allowlist mechanism already shipped in Phase 14 (`OPTS-01/02`) — a preset *is* a named, server-stored `opts` value, subject to the identical fail-closed validation client-supplied `opts` already go through. `go.mod`/`go.sum` require no edits. |
-| `gofmt`, `go vet`, `go test` (`-race` in Tier 2) | Existing enforced quality bar (per `CLAUDE.md`) | CI Tier 1/2 automate what's already the project's manual bar — no new linter, no `.golangci.yml`, consistent with current conventions (none exists today). |
+| `go vet` / `gofmt` (existing) | Minimum enforced bar for new code, per project convention | No new lint tooling needed for this milestone; nothing about MCP/veraPDF/CFB changes the existing bar. |
 
-## Installation / Workflow Skeleton
+## Installation
 
-No package manifest to install from — this is GitHub Actions YAML. Recommended shape for `.github/workflows/ci.yml` (new file — the project currently has **no CI workflow at all**, per `CLAUDE.md`'s "No Makefile or CI workflow ... rely on go build, go vet, go test run manually"): four jobs chained by `needs:`, mirroring the milestone's "4 tiers" framing and giving each tier its own GitHub status check (useful later for branch protection).
+```bash
+# Core — MCP SDK
+go get github.com/modelcontextprotocol/go-sdk@v1.6.1
 
-```yaml
-name: ci
-on: [push, pull_request]
+# Core — CFB directory parsing
+go get github.com/richardlehane/mscfb@v1.0.7
 
-jobs:
-  # Tier 1: fast gate
-  gate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go build ./...
-      - run: go test ./...   # no -race here; that's Tier 2
+# veraPDF is NOT a Go module — it is an external Java CLI, bundled into
+# Dockerfile.document-worker via multi-stage COPY from the official image
+# (see Dockerfile guidance below). No `go get` needed.
 
-  # Tier 2: race detector (blocked on the fakeEnqueuer mutex debt fix landing first)
-  race:
-    needs: gate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-      - run: go test -race ./...
-
-  # Tier 3: build all 5 images, verify they build, warm the GHA layer cache
-  docker-build:
-    needs: race
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Free disk space   # see "Runner Sizing" below — cheap insurance for 5 images incl. LibreOffice + Chromium
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-          docker image prune -af || true
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/bake-action@v7
-        with:
-          files: docker-compose.yml
-          load: false   # verification only — no need to keep images in this job's daemon
-          set: |
-            api.cache-to=type=gha,mode=max,scope=api
-            api.cache-from=type=gha,scope=api
-            worker.cache-to=type=gha,mode=max,scope=worker
-            worker.cache-from=type=gha,scope=worker
-            document-worker.cache-to=type=gha,mode=max,scope=document-worker
-            document-worker.cache-from=type=gha,scope=document-worker
-            chromium-worker.cache-to=type=gha,mode=max,scope=chromium-worker
-            chromium-worker.cache-from=type=gha,scope=chromium-worker
-            webhook-worker-1.cache-to=type=gha,mode=max,scope=webhook-worker
-            webhook-worker-1.cache-from=type=gha,scope=webhook-worker
-            webhook-worker-2.cache-to=type=gha,mode=max,scope=webhook-worker
-            webhook-worker-2.cache-from=type=gha,scope=webhook-worker
-
-  # Tier 4: live E2E against the real compose stack
-  e2e:
-    needs: docker-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
-      - uses: docker/setup-buildx-action@v4
-      # Reload images from the Tier-3-warmed GHA cache (near-instant: same scopes as above)
-      - uses: docker/bake-action@v7
-        with:
-          files: docker-compose.yml
-          load: true
-          set: |
-            api.cache-from=type=gha,scope=api
-            worker.cache-from=type=gha,scope=worker
-            document-worker.cache-from=type=gha,scope=document-worker
-            chromium-worker.cache-from=type=gha,scope=chromium-worker
-            webhook-worker-1.cache-from=type=gha,scope=webhook-worker
-            webhook-worker-2.cache-from=type=gha,scope=webhook-worker
-      - name: Bring up compose stack
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
-        # deliberately NOT --build here: images are already loaded and tagged
-        # by bake above under the same {project}-{service} names compose
-        # expects. If tag-matching between bake's compose-derived naming and
-        # what `docker compose up` looks for ever proves unreliable, fall
-        # back to `up -d --build` — with the GHA cache warm it's still
-        # near-instant, so this is a low-risk safety net, not a real tradeoff.
-      - run: go run ./cmd/migrate
-        env:
-          DATABASE_URL: postgres://octo:octo-pass@localhost:5434/octo_db
-      - name: Run E2E suite
-        run: go test ./internal/e2e/...
-        env:
-          E2E_BASE_URL: http://localhost:8090
-          DATABASE_URL: postgres://octo:octo-pass@localhost:5434/octo_db
-          API_KEY_SALT: dev-only-change-me-in-real-deploys
-          WEBHOOK_SIGNING_SECRET: dev-only-change-me-in-real-deploys
-          # E2E_WEBHOOK_HOST defaults to host.docker.internal inside
-          # e2e_test.go — already correct on a Linux GH runner because
-          # docker-compose.e2e.yml adds extra_hosts: host-gateway on
-          # api/webhook-worker-1/-2/chromium-worker. No CI-specific change
-          # needed (see "host.docker.internal" section below).
-      - name: Dump compose logs on failure
-        if: failure()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml logs --no-color > compose-logs.txt
-      - uses: actions/upload-artifact@v7
-        if: failure()
-        with:
-          name: compose-logs
-          path: compose-logs.txt
-          retention-days: 7
-      - name: Tear down
-        if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v
+# REST presets CRUD: no new packages — reuse existing chi/pgx/internal/presets.
 ```
+
+Multi-stage Dockerfile addition for `Dockerfile.document-worker` (recommended packaging — see rationale in "Alternatives Considered"):
+
+```dockerfile
+# --- veraPDF stage: reuse the official jlink-trimmed JRE + app, don't rebuild it ---
+FROM verapdf/cli:1.30.2 AS verapdf
+
+# In the runtime stage, alongside the existing LibreOffice apt-get install:
+COPY --from=verapdf /opt/java/openjdk /opt/java/openjdk
+COPY --from=verapdf /opt/verapdf /opt/verapdf
+ENV PATH="/opt/java/openjdk/bin:/opt/verapdf:${PATH}"
+```
+
+Then invoke `verapdf` through the existing `internal/convert/exec.go` hardened runner (`Setpgid` + `ENGINE_TIMEOUT`-style bound + process-group kill), exactly like the libvips/LibreOffice/chromium engine calls today — no new execution abstraction needed.
 
 ## Alternatives Considered
 
 | Recommended | Alternative | When to Use Alternative |
 |-------------|-------------|-------------------------|
-| `docker/bake-action` reading `docker-compose.yml` directly | 5× `docker/build-push-action` steps, one per Dockerfile | If the images ever need genuinely different build args/platforms per image such that a shared compose-derived bake definition becomes awkward. For 5 uniform-shape builds sharing a compose file already in the repo, bake is strictly less duplication. |
-| Separate `docker-build` (cache-warm, no compose stack) and `e2e` (cache-reload + full stack) jobs | Single job doing build-then-up | If total pipeline time is short enough that the extra job overhead (re-checkout, re-setup-buildx) isn't worth a separate pass/fail signal. The recommended split gives a clean "images build" status check independent of live-E2E flakiness — a flaky webhook-timing assertion shouldn't obscure a real Dockerfile break, and vice versa. |
-| `up -d` (no `--build`), relying on bake's tags matching compose's expected names | `up -d --build` unconditionally | Use `--build` unconditionally the moment tag-matching between bake's compose-derived naming and `docker compose up`'s lookup proves unreliable in practice — the explicit fallback noted in the skeleton above. |
-| GHA cache backend (`type=gha`), scoped per-service | Registry cache backend (`type=registry`) | Only if OctoConv gets a private registry for other reasons — it doesn't today. Registry cache has no 10 GB cap, but needs push credentials and an actual registry, both out of scope (Constraints: Docker Compose for local dev; K8s/KEDA explicitly future/out-of-scope). |
-| `actions/setup-go`'s built-in cache | Hand-rolled `actions/cache` step for `~/go/pkg/mod` + `~/.cache/go-build` | Only if a future need arises to cache something setup-go doesn't cover. Redundant for plain Go module/build caching today. |
+| `modelcontextprotocol/go-sdk` v1.6.1 | `mark3labs/mcp-go` (8,886★, pushed 2026-07-09 — more mature, far more GitHub dependents, predates the official SDK by months) | If OctoConv needed **HTTP/SSE transport** for the MCP server today — mcp-go has first-class HTTP/SSE support the official SDK does not yet prioritize (official SDK focuses on stdio/command transports). This milestone is explicitly stdio-only per PROJECT.md ("cmd/mcp-server, stdio-транспорт"), which removes mcp-go's main structural advantage. The official SDK is the safer long-term bet for spec compliance and future protocol revisions (Google co-maintains it under the `modelcontextprotocol` org), at the cost of a smaller community and less production mileage than mcp-go. Re-evaluate only if a remote/network MCP endpoint becomes a requirement later. |
+| Bundle verapdf CLI into `Dockerfile.document-worker` (multi-stage `COPY` from `verapdf/cli`) | Separate `verapdf/rest` sidecar container (official image, ~75MB, Dropwizard-based REST wrapper, port 8080 + 8081 diagnostics) reached over HTTP from document-worker | If independent lifecycle/resource limits for the JVM heap (`JAVA_OPTS=-Xmx...`, `VERAPDF_MAX_FILE_SIZE`) separate from LibreOffice's own container limits matter, or if per-job JVM cold-start latency becomes a measured bottleneck (a long-lived REST service amortizes JVM startup across many requests instead of paying it per job). This is a real architectural tradeoff, flagged for the planner: bundling stays inside the existing "shell out to hardened exec" pattern with zero new inter-service communication; a sidecar introduces a genuinely new pattern — a worker calling another local service over HTTP, versus today's model where every worker only ever talks to Postgres/Redis/S3, never to another worker directly. Recommendation: start with the bundled CLI (simpler, no new communication pattern) and only move to a sidecar if measured cold-start latency proves unacceptable in practice. |
+| `richardlehane/mscfb` for CFB directory parsing | Zero-dependency hand-rolled parser (read the 512-byte header, walk the FAT/DIFAT sector chain, walk the mini-FAT for small streams, parse 128-byte directory entries, decode UTF-16LE names) | Only if literally zero new deps is a hard requirement and there's confidence in correctly implementing DIFAT continuation (needed once a CFB file has >109 FAT sectors — rare for typical small Office docs, but not guaranteed absent) and mini-FAT chain walking. This is a **fail-closed security classification** (encrypted vs legacy 422), so a subtly-wrong hand-rolled walk is a real risk — a bug could misclassify a stream name or silently truncate the directory listing. mscfb's core file is only 416 lines (auditable/vendorable), so it avoids re-solving a well-known-tricky sector-chained binary format from scratch. Note: the project's own precedent of writing zero-dep parsers for decompression-bomb protection (PNG/JPEG/WEBP/HEIC/TIFF headers) is a weaker analogy here than it looks — those formats have simple linear headers, while CFB's FAT/mini-FAT sector-chaining is where the real complexity (and bug surface) lives. |
 
-## What NOT to Add
+## What NOT to Use
 
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
-| Any registry push step (GHCR/Docker Hub) for OctoConv's own images | Milestone scope is "build all 5 images in CI," not "publish" them; the project has no registry anywhere in its stack (Constraints: Docker Compose for local dev, K8s/KEDA explicitly future/out-of-scope) | Build with `load:`/no-`load` as appropriate per job; keep images ephemeral within each CI job |
-| A third-party CI system (CircleCI, Jenkins, GitLab CI, etc.) | Milestone explicitly specifies GitHub Actions; repo is already hosted on GitHub | GitHub Actions, as above |
-| Kubernetes-based CI runners / self-hosted K8s executors | K8s+KEDA is explicitly future/out-of-scope per project Constraints; standard `ubuntu-latest` hosted runners are sufficient for a docker-compose stack of this size | GitHub-hosted `ubuntu-latest` runners |
-| `docker-compose` v1 (standalone Python binary, hyphenated command) | Deprecated upstream, no longer receives updates, and is actually absent from current runner images, which ship only the v2 CLI plugin | `docker compose` (v2 CLI plugin, space not hyphen) — already what the project's own README and compose files assume |
-| A hand-written matrix of 5 parallel `docker/build-push-action` jobs, each pushing/pulling through a registry to share results with the E2E job | Unnecessary registry round-trip for images that are never published; adds push-credential management for zero benefit | Single bake invocation per job, GHA-cache-backed, as in the skeleton above |
-| `actions/cache` for Docker layers | Historically used before the `type=gha` Buildx cache backend existed; strictly worse for Docker builds (no BuildKit-aware layer/blob dedup, coarser granularity, manual key management) | `type=gha` cache backend wired through Buildx/bake |
-| New Go dependencies for presets (e.g. a validation/config library) | The `presets` table and validated-`opts` mechanism (Phase 14) already provide everything needed; `cmd/manage-clients` is the established CLI pattern to copy | stdlib `flag` + existing `internal/db`/repo-style pattern |
+| Any "pure-Go PDF/A ISO 19005 validator" | Searched specifically — none found with credible adoption or actual ISO 19005 conformance-test coverage. What exists are commercial cloud-API wrappers (ConvertAPI, Apryse) that call out to their own hosted servers or bundle non-Go engines under the hood; none is a standalone Go library doing real ISO 19005 validation locally. Building one from scratch would mean re-implementing years of the PDF Association's own conformance test corpus — well out of scope for this milestone. | veraPDF CLI, bundled as described above. |
+| Apache PDFBox Preflight (standalone) | Also JVM-based (no packaging advantage over veraPDF) and has materially weaker/less-complete PDF/A rule coverage than veraPDF, which is the industry reference implementation. Swapping to it trades conformance rigor for nothing in return. | veraPDF CLI. |
+| `modelcontextprotocol/go-sdk` v1.7.0-pre.x | Pre-release, targets a not-yet-final protocol revision (2026-07-28) — do not depend on a pre-release for a production internal service. | v1.6.1 (latest tagged stable). |
+| Hand-authoring MCP tool JSON schemas as raw strings | The official SDK generates schemas via struct reflection + `jsonschema` tags on typed request/response structs — hand-authoring raw JSON schema duplicates work the SDK already does and risks drifting from the Go struct that actually decodes the request at runtime. | `mcp.AddTool(server, &mcp.Tool{...}, handlerFunc)` with typed structs + `jsonschema:"description"` tags. |
+| Embedding full binary file bytes (base64 `BlobResourceContents`/`EmbeddedResource`) in MCP tool results for `download_result` | OctoConv already returns presigned S3 URLs (`GET /v1/jobs/{id}`); base64-embedding a multi-MB PDF/image inside an MCP `CallToolResult` bloats the context window the calling agent pays for, and duplicates data already reachable via URL — with no benefit since the agent still needs to fetch/display it externally. | Return the existing presigned URL as `TextContent` (or `ResourceLink`, if the protocol version in use supports it) from `get_job_status`/`download_result` — never `EmbeddedResource`. |
 
-## Runner Sizing — Read Before Wiring the `e2e` Job
+## Stack Patterns by Variant
 
-**Verified specs (docs.github.com, checked 2026-07-12):** standard `ubuntu-latest` is **4 vCPU / 16 GB RAM / 14 GB SSD for public repositories**, but only **2 vCPU / 8 GB RAM / 14 GB SSD for private repositories** on GitHub's included free tier. OctoConv is internal — confirm whether its GitHub repo is private and, if so, what plan applies (Team/Enterprise plans can grant larger default included runners; Free-tier private repos get the smaller spec).
+**If the MCP server needs to expose progress during long conversions (multi-minute chromium/LibreOffice jobs):**
+- Read `req.Params.GetProgressToken()` inside the `convert_file` handler; if present, poll the underlying `GET /v1/jobs/{id}` internally and call `req.Session.NotifyProgress(ctx, &mcp.ProgressNotificationParams{...})` per tick.
+- Progress tokens are optional per the MCP spec (the client must opt in by sending one) — treat progress reporting as strictly best-effort. The tool must behave identically (just silently) when no token is present.
 
-Why this matters concretely: the compose stack Tier 4 brings up simultaneously is `postgres:18` + `redis:8` + `minio` + `api` + `worker` (2 CPU/1 GiB limit) + `document-worker` (2 CPU/1 GiB limit) + `chromium-worker` (2 CPU/2 GiB limit, plus 256m `/dev/shm`) + `webhook-worker-1`/`-2` + `asynqmon`. Those are Docker resource **limits**, not reservations — actual usage during a short E2E run will typically be far below the ceilings — but on a 2 vCPU/8 GB private-repo runner, several conversions running concurrently across engine classes could plausibly approach the ceiling. **MEDIUM confidence** this is fine for the current one-format-pair-at-a-time E2E test shape; flag it as the first thing to check if the `e2e` job is ever flaky/OOM-killed rather than test-logic-flaky. If it becomes a real bottleneck, GitHub-hosted larger runners (paid, e.g. `ubuntu-latest-4-cores`) are the next lever — self-hosted runners are a bigger step, not recommended as a first response given the project's explicit "no extra infra focus this phase" constraint.
+**If `convert_file` needs to survive a client-side idle timeout on very slow document/chromium jobs:**
+- Set `mcp.ServerOptions.KeepAlive` so the stdio session isn't dropped by a missed ping during a long blocking tool call. Pin to **v1.6.1, not v1.5.x** — a race condition in `ServerSession.startKeepalive` (peers that don't implement ping being incorrectly killed) was fixed in the v1.6 line.
 
-**14 GB nominal disk vs. reality:** GitHub's own docs list "14 GB SSD" for standard Linux runners, but community reports (`actions/runner-images` discussions, cross-checked 2026-07-12) indicate the underlying filesystem is larger in practice (~72 GB total, with fresh runners starting around ~22 GB free after preinstalled tooling) — the 14 GB figure reads as a conservative documented guarantee rather than literal available space. Either way, 5 images including LibreOffice (`document-worker`) and Chromium (`chromium-worker`) plus 3 pulled base service images (Postgres 18, Redis 8, MinIO) is a realistic candidate for `ENOSPC` on a cold cache. **Mitigation included in the workflow skeleton above:** a "Free disk space" step removing preinstalled toolcache (`/usr/share/dotnet`, `/opt/ghc`, `/usr/local/lib/android`, `/opt/hostedtoolcache/CodeQL`) before the build/E2E jobs — a plain shell step, no third-party action, consistent with the project's existing bias toward stdlib/shell over new dependencies (e.g. the zero-dependency decompression-bomb size parsers from Phase 7).
-
-## Docker Compose v2 and `host.docker.internal` — Confirmed Preinstalled, No Change Needed
-
-`ubuntu-latest` (Ubuntu 24.04 runner image) ships Docker Compose v2 as the `docker compose` CLI plugin out of the box — confirmed 2.38.2 in the image's own README, and GitHub bumped Docker/Compose versions again across all Linux/Windows runner images on 2026-02-09 per the Actions changelog, so it stays current without any setup action. Docker Engine ships at 28.x, which natively supports the `host-gateway` special string used in `extra_hosts` (Docker Engine has supported it since 20.10) — so `docker-compose.e2e.yml`'s existing `extra_hosts: ["host.docker.internal:host-gateway"]` pattern (already relied on for the E2E webhook receiver and the chromium-worker network-block canary) works unmodified inside a GitHub Actions job exactly as it does in local dev.
-
-**No new strategy is needed here** — this is a "verify, don't reinvent" finding: the existing compose contract (`E2E_BASE_URL`, `E2E_WEBHOOK_HOST` defaulting to `host.docker.internal`, `API_KEY_SALT` must match the running API's value, optional `E2E_S3_DIAL_ADDR`) transfers to CI as-is, per `internal/e2e/e2e_test.go`'s documented environment contract.
-
-## GHA Docker Layer Cache — Sizing Note
-
-The GitHub Actions cache backend for Buildx (`type=gha`) shares the same **10 GB per-repository cache quota** as every other `actions/cache`-based cache in the repo (Go module/build cache included), with LRU eviction (oldest-unaccessed-first) once the quota is exceeded, and rate limits of up to 1,500 cache reads / 200 writes per minute. With `mode=max` across 5 images — 2 of which (`document-worker` with LibreOffice, `chromium-worker` with headless Chromium) carry non-trivial base-layer weight — it's plausible the combined per-scope cache set periodically exceeds 10 GB and some scopes get evicted before others. **This is graceful degradation, not a failure mode:** an evicted scope just rebuilds that image's layers from scratch on the next run (slower, not broken). No action required unless build times become a real pain point, at which point trimming `mode=max` to `mode=min` for the least-frequently-changed images (the base-OS + LibreOffice/Chromium *install* layers, which rarely change) is the first lever to pull.
+**If `Dockerfile.document-worker` image size becomes a real deployment concern after bundling veraPDF:**
+- Reconsider the `verapdf/rest` sidecar (see Alternatives Considered). The official image is already a jlink-trimmed JRE (53.7MB for `cli`, 74.9MB for `rest`, both compressed), so the marginal cost of bundling is moderate, not catastrophic — but it does add a second runtime (JVM) alongside LibreOffice's native C++ stack inside one container, which is a real (if small) increase in attack surface and image complexity.
 
 ## Version Compatibility
 
 | Package A | Compatible With | Notes |
 |-----------|-----------------|-------|
-| `actions/setup-go@v6` | Go 1.26 (`go.mod` directive `go 1.26.4`) | Use `go-version-file: go.mod`, not a hardcoded `go-version: '1.26'` input, so CI always matches whatever `go.mod` declares without a second place to update. |
-| `docker/bake-action@v7` | `docker/setup-buildx-action@v4` | Bake does **not** provision Buildx itself — `setup-buildx-action` must run first in the same job (confirmed via the action's own README/example workflow). |
-| `docker/bake-action` reading `docker-compose.yml` | Compose Build Specification (`build:` blocks already present for all 5 image services) | No separate `docker-bake.hcl` file is needed — the existing compose file is a valid bake definition source as-is. |
-| GHA cache backend (`type=gha`) | Buildx bundled with Docker 28.x on `ubuntu-latest` | GitHub's Cache Service API v2 is the only supported API version since April 2025; irrelevant risk here since current-generation actions (`bake-action@v7`, `setup-buildx-action@v4`) only speak v2. |
-| `postgres:18` / `redis:8` / `minio/minio:latest` (existing, unchanged) | Anonymous Docker Hub pulls from GitHub-hosted runner IP ranges | Not a version-compatibility issue, but a **known rate-limit risk**: Docker Hub's anonymous per-IP pull limits are shared across all GitHub-hosted runners globally, and busy shared IP ranges occasionally hit 429s. No CI exists yet for this project so it hasn't been observed here — if 429s appear in practice, the fix is a free Docker Hub account + `docker/login-action` (raises the limit), not a stack change. Not recommended preemptively. |
+| `modelcontextprotocol/go-sdk@v1.6.1` | Go 1.25+ (its own `go.mod` declares `go 1.25.0`) | OctoConv is on Go 1.26.4 — compatible, no toolchain conflict. |
+| `richardlehane/mscfb@v1.0.7` | Go 1.18+ | Well below OctoConv's 1.26 floor — no compatibility concern. |
+| `verapdf/cli:1.30.2` (Docker) | Copying its `/opt/java/openjdk` + `/opt/verapdf` into Debian bookworm-slim (OctoConv's existing worker base image) via multi-stage `COPY --from=` | **Flagged integration risk, not assumed-safe:** the official image's own final stage is `alpine:3` (musl libc), while `Dockerfile.document-worker`'s target is `debian:bookworm-slim` (glibc). Copying only the jlink-produced JRE tree and the `verapdf` app directory across that libc boundary is a common pattern but is not guaranteed to "just work" without verification — test that the copied JRE's native libraries (`libjvm.so` etc.) actually load correctly against bookworm's glibc/libstdc++ before relying on this in CI, rather than assuming it based on the Dockerfile structure alone. |
 
 ## Sources
 
-- `actions/checkout` releases (`api.github.com/repos/actions/checkout/releases`, live query 2026-07-12) — v7.0.0 published 2026-06-18, v6.0.3 published 2026-06-02
-- `actions/setup-go` releases (same method) — v6.5.0 published 2026-06-24; `actions/setup-go` README (raw, main branch) — verified `cache-dependency-path` input and default `go.mod`-keyed cache behavior
-- `docker/build-push-action` releases — v7.3.0 published 2026-07-01 (evaluated as an alternative, see "Alternatives Considered")
-- `actions/cache` releases — v6.1.0 (2026-06-26), with a concurrently maintained v5.1.0 line
-- `docker/setup-buildx-action` releases — v4.2.0 published 2026-07-02
-- `docker/bake-action` releases — v7.3.0 published 2026-07-01; `docker/bake-action` README (raw, master branch) — verified setup-buildx dependency and the compose-file/wildcard-cache-`set` workflow example
-- `actions/upload-artifact` releases — v7.0.1 published 2026-04-10
-- `docker/metadata-action` releases — v6.2.0 published 2026-07-02 (evaluated, not adopted)
-- docs.github.com, "GitHub-hosted runners reference" — public-vs-private-repo `ubuntu-latest` hardware spec table (4 vCPU/16 GB/14 GB SSD public; 2 vCPU/8 GB/14 GB SSD private)
-- `actions/runner-images` Ubuntu 24.04 README — Docker 28.0.4 / Docker Compose 2.38.2 preinstalled
-- GitHub Changelog, "Docker and Docker Compose version upgrades on hosted runners" (2026-01-30) — confirms periodic version bumps (e.g. 2026-02-09) keep Compose current on `ubuntu-latest`
-- Docker Docs, "GitHub Actions cache" (`docs.docker.com/build/cache/backends/gha/`) — `type=gha` cache backend usage; per-target `scope=` requirement to avoid cache overwrite when multiple bake targets share one invocation
-- docs.github.com, "Caching dependencies to speed up workflows" — 10 GB per-repo cache quota, LRU eviction policy, 200 writes/1,500 reads per minute rate limits
-- `actions/runner-images` community discussions (#9329, #13719, #10386) and independent blog write-ups (Carlos Becker, Chris Dzombak) — MEDIUM confidence, cross-referenced across multiple sources — nominal 14 GB documented disk vs. empirically larger (~72 GB total / ~22 GB free) actual filesystem, and the standard mitigation (removing preinstalled toolcache dirs, `docker image prune`) for `ENOSPC` on multi-image Docker builds
-- Repo files read for integration context: `docker-compose.yml`, `docker-compose.e2e.yml`, `internal/e2e/e2e_test.go` (env-var contract, first ~80 lines), `.env.example`, `.planning/PROJECT.md`
+- https://github.com/modelcontextprotocol/go-sdk — repo metadata via GitHub API (4,788★, pushed 2026-07-10, not archived) — HIGH confidence
+- https://github.com/modelcontextprotocol/go-sdk/releases — release history (v1.5.0 → v1.6.1 stable, v1.7.0-pre.x pre-release) — HIGH confidence
+- https://github.com/modelcontextprotocol/go-sdk/tags (via GitHub API) — confirms v1.6.1 is the latest non-prerelease tag — HIGH confidence
+- https://raw.githubusercontent.com/modelcontextprotocol/go-sdk/main/go.mod — confirms `go 1.25.0` floor and dependency list (jsonschema-go, oauth2, uritemplate, etc.) — HIGH confidence
+- pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp (via WebFetch) — `TextContent`/`ImageContent`/`AudioContent`/`EmbeddedResource`/`ResourceLink` content types, `ProgressNotificationParams`, `ServerSession.NotifyProgress`, `ClientOptions.ProgressNotificationHandler`, `Ping`/`Wait` — MEDIUM-HIGH confidence (WebFetch summarization of a live pkg.go.dev page, not independently re-verified field-by-field)
+- https://github.com/mark3labs/mcp-go — repo metadata via GitHub API (8,886★, pushed 2026-07-09, not archived) — HIGH confidence
+- WebSearch: "modelcontextprotocol go-sdk ProgressNotification long running tool call keepalive" — keepalive race-condition fix mention — MEDIUM confidence (single search-result summary, not cross-checked against the raw changelog diff)
+- https://hub.docker.com/v2/repositories/verapdf/cli/tags (Docker Hub API) — confirms `latest` = `v1.30.2`, image size 53.7MB, last pushed 2026-06-03 — HIGH confidence
+- https://hub.docker.com/v2/repositories/verapdf/rest/tags (Docker Hub API) — confirms `latest` = `v1.30.2`, image size 74.9MB, last pushed 2026-06-07 — HIGH confidence
+- https://github.com/veraPDF/veraPDF-apps/blob/integration/Dockerfile (via WebFetch) — multi-stage build: `eclipse-temurin:11-jdk-alpine` → jlink custom JRE → `alpine:3` final stage, `ENTRYPOINT ["/opt/verapdf/verapdf"]` — HIGH confidence
+- WebSearch: "verapdf CLI startup time JVM invocation per file validation performance" — no first-party benchmark found; only a vendor blog (ConvertAPI, which has a commercial interest in promoting a paid alternative) mentioning "JVM dependency and cold-start cost" as a friction point — LOW confidence, flagged as an unverified vendor claim, not a measured number
+- https://github.com/richardlehane/mscfb — repo metadata via GitHub API (71★, pushed 2026-06-06, not archived) — HIGH confidence
+- pkg.go.dev/github.com/richardlehane/mscfb (via WebFetch) — API shape: `mscfb.New(io.ReaderAt)`, `Reader.Next() (*File, error)`, `File.Name`/`Path`/`Size`, Apache-2.0 license, v1.0.7 latest — HIGH confidence
+- https://raw.githubusercontent.com/richardlehane/mscfb/master/go.mod — confirms `go 1.18` floor and single transitive dep `richardlehane/msoleps v1.0.3` — HIGH confidence
+- https://api.github.com/repos/richardlehane/mscfb/tags — confirms v1.0.7 is the latest tag — HIGH confidence
+- `go.mod` (this repo, read directly) — confirmed no existing MCP/PDF/CFB deps to build on; chi v5.3.0 + pgx v5.10.0 already present for REST presets — HIGH confidence
+- `internal/convert/olecfb.go` (this repo, read directly) — confirmed the existing 8-byte magic-only detector this milestone's CFB parser extends, and its documented deferral of directory parsing to "v2 (DOCV3-02)" — HIGH confidence
+- `Dockerfile.document-worker` (this repo, read directly) — confirmed current base (`debian:bookworm-slim`) and structure this milestone's veraPDF packaging decision lands on — HIGH confidence
 
 ---
-*Stack research for: OctoConv v1.4 "CI, Presets & Debt Cleanup" (GitHub Actions 4-tier CI pipeline; presets CLI zero-new-deps confirmation)*
-*Researched: 2026-07-12*
+*Stack research for: OctoConv v1.5 (MCP server, presets REST, veraPDF, CFB parsing)*
+*Researched: 2026-07-13*
