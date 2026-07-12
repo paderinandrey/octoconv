@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Document Class v2
-status: phase_complete
-stopped_at: Phase 16 verified (passed)
-last_updated: "2026-07-12T06:34:06.168Z"
-last_activity: 2026-07-12 -- Phase 16 gap closure verified: passed
+status: Awaiting next milestone
+stopped_at: Phase 16 context gathered
+last_updated: "2026-07-12T08:39:16.077Z"
+last_activity: 2026-07-12 — Milestone v1.3 completed and archived
 progress:
   total_phases: 5
   completed_phases: 5
   total_plans: 17
-  completed_plans: 16
+  completed_plans: 17
   percent: 100
 ---
 
@@ -18,17 +18,17 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-10 after v1.2 milestone)
+See: .planning/PROJECT.md (updated 2026-07-12 after v1.3 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения и офисные документы) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 16 — webhook-delivery-decoupling
+**Current focus:** Planning next milestone (v1.3 shipped 2026-07-12)
 
 ## Current Position
 
-Phase: 16 (webhook-delivery-decoupling) — COMPLETE
-Plan: 5 of 5
-Status: Phase 16 complete (verification passed)
-Last activity: 2026-07-12 -- Phase 16 gap closure verified: passed
+Phase: Milestone v1.3 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-12 — Milestone v1.3 completed and archived
 
 ## Performance Metrics
 
@@ -106,7 +106,10 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03) | v1.3 requirements definition (2026-07-10) |
 | accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried into v1.3) | v1.2 requirements definition (2026-07-09) |
 | seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
-| seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | Now WEBH-01, mapped to Phase 16 | v1.2 close (2026-07-10) |
+| seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | ✓ Implemented (v1.3 Phase 16, WEBH-01) | v1.2 close (2026-07-10) |
+| tech_debt | Dead webhook wiring in cmd/document-worker & cmd/chromium-worker (WR-02/WR-03 из 16-REVIEW) | Advisory, carried from v1.3 audit | v1.3 close (2026-07-12) |
+| tech_debt | fakeEnqueuer data race under full-package -race (internal/reconciler test helpers) | Advisory, carried from v1.3 audit | v1.3 close (2026-07-12) |
+| tech_debt | No dedicated image (libvips) E2E test in internal/e2e | Advisory, carried from v1.3 audit | v1.3 close (2026-07-12) |
 
 ## Session Continuity
 
@@ -116,4 +119,4 @@ Resume file: .planning/phases/16-webhook-delivery-decoupling/16-CONTEXT.md
 
 ## Operator Next Steps
 
-- Run `/gsd:plan-phase 12` to plan the first v1.3 phase (Tech Debt Cleanup).
+- Start the next milestone with /gsd-new-milestone

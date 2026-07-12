@@ -2,25 +2,17 @@
 
 ## What This Is
 
-OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. Сквозной вертикальный срез — конвертация изображений через libvips — на `main`, полностью production-hardened (v1.0) и с закрытым по итогам аудита tech debt (v1.1, оба milestone shipped 2026-07-08): обязательная API-key аутентификация с ротацией, rate limiting, HMAC-подписанная webhook-доставка с гибким SSRF-контролем для внутренних сетей, корректный transient/terminal retry, reconciler с восстановлением как зависших задач, так и потерянных webhook-доставок (подтверждено реальным wall-clock тестом), валидация содержимого файла по magic bytes и заявленным размерам (защита от decompression bomb), автоматическое удаление старых файлов по TTL, и полная наблюдаемость (Prometheus-метрики, реальный health-check, asynqmon-дашборд).
+OctoConv — внутренний асинхронный сервис конвертации файлов на Go для сервисов компании. Клиент отправляет файл через API, сервис кладёт его в S3-совместимое хранилище, ставит задачу в очередь (asynq/Redis), воркер запускает внешний движок конвертации и складывает результат обратно в S3. На `main` — три production-hardened класса движков: изображения через libvips (v1.0/v1.1), офисные документы через LibreOffice headless — включая кросс-конвертацию docx↔odt/xlsx↔ods/pptx↔odp и PDF/A-2b экспорт через validated opts (v1.2/v1.3), и HTML→PDF через chromium-headless с офлайн-рендерингом (v1.3). Вокруг них: обязательная API-key аутентификация с ротацией, rate limiting, HMAC-подписанная webhook-доставка через выделенные избыточные webhook-воркеры (переживает деплой/падение любого engine-воркера; reconciler-sweeper выбирается через Postgres advisory lock), корректный transient/terminal retry per-engine, fail-closed валидация содержимого по magic bytes (включая отказ OLE-CFB legacy/encrypted входов), защита от decompression bomb, TTL-очистка хранилища и полная наблюдаемость (Prometheus-метрики, реальный health-check, asynqmon-дашборд).
 
 ## Core Value
 
-Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации изображения и получить результат — без риска для стабильности или безопасности продакшена.
+Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current Milestone: v1.3 Document Class v2
+## Current State (after v1.3, shipped 2026-07-12)
 
-**Goal:** Документный класс перестаёт быть «только → PDF»: кросс-конвертация внутри класса, чёткие отказы для legacy-форматов, архивный PDF/A, новый chromium-движок HTML→PDF — и webhook-доставка, переживающая деплой любого подмножества воркеров.
+**Shipped:** v1.3 Document Class v2 — 5 фаз (12–16), 17 планов, 44 задачи, ~2 дня. Документный класс перестал быть «только → PDF» (6 симметричных кросс-пар), появились validated opts + PDF/A-2b, третий engine-class HTML→PDF (chromium, офлайн-рендеринг с live-canary доказательством нулевых сетевых соединений), и webhook-доставка развязана с engine-воркерами (2 избыточных webhook-worker реплики, advisory-lock singleton sweeper, ~11s failover).
 
-**Target features:**
-- Кросс-конвертация внутри документного класса: docx↔odt, xlsx↔ods, pptx↔odp через существующий LibreOffice-движок (DOC-V2-01)
-- Pre-flight OLE-CFB детект: запароленные/legacy бинарные doc/xls/ppt получают чёткий 422 на входе, а не невнятное падение soffice по таймауту (DOC-V2-02)
-- `opts`-driven PDF/A экспорт для архивного хранения — первое реальное использование поля `opts` в API (DOC-V2-03)
-- HTML→PDF через отдельный chromium-based движок — третий класс движков по паттерну v1.2 (DOC-V2-04)
-- Webhook-доставка отвязана от image-воркера: деплой любого подмножества engine-воркеров не теряет вебхуки молча (SEED-002)
-- Tech-debt фаза первой: WR-02 (E2E `extra_hosts` для Linux), WR-03 (engine-константы), WR-04 (таймауты E2E-клиентов), gofmt-nit, docker-compose audit из v1.0
-
-**Key context:** HTML→PDF — самый рискованный пункт: новый контейнер, новая safety-модель (SSRF через внешние ресурсы в HTML — по аналогии с webhook SSRF-гардом). Паттерн engine-class из v1.2 (`Engine()`/`EngineFor`, отдельный воркер-бинарник, fail-closed роутинг) — готовый шаблон для третьего движка.
+**Next milestone goals:** не определены — запустить `/gsd:new-milestone`. Кандидаты из отложенного: DOCV3-01..03 (veraPDF-валидация, CFB legacy-vs-encrypted различение, кастомные шрифты/CJK-RTL), новые классы движков (av/ffmpeg, archive, probe, CAD), K8s+KEDA, image E2E-тест, tech debt из v1.3-аудита (мёртвая webhook-обвязка в document/chromium-worker, fakeEnqueuer -race).
 
 ## Requirements
 
@@ -53,16 +45,18 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Docker-образ разделён: `Dockerfile.worker` снова libvips-only, LibreOffice изолирован в `Dockerfile.document-worker` с tini как PID 1 — Phase 10 (DOC-07)
 - ✓ Engine-aware API-роутинг: `handleCreateJob` выбирает очередь по контенту (`Converter.Engine()`/`Registry.EngineFor`), документы минуют image-only dimension-check; Content-Type parity для pdf и 6 документных форматов — Phase 11 (DOC-10, live e2e verified: все 6 пар docx/xlsx/pptx/odt/ods/odp → pdf + подписанный webhook)
 
+- ✓ Кросс-конвертация внутри документного класса (docx↔odt, xlsx↔ods, pptx↔odp) через явную (source,target) filter-таблицу LibreOffice; выход валидируется тем же SniffContainer, что и вход — Phase 13 (CONV-01, CONV-02, live e2e verified, 6 пар)
+- ✓ OLE-CFB входы (legacy binary doc/xls/ppt и запароленные OOXML) отклоняются одним чётким 422 до записи в S3/Postgres — Phase 13 (SAFE-01, live verified оба под-случая)
+- ✓ Validated `opts`: закрытый allowlist (типизированная структура), клиентские байты никогда не попадают в argv движка (injection-тест); PDF/A-2b экспорт с worker-side OutputIntent-проверкой — Phase 14 (OPTS-01/02, verified 9/9, live PDF/A на LO 7.4)
+- ✓ HTML→PDF через chromium-headless (третий engine-class): офлайн-рендеринг (live-canary: ноль сетевых соединений по всем векторам), JS отключён CSP-инъекцией, print-опции через тот же opts-механизм — Phase 15 (HTML-01/02/03, verified 4/4 + security 14/14)
+- ✓ Webhook-доставка развязана с engine-воркерами: выделенный `cmd/webhook-worker` ×2 реплики — единственный consumer webhook-очереди; reconciler-sweeper ровно один на флот (Postgres advisory lock, mutex-guarded conn lifecycle после gap-closure 16-05); SC1-3 live-verified — Phase 16 (WEBH-01)
+- ✓ Унаследованный tech debt v1.0–v1.2 закрыт (extra_hosts, engine-константы, E2E-таймауты, gofmt, compose-audit) — Phase 12 (DEBT-01..05)
+
 ### Active
 
-<!-- Milestone v1.3 (Document Class v2) — расширение документного класса + третий движок + развязка webhook-доставки. -->
+<!-- Пусто — milestone v1.3 закрыт; следующий скоуп определит /gsd:new-milestone. -->
 
-- [x] Кросс-конвертация внутри документного класса (docx↔odt, xlsx↔ods, pptx↔odp) через существующие API/очереди/воркер — Phase 13, live e2e verified
-- [x] Запароленные/legacy OLE-CFB документы отклоняются с 422 на входе, до конвертации — Phase 13, live verified (оба под-случая)
-- [x] Клиент может запросить PDF/A-вариант экспорта через `opts` (закрытый allowlist, injection-тест, OutputIntent live-verified) — Phase 14 (OPTS-01, OPTS-02), verified 9/9
-- [x] HTML→PDF через отдельный chromium-based движок (третий engine-class): офлайн-рендеринг (сеть заблокирована слоями CLI, доказано живым canary — ноль соединений), JS выключен через CSP-инъекцию, print-опции через validated-opts Phase 14 — Phase 15 (HTML-01/02/03), verified 4/4 + security 14/14 SECURED
-- [ ] Webhook-доставка работает при деплое любого подмножества engine-воркеров
-- [x] Tech debt v1.0–v1.2 закрыт (WR-02/03/04, gofmt, docker-compose audit) — Phase 12, verified 5/5
+(нет активных требований — ожидается новый milestone)
 
 ### Out of Scope
 
@@ -85,7 +79,8 @@ OctoConv — внутренний асинхронный сервис конве
 - v1.1-аудит (`v1.1-MILESTONE-AUDIT.md`) прошёл без блокеров и без tech debt (4/4 требования, 5/5 точек интеграции, живые smoke-тесты всех новых механизмов по отдельности и в комбинации против пересобранного docker-стека) — впервые за проект milestone закрылся с нулевым переносом.
 - Code review при исполнении Phase 2 (v1.0) нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
 - **Milestone v1.2 (Document Engine Class) shipped 2026-07-10.** 4 фазы (8–11), 13 планов (вкл. gap-closure 11-04), 71 коммит, +2754 строк Go (без .planning), ~2 дня. Второй класс движков: docx/xlsx/pptx/odt/ods/odp → PDF через LibreOffice headless в отдельном контейнере, live E2E по всем 6 парам. Аудит: 10/10 требований, 10/10 интеграционных связей. Полный отчёт: `.planning/milestones/v1.2-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
-- Tech debt, перенесённый из v1.2 (advisory, из `11-REVIEW.md`): E2E compose-override не работает на plain-Linux docker (нет `extra_hosts` у `api`); дублирование engine-литералов в 4 местах; отсутствие таймаутов у E2E HTTP-клиентов; gofmt-nit в `internal/queue/queue_test.go` (с Phase 9). Плюс отложенный docker-compose audit из v1.0.
+- **Milestone v1.3 (Document Class v2) shipped 2026-07-12.** 5 фаз (12–16), 17 планов (вкл. gap-closure 16-05), 147 коммитов, +4773/−145 строк (без .planning), ~2 дня. Аудит: 14/14 требований, 7/7 интеграционных проверок, 8/8 E2E-потоков. Полный отчёт: `.planning/milestones/v1.3-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
+- Tech debt, перенесённый из v1.3-аудита (advisory): мёртвая webhook-обвязка в `cmd/document-worker`/`cmd/chromium-worker` (WR-02/WR-03 из 16-REVIEW); data race в `fakeEnqueuer` тест-хелпере при full-package `-race`; нет dedicated image E2E-теста; SEED-001 dormant.
 
 ## Constraints
 
@@ -110,7 +105,11 @@ OctoConv — внутренний асинхронный сервис конве
 | Decompression-bomb защита: свои zero-dependency парсеры размеров вместо golang.org/x/image или shell-out в vipsheader | Согласуется с философией zero-new-deps из Phase 4; избегает нового process-exec surface в API | ✓ Good — Phase 7, все 5 форматов (включая HEIC) защищены одинаково, 0 новых зависимостей |
 | CAD и остальные классы движков — вне скопа этого этапа | Открытый вопрос по CAD SDK не решён; остальные движки — следующий этап роста, не текущий hardening | — Pending |
 | document-движок расширяет существующий `Converter`/`Registry`, а не вводит Handler/Capability/Input/Output контракт | Второй движок (LibreOffice) укладывается в текущую абстракцию без изменений; полноценный контракт остаётся отложен до появления реальной потребности (напр. progress-репортинга) | ✓ Good — v1.2: LibreOfficeConverter + `Engine()`/`EngineFor` вписались в реестр без ломки контракта; live E2E по всем 6 парам |
-| HTML→PDF исключён из v1.2 | LibreOffice слабо рендерит современный CSS/JS; нужен отдельный chromium-based движок — самостоятельное решение, не расширение LibreOffice-движка | — Pending (кандидат на v2, DOC-V2-04) |
+| HTML→PDF исключён из v1.2 | LibreOffice слабо рендерит современный CSS/JS; нужен отдельный chromium-based движок — самостоятельное решение, не расширение LibreOffice-движка | ✓ Good — реализован в v1.3 Phase 15 как третий engine-class по шаблону v1.2 |
+| Кросс-конвертация через явную (source,target) filter-таблицу, а не generic вычисление фильтра | Явная таблица = проверяемый allowlist; generic вычисление рискует тихо включить непроверенные пары | ✓ Good — v1.3 Phase 13: 6 симметричных пар, все live-verified на LO 7.4 |
+| OLE-CFB: один 422 на оба случая (legacy и encrypted), без парсинга CFB-директории | Оба случая всё равно неконвертируемы; различение требует настоящего CFB-парсера — отложено (DOCV3-02) | ✓ Good — v1.3 Phase 13: 8-байтовый magic-детект, live-verified |
+| PDF/A: sanity-чек OutputIntent вместо полной ISO 19005 (veraPDF) валидации | veraPDF = Java-стек в контейнере воркера; для внутренних клиентов достаточно структурного маркера | ✓ Good — v1.3 Phase 14; полная валидация отложена (DOCV3-01) |
+| Webhook-доставка: выделенный webhook-worker ×2 + Postgres advisory lock для singleton-sweeper (вместо leader election или фиксированного «главного» воркера) | Простейший примитив, дающий exactly-one-sweeper на флот без новых зависимостей; консьюмеры симметричны | ✓ Good — v1.3 Phase 16: SC1-3 live-verified, ~11s failover; conn-lifecycle гэпы (CR-01/WR-01) закрыты в 16-05 с mutex + -race тестом |
 | Отдельный `cmd/document-worker` бинарник/контейнер вместо второго `asynq.Server` внутри image-воркера | Тяжёлый footprint LibreOffice не должен попадать в контейнер image-воркера; ресурсная изоляция по классам движков | ✓ Good — v1.2 Phase 10: Dockerfile.worker снова libvips-only, LibreOffice изолирован с tini как PID 1 |
 | Engine-класс определяется по контент-детектированному формату (`EngineFor(detected, target)`), не по расширению файла | Расширение подконтрольно атакующему; magic-bytes/структурный sniff — единственный проверяемый факт | ✓ Good — v1.2 Phase 11: fail-closed default на нераспознанный engine, live-verified |
 | Resource-exhaustion через сложный документ (DOC-V2-05) — accepted residual risk v1.2 | Митигируется только `DOCUMENT_ENGINE_TIMEOUT` + потолком конкуренции document-воркера; активный анализ сложности отложен | — Pending (принятый риск, пересмотреть при росте нагрузки) |
@@ -135,4 +134,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-11 after Phase 15 completion (HTML→PDF chromium engine)*
+*Last updated: 2026-07-12 after v1.3 milestone*
