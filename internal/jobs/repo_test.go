@@ -283,6 +283,84 @@ func TestOptsRoundTripNilDefault(t *testing.T) {
 	}
 }
 
+// TestPresetProvenanceRoundTrip covers D-08: a job created via a resolved
+// preset persists preset_name/preset_version in the jobs row, alongside the
+// already-resolved Opts snapshot (options is unaffected by preset wiring).
+func TestPresetProvenanceRoundTrip(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:      createTestClient(t, r),
+		Operation:     "convert",
+		Engine:        "image",
+		SourceFormat:  "png",
+		TargetFormat:  "webp",
+		PresetName:    "thumb",
+		PresetVersion: 2,
+		Opts:          map[string]any{"quality": 80},
+		Input:         Input{ObjectKey: "uploads/preset1/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var name *string
+	var version *int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT preset_name, preset_version FROM jobs WHERE id = $1`, id,
+	).Scan(&name, &version); err != nil {
+		t.Fatalf("query preset provenance: %v", err)
+	}
+	if name == nil || *name != "thumb" {
+		t.Fatalf("preset_name = %v, want %q", name, "thumb")
+	}
+	if version == nil || *version != 2 {
+		t.Fatalf("preset_version = %v, want 2", version)
+	}
+
+	got, err := r.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Opts["quality"] != float64(80) {
+		t.Fatalf("Opts[\"quality\"] = %v, want 80 (resolved opts snapshot unaffected by preset wiring)", got.Opts["quality"])
+	}
+}
+
+// TestPresetProvenanceNullForNonPreset covers D-08: a non-preset job leaves
+// both preset_name and preset_version NULL (existing behavior preserved).
+func TestPresetProvenanceNullForNonPreset(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	id, err := r.Create(ctx, CreateParams{
+		ClientID:     createTestClient(t, r),
+		Operation:    "convert",
+		Engine:       "image",
+		SourceFormat: "png",
+		TargetFormat: "webp",
+		Input:        Input{ObjectKey: "uploads/preset2/0-in.png", Filename: "in.png", Format: "png"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var name *string
+	var version *int
+	if err := r.pool.QueryRow(ctx,
+		`SELECT preset_name, preset_version FROM jobs WHERE id = $1`, id,
+	).Scan(&name, &version); err != nil {
+		t.Fatalf("query preset provenance: %v", err)
+	}
+	if name != nil {
+		t.Fatalf("preset_name = %q, want NULL for non-preset job", *name)
+	}
+	if version != nil {
+		t.Fatalf("preset_version = %d, want NULL for non-preset job", *version)
+	}
+}
+
 func TestGetNotFound(t *testing.T) {
 	r := newTestRepo(t)
 	if _, err := r.Get(context.Background(), uuid.New()); err != ErrNotFound {

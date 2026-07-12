@@ -73,8 +73,15 @@ type CreateParams struct {
 	// Opts carries the server-normalized, already-validated conversion options
 	// serialized to/from the jobs.options jsonb column (never raw client JSON,
 	// per D-08).
-	Opts  map[string]any
-	Input Input
+	Opts map[string]any
+	// PresetName and PresetVersion are optional provenance for preset-created
+	// jobs (D-08, 18-presets): when a job is created via a resolved preset,
+	// these persist to the existing jobs.preset_name/preset_version columns
+	// alongside the resolved Opts snapshot. Left zero-valued (empty
+	// name/version 0) for non-preset jobs, which stay NULL in the DB.
+	PresetName    string
+	PresetVersion int
+	Input         Input
 }
 
 // Create inserts a job (status=queued), its input row, and the initial
@@ -98,11 +105,20 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, error) {
 		}
 	}
 
+	// preset_name/preset_version are nullable and must stay NULL for
+	// non-preset jobs, preserving existing behavior (D-08).
+	var pname *string
+	var pver *int
+	if p.PresetName != "" {
+		pname = &p.PresetName
+		pver = &p.PresetVersion
+	}
+
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format, callback_url, options)
-			VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)`,
-			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat, p.CallbackURL, optsJSON,
+			INSERT INTO jobs (id, client_id, operation, engine, status, source_format, target_format, preset_name, preset_version, callback_url, options)
+			VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8, $9, $10)`,
+			jobID, p.ClientID, p.Operation, p.Engine, p.SourceFormat, p.TargetFormat, pname, pver, p.CallbackURL, optsJSON,
 		); err != nil {
 			return fmt.Errorf("insert job: %w", err)
 		}
