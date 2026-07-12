@@ -4,8 +4,8 @@ milestone: v1.4
 milestone_name: CI, Presets & Debt Cleanup
 status: executing
 stopped_at: Roadmap complete (Phases 17-19), ready to plan Phase 17
-last_updated: "2026-07-12T16:53:17.704Z"
-last_activity: 2026-07-12 -- Phase 17 planning complete
+last_updated: "2026-07-12T16:53:37.726Z"
+last_activity: 2026-07-12 -- Phase 17 execution started
 progress:
   total_phases: 3
   completed_phases: 0
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-12 after v1.3 milestone)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** v1.4 CI, Presets & Debt Cleanup — roadmap created (3 phases: 17 Tech Debt → 18 Presets → 19 CI Pipeline)
+**Current focus:** Phase 17 — tech-debt-cleanup
 
 ## Current Position
 
-Phase: 17 — Tech Debt Cleanup (pending)
-Plan: —
-Status: Ready to execute
-Last activity: 2026-07-12 -- Phase 17 planning complete
+Phase: 17 (tech-debt-cleanup) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 17
+Last activity: 2026-07-12 -- Phase 17 execution started
 
 ## Performance Metrics
 
