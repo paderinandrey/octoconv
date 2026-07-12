@@ -58,7 +58,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 - [x] **Phase 13: Cross-Format Conversion & Input Safety** - Кросс-конвертация внутри документного класса + структурная валидация выхода + отказ OLE-CFB входов (completed 2026-07-10)
 - [x] **Phase 14: Validated Conversion Options & PDF/A Export** - Closed-allowlist `opts` механизм + PDF/A-архивный экспорт как первый реальный потребитель (completed 2026-07-10)
 - [x] **Phase 15: HTML→PDF Chromium Engine** - Третий engine-class: chromium-based HTML→PDF с офлайн-рендерингом (SSRF-safe) (completed 2026-07-11)
-- [ ] **Phase 16: Webhook Delivery Decoupling** - Webhook-доставка переживает отсутствие/падение любого одного engine-воркера
+- [x] **Phase 16: Webhook Delivery Decoupling** - Webhook-доставка переживает отсутствие/падение любого одного engine-воркера (completed 2026-07-12)
 
 ## Phase Details
 
@@ -129,7 +129,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 - [x] 16-01-PLAN.md — Advisory-lock wrapper in reconciler (exactly-one-sweeper primitive) + unit tests
 - [x] 16-02-PLAN.md — cmd/webhook-worker binary (with storage) + Dockerfile; remove webhook/sweeper from cmd/worker
 - [x] 16-03-PLAN.md — Two named webhook-worker compose services + strip webhook env from image worker + .env.example
-- [ ] 16-04-PLAN.md — Live e2e acceptance (SC1/SC2/SC3) with human-verify checkpoint
+- [x] 16-04-PLAN.md — Live e2e acceptance (SC1/SC2/SC3) with human-verify checkpoint
 
 ## Progress
 
@@ -150,7 +150,7 @@ Full details: `.planning/milestones/v1.2-ROADMAP.md`
 | 13. Cross-Format Conversion & Input Safety | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 5/5 | Complete    | 2026-07-11 |
-| 16. Webhook Delivery Decoupling | v1.3 | 3/4 | In Progress|  |
+| 16. Webhook Delivery Decoupling | v1.3 | 4/4 | Complete   | 2026-07-12 |
 
 ---
 
