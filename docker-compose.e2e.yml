@@ -18,6 +18,13 @@ services:
     environment:
       WEBHOOK_ALLOW_PRIVATE_IPS: "true"
       WEBHOOK_ALLOW_INSECURE_HTTP: "true"
+      # E2E-only: the suite's status polling (many jobs back-to-back, all from
+      # the single docker-bridge gateway IP) exceeds the production defaults
+      # (60 ip-rpm / 120 client-rpm) on fast CI runners — first observed as a
+      # 429 cascade on the initial GitHub Actions run. Production compose
+      # keeps the real limits; only tests relax them.
+      RATE_LIMIT_IP_RPM: "6000"
+      RATE_LIMIT_CLIENT_RPM: "6000"
     # validateCallbackURL runs inside the api process at job-creation time
     # (net.LookupHost), so api itself needs the host-gateway alias too — not
     # just the webhook-worker services which actually deliver the webhook
