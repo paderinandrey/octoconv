@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: MCP Access & Document Fidelity
 status: planning
-last_updated: "2026-07-12T22:09:36.506Z"
-last_activity: 2026-07-12
+last_updated: "2026-07-13T00:00:00.000Z"
+last_activity: 2026-07-13
 progress:
-  total_phases: 0
+  total_phases: 4
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,23 +17,23 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-13 after v1.4 milestone)
+See: .planning/PROJECT.md (updated 2026-07-13 after v1.5 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 19 — ci-pipeline
+**Current focus:** Phase 20 — Presets REST CRUD & Format Discovery
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 20 — Presets REST CRUD & Format Discovery
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-12 — Milestone v1.5 started
+Status: Pending (roadmap complete, ready to plan Phase 20)
+Last activity: 2026-07-13 — Milestone v1.5 roadmap created (Phases 20-23)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 42 (all v1.0 + v1.1 + v1.2)
+- Total plans completed: 50 (all v1.0–v1.4)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -57,6 +57,9 @@ Last activity: 2026-07-12 — Milestone v1.5 started
 | 14 | 3 | - | - |
 | 15 | 5 | - | - |
 | 16 | 5 | - | - |
+| 17 | 2 | - | - |
+| 18 | 4 | - | - |
+| 19 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -69,11 +72,12 @@ Last activity: 2026-07-12 — Milestone v1.5 started
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table. v1.4-specific decisions flagged by research, to be recorded as Key Decisions before implementation:
+Decisions are logged in PROJECT.md Key Decisions table. v1.5-specific decisions flagged by research, to be recorded as Key Decisions before/at implementation:
 
-- Phase 18 (Presets): preset version-resolution semantics (single-active-version-per-name vs. multiple-simultaneously-active) and scope-precedence lookup order (client shadows system) — schema/behavior design decisions specific to this DDL; research flags both as "must be a written decision, not inferred behavior."
-- Phase 18 (Presets): `worker.NewHandler` / preset-resolution constructor signature impact — verify during phase planning.
-- Phase 19 (CI): GHA cache sizing/scoping across 5 images and repo visibility (public 4vCPU/16GB vs private 2vCPU/8GB) for the live-E2E job — confirm before finalizing resource assumptions.
+- Phase 20 (Presets REST): `list_presets` scope-merging shape — how to reproduce `Resolve`'s shadow-precedence (client preset hides same-named system preset) across the REST surface (e.g. a `?include_system=true` param merged in the API layer). Not fully designed in any research file; finalize during Phase 20 planning since it determines what the REST surface must expose.
+- Phase 22 (CFB): hand-rolled `ClassifyCFB` over a third-party library (mscfb) — a "why we did NOT add a dependency" Key Decision. Requires (1) sector/entry walk bound cross-checked against reader length, (2) visited-sector set for immediate cycle rejection, (3) fuzz target seeded with Phase 13 fixtures + corrupted variants as a phase-exit gate before merge.
+- Phase 23 (veraPDF): CLI-per-job vs daemon/server-mode — resolve with a live JVM cold-start measurement before committing to either shape (daemon fallback documented either way); veraPDF severity policy (all non-compliance terminal vs Error-severity only) decided and re-validated against v1.3 PDF/A-2b fixtures before merge; `terminalVeraPDFSignatures` confirmed against a real invocation, not training-data assumptions.
+- Phase 21 (MCP): re-verify the pinned `go-sdk` (≥v1.6.1) `mcp.AddTool`/schema-generation API surface against `go.mod` at execution time (SDK actively evolving); verify progress-notification/keepalive/idle-window mechanics live against the actual target MCP host (Claude Code).
 
 ### Quick Tasks Completed
 
@@ -83,15 +87,15 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.4-specific decisions 
 
 ### Pending Todos
 
-- Plan Phase 17 (Tech Debt Cleanup): DEBT-06, DEBT-07, DEBT-08.
+- Plan Phase 20 (Presets REST CRUD & Format Discovery): PRAPI-01, PRAPI-02, PRAPI-03.
 
 ### Blockers/Concerns
 
-None currently blocking. Sequencing note carried into the roadmap: Phase 17's DEBT-07 (fakeEnqueuer race fix) gates Phase 19's `-race` CI tier, and DEBT-08 (image E2E test) gates Phase 19's live-E2E tier — enabling those tiers before the prerequisites land produces a red/blind pipeline.
+None currently blocking. Sequencing note carried into the roadmap: Phase 20 (Presets REST + `GET /v1/formats`) is a hard prerequisite for two of Phase 21 MCP's five tools (`list_presets`, `list_supported_formats`) — MCP holds zero `internal/presets`/`internal/convert` imports, so those endpoints must exist before Phase 21. Phase 22 (CFB) and Phase 23 (veraPDF) are independent of the Presets/MCP track and of each other; veraPDF is sequenced last as the highest-uncertainty item (new JVM runtime, unverified image/latency impact).
 
 ## Deferred Items
 
-Items acknowledged and carried forward at milestone closes (see `.planning/milestones/v1.0-MILESTONE-AUDIT.md`, `v1.1-MILESTONE-AUDIT.md`, `v1.2-MILESTONE-AUDIT.md` for full detail):
+Items acknowledged and carried forward at milestone closes (see `.planning/milestones/*-MILESTONE-AUDIT.md` for full detail):
 
 | Category | Item | Status | Deferred At |
 |----------|------|--------|-------------|
@@ -100,26 +104,23 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | tech_debt | WR-03: engine-class string literals duplicated in 4 places — extract exported constants | Closed as DEBT-02, Phase 12 | v1.2 close (2026-07-10) |
 | tech_debt | WR-04: E2E HTTP clients lack per-request timeouts | Closed as DEBT-03, Phase 12 | v1.2 close (2026-07-10) |
 | tech_debt | gofmt nit in internal/queue/queue_test.go (pre-existing since Phase 9/10) | Closed as DEBT-04, Phase 12 | v1.2 close (2026-07-10) |
-| v2_scope | Full ISO 19005 (veraPDF) validation of PDF/A outputs | Deferred to v2 (DOCV3-01) | v1.3 requirements definition (2026-07-10) |
-| v2_scope | Legacy vs encrypted CFB distinction (directory-stream parsing) | Deferred to v2 (DOCV3-02) | v1.3 requirements definition (2026-07-10) |
-| v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03) | v1.3 requirements definition (2026-07-10) |
-| accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried into v1.3) | v1.2 requirements definition (2026-07-09) |
+| v2_scope | Full ISO 19005 (veraPDF) validation of PDF/A outputs | Now PDFA-01/02, mapped to Phase 23 | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Legacy vs encrypted CFB distinction (directory-stream parsing) | Now CFB-01/02, mapped to Phase 22 | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03, carried) | v1.3 requirements definition (2026-07-10) |
+| accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried) | v1.2 requirements definition (2026-07-09) |
 | seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
-| seed | SEED-003: MCP-сервер для OctoConv | Dormant — trigger ACTIVE (presets shipped) | v1.4 planning (2026-07-12) |
+| seed | SEED-003: MCP-сервер для OctoConv | Now MCP-01..05, mapped to Phase 21 | v1.4 planning (2026-07-12) |
 | tech_debt | CACHED-hit log confirmation for CI docker-build (needs gh auth) | Operator-accepted residual | v1.4 close (2026-07-13) |
 | ops | Branch-protection required-checks (gate/race/docker-build) — manual GitHub UI step | Open operational follow-up | v1.4 close (2026-07-13) |
 | tech_debt | presets D-04 single-active-version: application-transactional only, no DB backstop | Accepted residual | v1.4 close (2026-07-13) |
 | seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | ✓ Implemented (v1.3 Phase 16, WEBH-01) | v1.2 close (2026-07-10) |
-| tech_debt | Dead webhook wiring in cmd/document-worker & cmd/chromium-worker (WR-02/WR-03 из 16-REVIEW) | Now DEBT-06, mapped to Phase 17 | v1.3 close (2026-07-12) |
-| tech_debt | fakeEnqueuer data race under full-package -race (internal/reconciler test helpers) | Now DEBT-07, mapped to Phase 17 | v1.3 close (2026-07-12) |
-| tech_debt | No dedicated image (libvips) E2E test in internal/e2e | Now DEBT-08, mapped to Phase 17 | v1.3 close (2026-07-12) |
 
 ## Session Continuity
 
-Last session: 2026-07-12 — v1.4 roadmap created
-Stopped at: Roadmap complete (Phases 17-19), ready to plan Phase 17
+Last session: 2026-07-13 — v1.5 roadmap created
+Stopped at: Roadmap complete (Phases 20-23), ready to plan Phase 20
 Resume file: .planning/ROADMAP.md
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run `/gsd:plan-phase 20` to plan the first v1.5 phase (Presets REST CRUD & Format Discovery).

@@ -59,24 +59,24 @@ Deferred to future release.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MCP-01 | TBD | Pending |
-| MCP-02 | TBD | Pending |
-| MCP-03 | TBD | Pending |
-| MCP-04 | TBD | Pending |
-| MCP-05 | TBD | Pending |
-| PRAPI-01 | TBD | Pending |
-| PRAPI-02 | TBD | Pending |
-| PRAPI-03 | TBD | Pending |
-| CFB-01 | TBD | Pending |
-| CFB-02 | TBD | Pending |
-| PDFA-01 | TBD | Pending |
-| PDFA-02 | TBD | Pending |
+| PRAPI-01 | Phase 20 | Pending |
+| PRAPI-02 | Phase 20 | Pending |
+| PRAPI-03 | Phase 20 | Pending |
+| MCP-01 | Phase 21 | Pending |
+| MCP-02 | Phase 21 | Pending |
+| MCP-03 | Phase 21 | Pending |
+| MCP-04 | Phase 21 | Pending |
+| MCP-05 | Phase 21 | Pending |
+| CFB-01 | Phase 22 | Pending |
+| CFB-02 | Phase 22 | Pending |
+| PDFA-01 | Phase 23 | Pending |
+| PDFA-02 | Phase 23 | Pending |
 
 **Coverage:**
 - v1 requirements: 12 total
-- Mapped to phases: 0 (roadmap pending)
-- Unmapped: 12 ⚠️
+- Mapped to phases: 12 ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-13*
-*Last updated: 2026-07-13 after initial definition*
+*Last updated: 2026-07-13 after roadmap creation (v1.5 Phases 20-23)*
