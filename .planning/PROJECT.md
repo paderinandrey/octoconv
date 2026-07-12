@@ -8,11 +8,16 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current State (after v1.3, shipped 2026-07-12)
+## Current Milestone: v1.4 CI, Presets & Debt Cleanup
 
-**Shipped:** v1.3 Document Class v2 — 5 фаз (12–16), 17 планов, 44 задачи, ~2 дня. Документный класс перестал быть «только → PDF» (6 симметричных кросс-пар), появились validated opts + PDF/A-2b, третий engine-class HTML→PDF (chromium, офлайн-рендеринг с live-canary доказательством нулевых сетевых соединений), и webhook-доставка развязана с engine-воркерами (2 избыточных webhook-worker реплики, advisory-lock singleton sweeper, ~11s failover).
+**Goal:** Каждый push проверяется автоматически вплоть до живого E2E, клиенты используют именованные пресеты вместо ручных opts, и хвост v1.3-долга закрыт.
 
-**Next milestone goals:** не определены — запустить `/gsd:new-milestone`. Кандидаты из отложенного: DOCV3-01..03 (veraPDF-валидация, CFB legacy-vs-encrypted различение, кастомные шрифты/CJK-RTL), новые классы движков (av/ffmpeg, archive, probe, CAD), K8s+KEDA, image E2E-тест, tech debt из v1.3-аудита (мёртвая webhook-обвязка в document/chromium-worker, fakeEnqueuer -race).
+**Target features:**
+- CI-пайплайн (GitHub Actions), 4 уровня: базовый gate (gofmt/vet/build/test) → `-race` → сборка всех 5 Docker-образов → live E2E на compose-стеке в CI
+- Presets: `cmd/manage-presets` CLI (по образцу manage-clients) для system/client-пресетов; клиент передаёт `preset=<name>` в `POST /v1/jobs` вместо `target_format`+`opts`; таблица `presets` из DDL наконец задействована
+- Tech debt v1.3: мёртвая webhook-обвязка в document/chromium-worker; mutex для fakeEnqueuer (`-race` чистый — предпосылка CI-уровня 2); image (libvips) E2E-тест — закрывает последнюю дыру в E2E-матрице до включения live E2E в CI
+
+**Key context:** зависимости выстраиваются естественно — `-race`-фикс до CI с `-race`, image E2E до live-E2E-уровня CI; presets переиспользуют validated-opts механизм Phase 14 (пресет — server-side хранимые opts, та же fail-closed валидация). Прошлое состояние: v1.3 shipped 2026-07-12 (см. Context).
 
 ## Requirements
 
@@ -54,9 +59,12 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Пусто — milestone v1.3 закрыт; следующий скоуп определит /gsd:new-milestone. -->
+<!-- Milestone v1.4 (CI, Presets & Debt Cleanup). -->
 
-(нет активных требований — ожидается новый milestone)
+- [ ] Каждый push/PR автоматически проходит CI: gofmt/vet/build/test, -race, сборка всех Docker-образов, live E2E на compose-стеке
+- [ ] Клиент может создать задачу конвертации по именованному пресету (preset=<name>) вместо ручных target_format/opts
+- [ ] Оператор управляет system/client-пресетами через cmd/manage-presets CLI
+- [ ] Tech debt v1.3 закрыт: мёртвая webhook-обвязка удалена, fakeEnqueuer race-safe, image E2E-тест существует
 
 ### Out of Scope
 
@@ -134,4 +142,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-12 after v1.3 milestone*
+*Last updated: 2026-07-12 after v1.4 milestone start*

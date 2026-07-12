@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.3
-milestone_name: Document Class v2
-status: Awaiting next milestone
-stopped_at: Phase 16 context gathered
-last_updated: "2026-07-12T08:39:16.077Z"
-last_activity: 2026-07-12 — Milestone v1.3 completed and archived
+milestone: v1.4
+milestone_name: CI, Presets & Debt Cleanup
+status: planning
+last_updated: "2026-07-12T16:08:47.916Z"
+last_activity: 2026-07-12
 progress:
-  total_phases: 5
-  completed_phases: 5
-  total_plans: 17
-  completed_plans: 17
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,10 +24,10 @@ See: .planning/PROJECT.md (updated 2026-07-12 after v1.3 milestone)
 
 ## Current Position
 
-Phase: Milestone v1.3 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-07-12 — Milestone v1.3 completed and archived
+Status: Defining requirements
+Last activity: 2026-07-12 — Milestone v1.4 started
 
 ## Performance Metrics
 
