@@ -60,23 +60,23 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CI-01 | TBD | Pending |
-| CI-02 | TBD | Pending |
-| CI-03 | TBD | Pending |
-| CI-04 | TBD | Pending |
-| PRST-01 | TBD | Pending |
-| PRST-02 | TBD | Pending |
-| PRST-03 | TBD | Pending |
-| PRST-04 | TBD | Pending |
-| DEBT-06 | TBD | Pending |
-| DEBT-07 | TBD | Pending |
-| DEBT-08 | TBD | Pending |
+| DEBT-06 | Phase 17 | Pending |
+| DEBT-07 | Phase 17 | Pending |
+| DEBT-08 | Phase 17 | Pending |
+| PRST-01 | Phase 18 | Pending |
+| PRST-02 | Phase 18 | Pending |
+| PRST-03 | Phase 18 | Pending |
+| PRST-04 | Phase 18 | Pending |
+| CI-01 | Phase 19 | Pending |
+| CI-02 | Phase 19 | Pending |
+| CI-03 | Phase 19 | Pending |
+| CI-04 | Phase 19 | Pending |
 
 **Coverage:**
 - v1 requirements: 11 total
-- Mapped to phases: 0 (roadmap pending)
-- Unmapped: 11 ⚠️
+- Mapped to phases: 11 ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-12*
-*Last updated: 2026-07-12 after initial definition*
+*Last updated: 2026-07-12 after roadmap creation (11/11 mapped across Phases 17-19)*

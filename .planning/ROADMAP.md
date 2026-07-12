@@ -6,6 +6,7 @@
 - ✅ **v1.1 Tech Debt Cleanup** — Phases 5-7 (shipped 2026-07-08) — see `.planning/milestones/v1.1-ROADMAP.md`
 - ✅ **v1.2 Document Engine Class** — Phases 8-11 (shipped 2026-07-10) — see `.planning/milestones/v1.2-ROADMAP.md`
 - ✅ **v1.3 Document Class v2** — Phases 12-16 (shipped 2026-07-12) — see `.planning/milestones/v1.3-ROADMAP.md`
+- 🚧 **v1.4 CI, Presets & Debt Cleanup** — Phases 17-19 (in progress)
 
 ## Phases
 
@@ -63,6 +64,53 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 
 </details>
 
+### 🚧 v1.4 CI, Presets & Debt Cleanup (Phases 17-19) — IN PROGRESS
+
+**Goal:** Каждый push проверяется автоматически вплоть до живого E2E, клиенты используют именованные пресеты вместо ручных opts, и хвост v1.3-долга закрыт.
+
+**Granularity:** coarse — 3 phases, one per requirement cluster (debt / presets / CI). Ordering enforces the two hard sequencing constraints from research: the fakeEnqueuer race fix (DEBT-07) must precede the `-race` CI tier, and the image E2E test (DEBT-08) must precede the live-E2E CI tier.
+
+- [ ] **Phase 17: Tech Debt Cleanup** — dead webhook wiring removed, fakeEnqueuer race-safe, image E2E test added (unblocks CI tiers 2 & 4)
+- [ ] **Phase 18: Presets** — named server-side presets: `cmd/manage-presets` CLI + `preset=<name>` job creation, activating the dormant `presets` DDL
+- [ ] **Phase 19: CI Pipeline** — 4-tier GitHub Actions (gate → `-race` → 5-image Docker build → live compose E2E), validating the full v1.4 codebase on first run
+
+#### Phase Details
+
+### Phase 17: Tech Debt Cleanup
+**Goal**: Close the v1.3 tail-debt so the later `-race` and live-E2E CI tiers can land green instead of red/blind on day one.
+**Depends on**: Nothing (first phase of v1.4; builds directly on v1.3 `main`)
+**Requirements**: DEBT-06, DEBT-07, DEBT-08
+**Success Criteria** (what must be TRUE):
+  1. `cmd/document-worker` and `cmd/chromium-worker` no longer construct `webhook.NewRepo`/`NewDeliverer` nor read `WEBHOOK_SIGNING_SECRET`; both binaries still build and start cleanly (dead wiring gone, not just unused).
+  2. `go test ./internal/reconciler/... -race` runs (not skips) and reports clean — `fakeEnqueuer`'s call counters are mutex/atomic-guarded.
+  3. A new image-engine E2E test in `internal/e2e` drives a full upload → convert (libvips) → download → HMAC-verified webhook cycle against a live compose stack and passes — closing the last gap in the E2E matrix.
+**Plans**: TBD
+
+### Phase 18: Presets
+**Goal**: Clients create conversion jobs by named preset instead of hand-supplying `target_format`/`opts`, and operators manage those presets through a CLI — reusing the existing validated-opts pipeline with zero new validation logic and zero new migration.
+**Depends on**: Nothing functionally (independent of Phase 17); sequenced second only to keep its diff surface isolated from the debt-cleanup touch points.
+**Requirements**: PRST-01, PRST-02, PRST-03, PRST-04
+**Success Criteria** (what must be TRUE):
+  1. An operator can create / update / list / show / deactivate both system-scoped and client-scoped presets via `cmd/manage-presets` (no hard delete; a single active version per name, bump-on-update) — mirroring `cmd/manage-clients`.
+  2. `POST /v1/jobs` with `preset=<name>` converts using the preset's stored target/opts, and the resulting job record carries `preset_name` / `preset_version` provenance.
+  3. A client-scoped preset shadows a system preset of the same name for its owning client (scope-precedence lookup), and system presets remain usable by any client.
+  4. Supplying `preset` together with explicit `target_format`/`opts` returns 422 (mutually exclusive); a nonexistent, inactive, or cross-client preset returns the same 422 with no existence leak (SQL `WHERE client_id` filter, not a post-lookup Go branch).
+  5. Opts resolved from a preset are re-run through the same fail-closed `ParseDocOpts`/`ParseHTMLOpts` validation on every use — stored opts are never trusted, with no bypass branch.
+**Plans**: TBD
+
+### Phase 19: CI Pipeline
+**Goal**: Every push/PR is validated automatically, escalating from a cheap gate up to a live compose E2E, so the full v1.4 codebase (presets included) is exercised green from the pipeline's first run.
+**Depends on**: Phase 17 (DEBT-07 gates the `-race` tier; DEBT-08 gates the live-E2E tier) and Phase 18 (so the docker-build/E2E tiers exercise the final v1.4 code).
+**Requirements**: CI-01, CI-02, CI-03, CI-04
+**Success Criteria** (what must be TRUE):
+  1. A PR containing a gofmt/vet/build/test violation gets a red required check (tier 1 gate) before any escalating tier runs.
+  2. `go test ./... -race` runs as a full-package required check and is green on the v1.4 codebase (tier 2).
+  3. All 5 Docker images (api, worker, document-worker, chromium-worker, webhook-worker) build in CI via `docker buildx bake` over `docker-compose.yml` with per-target `type=gha` layer cache — CACHED layers appear on a second identical run, and a disk-cleanup step keeps the LibreOffice+Chromium build within runner disk.
+  4. Live E2E brings up the full compose stack and runs `internal/e2e` against it — advisory on PR, required on main; teardown runs under `if: always()` even when tests fail, stack logs upload as an artifact on failure, and stale runs are cancelled by a concurrency group.
+**Plans**: TBD
+
+**Operational follow-up (not a code deliverable):** After Phase 19 lands, branch-protection required-checks must be configured manually in GitHub — the workflow file alone does not gate merges.
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -83,7 +131,10 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 5/5 | Complete    | 2026-07-11 |
 | 16. Webhook Delivery Decoupling | v1.3 | 5/5 | Complete | 2026-07-12 |
+| 17. Tech Debt Cleanup | v1.4 | 0/? | Not started | - |
+| 18. Presets | v1.4 | 0/? | Not started | - |
+| 19. CI Pipeline | v1.4 | 0/? | Not started | - |
 
 ---
 
-*Next: run `/gsd:new-milestone` to define the next milestone.*
+*Next: run `/gsd:plan-phase 17` to plan the first v1.4 phase.*
