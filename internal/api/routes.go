@@ -38,6 +38,7 @@ func (s *Server) Routes() chi.Router {
 		r.Use(ratelimit.PerClient(s.clientRateRPM))
 		r.Post("/jobs", s.handleCreateJob)
 		r.Get("/jobs/{id}", s.handleGetJob)
+		r.Get("/formats", s.handleListFormats)
 		r.Route("/presets", func(r chi.Router) {
 			r.Post("/", s.handleCreatePreset)
 			r.Get("/", s.handleListPresets)
