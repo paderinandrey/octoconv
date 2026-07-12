@@ -1,281 +1,553 @@
 # Architecture Research
 
-**Domain:** Async file-conversion service — extending an existing engine-class/queue-per-class Go architecture (chi + asynq + Redis + Postgres + S3/MinIO) with cross-format document conversion, `opts` plumbing, OLE-CFB pre-flight rejection, a third (chromium) engine class, and webhook-consumer decoupling.
-**Researched:** 2026-07-10
-**Confidence:** HIGH (all findings grounded in direct reads of the current `main` codebase; two load-bearing external claims — LibreOffice CLI PDF/A filter syntax, headless Chromium Docker sandboxing — verified via WebSearch, MEDIUM confidence, multiple sources agree)
+**Domain:** Integration architecture for OctoConv v1.4 (CI pipeline, presets, debt cleanup)
+**Researched:** 2026-07-12
+**Confidence:** HIGH (all findings verified directly against current repo source — no external ecosystem claims in this milestone)
 
-This is a **subsequent-milestone** architecture doc for v1.3 "Document Class v2". It does not re-derive the existing system (chi API → Postgres-first double write → asynq engine-class queue → worker → converter registry → S3, all already shipped and documented in CLAUDE.md/PROJECT.md). It focuses exclusively on how the five v1.3 features graft onto that system, with concrete file-level integration points.
+This is an **integration** research doc, not a greenfield architecture doc: v1.4 adds three
+independent, mostly-non-interacting feature groups on top of an already-hardened system
+(v1.0–v1.3 shipped). Each section below identifies exactly what's NEW vs MODIFIED, with file
+paths, and where each piece plugs into the existing dependency graph
+(`cmd/* → internal/{api,worker} → internal/{jobs,storage,queue,convert} → internal/db`).
 
-## Standard Architecture (current shipped shape — unchanged parts)
+## Standard Architecture
+
+### System Overview (v1.4 deltas highlighted)
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│ API (cmd/api, internal/api)                                           │
-│  handleCreateJob: Sniff → SniffContainer(zip) → EngineFor → Dimensions │
-│  → Upload(S3) → jobs.Repo.Create (Postgres-first) → queue.EnqueueX     │
-├───────────────────────────────────────────────────────────────────────┤
-│ Redis / asynq — one queue per engine class: image, document, webhook  │
-├───────────────────────────────────────────────────────────────────────┤
-│  cmd/worker (image)         cmd/document-worker (document)            │
-│  mux: image:convert         mux: document:convert                     │
-│  mux: webhook:deliver  ←──────────── ACCIDENTAL: only image worker    │
-│  + reconciler.Sweeper                consumes webhook:deliver (SEED-2)│
-├───────────────────────────────────────────────────────────────────────┤
-│ internal/convert: Converter{Pairs, Convert, Engine} + Registry          │
-│   LibvipsConverter (image→image, engine="image")                       │
-│   LibreOfficeConverter (6 docs→pdf only, engine="document")             │
-├───────────────────────────────────────────────────────────────────────┤
-│ Postgres (jobs/job_inputs/job_outputs/job_events/webhook_deliveries)   │
-│ S3/MinIO (uploads/, results/)                                          │
-└───────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  cmd/ (entry points)                                                       │
+│  ┌────────┐ ┌────────┐ ┌──────────┐ ┌─────────┐ ┌───────────────┐         │
+│  │  api   │ │ worker │ │ document │ │chromium │ │ webhook-worker│         │
+│  │        │ │(image) │ │ -worker  │ │-worker  │ │               │         │
+│  └───┬────┘ └───┬────┘ └────┬─────┘ └────┬────┘ └──────┬────────┘         │
+│      │          │           │            │              │                 │
+│  ┌───▼──────────────────────▼────────────▼──────────────▼──────┐          │
+│  │ NEW: cmd/manage-presets  (mirrors cmd/manage-clients)         │          │
+│  │      cmd/migrate — unchanged (no new migration expected)      │          │
+│  └────────────────────────────────────────────────────────────────┘        │
+├──────────────────────────────────────────────────────────────────────────┤
+│  internal/api  (MODIFIED: api.go +PresetRepo iface, handlers.go +preset   │
+│                 resolution step in handleCreateJob)                       │
+│  internal/jobs (MODIFIED: Repo.Create persists preset_name/preset_version │
+│                 — columns already exist in DDL, unused until now)         │
+│  internal/presets (NEW package, mirrors internal/clients' Repo shape)     │
+│  internal/worker, internal/queue, internal/convert, internal/storage,     │
+│  internal/webhook — UNCHANGED                                             │
+│  internal/reconciler — MODIFIED (test-only): fakeEnqueuer gets a mutex    │
+│    (debt fix, -race prerequisite)                                        │
+│  cmd/document-worker, cmd/chromium-worker — MODIFIED (debt): dead         │
+│    webhook.NewRepo/NewDeliverer wiring removed                           │
+│  internal/e2e — MODIFIED: new TestImageConversionE2E (debt fix, mirrors  │
+│                 existing TestDocumentConversionE2E/TestHTMLConversionE2E) │
+├──────────────────────────────────────────────────────────────────────────┤
+│  internal/db — UNCHANGED. presets table + jobs.preset_name/preset_version │
+│                already exist in 0001_init.sql (dormant since Phase 1) —   │
+│                v1.4 activates existing schema, no new migration needed.   │
+├──────────────────────────────────────────────────────────────────────────┤
+│  .github/workflows/  — NEW, entirely outside internal/cmd. gate → race →  │
+│                 docker-build → e2e-live, reusing docker-compose.yml +     │
+│                 docker-compose.e2e.yml unchanged.                          │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Component Responsibilities (existing, for reference)
+### Component Responsibilities (NEW / MODIFIED only)
 
-| Component | Responsibility | File |
-|-----------|----------------|------|
-| Sniff chain | Magic-byte + ZIP-structural content detection, fail-closed | `internal/convert/sniff.go`, `internal/convert/docsniff.go` |
-| Converter registry | `(from,to)` → Converter, `Engine()`/`EngineFor` for queue routing | `internal/convert/convert.go` |
-| Worker `process()` | download → `conv.Convert` → upload → record output → mark done | `internal/worker/worker.go:365-426` |
-| Reconciler | engine-aware stale-job recovery + webhook-gap sweep, same process as image worker | `internal/reconciler/reconciler.go`, run only from `cmd/worker/main.go` |
-| Jobs schema | `jobs.options jsonb NOT NULL DEFAULT '{}'`, `jobs.engine CHECK (... IN ('image','document','av','cad','archive','probe'))` | `internal/db/migrations/0001_init.sql:41-66` |
+| Component | New or Modified | Responsibility | File |
+|-----------|-----------------|-----------------|------|
+| `internal/presets` | **NEW package** | Postgres-backed presets repository: resolve an active preset by name with client→system fallback; CRUD for the CLI | `internal/presets/repo.go` (to be created), mirrors `internal/clients/repo.go` |
+| `cmd/manage-presets` | **NEW binary** | Operator CLI: create system/client presets, list, activate/deactivate | `cmd/manage-presets/main.go` (to be created), mirrors `cmd/manage-clients/main.go` |
+| `internal/api/api.go` | **MODIFIED** | Add `PresetRepo` interface (interface-segregated, like `Repo`/`Storage`/`Enqueuer`); add `presets PresetRepo` field + constructor param to `Server`/`NewServer` | `internal/api/api.go:16-34, 52-120` |
+| `internal/api/handlers.go` | **MODIFIED** | `handleCreateJob` gains a preset-resolution branch that runs BEFORE format-pair validation and feeds the SAME `ParseDocOpts`/`ParseHTMLOpts` validation path | `internal/api/handlers.go:78-391` |
+| `internal/jobs` | **MODIFIED** | `CreateParams` gains `PresetName string` / `PresetVersion int`; `Repo.Create`'s INSERT gains 2 columns (already exist in DDL) | `internal/jobs/jobs.go`, `internal/jobs/repo.go:63-131` |
+| `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go` | **MODIFIED (debt)** | Remove dead `webhook.NewRepo`/`webhook.NewDeliverer`/signing-secret wiring passed into `worker.NewHandler` — webhook delivery lives solely in `cmd/webhook-worker` since Phase 16 | `cmd/document-worker/main.go:26,55,70-71`, `cmd/chromium-worker/main.go` (same lines) |
+| `internal/reconciler/reconciler_test.go` | **MODIFIED (debt)** | Add a mutex around `fakeEnqueuer`'s call-recording slices/fields — currently a data race under `go test -race` | `internal/reconciler/reconciler_test.go:81-111` |
+| `internal/e2e` | **MODIFIED (debt)** | Add `TestImageConversionE2E`, mirroring `TestDocumentConversionE2E` (`e2e_test.go:342`) / `TestHTMLConversionE2E` (`:800`) — closes the last gap in the E2E matrix before CI's live-e2e tier depends on full coverage | `internal/e2e/e2e_test.go` |
+| `.github/workflows/ci.yml` | **NEW file** | 4-tier CI: gate → race → docker-build → e2e-live | `.github/workflows/ci.yml` (to be created) |
 
-## Integration Point (a): Output format is no longer always `pdf`
+## Recommended Project Structure
 
-**Good news, verified by direct read:** the worker's output-side plumbing is **already fully generalized** — no change needed there.
+```
+internal/
+  presets/                  # NEW — mirrors internal/clients exactly
+    presets.go               # Preset struct, scope/operation string consts (mirror jobs.go's status consts)
+    repo.go                  # Repo{pool}, NewRepo, GetActiveByNameAndClient, Create, List, SetActive
+    repo_test.go              # unit tests against a real pgx pool (mirrors clients/jobs test style)
+cmd/
+  manage-presets/
+    main.go                  # subcommand CLI: create-system / create-client / list / activate / deactivate
+.github/
+  workflows/
+    ci.yml                   # single workflow, 4 jobs (gate, race, docker-build, e2e-live) with `needs:`
+```
 
-`internal/worker/worker.go:396-421` (`process()`) already derives everything from `job.TargetFormat`, not a hardcoded `"pdf"`:
+### Structure Rationale
+
+- **`internal/presets/` as its own package, not folded into `internal/jobs`:** presets are a
+  distinct entity with their own table, own repo, own CLI, and their own lifecycle
+  (system/user scope, versioning, activation) — this exactly matches why `internal/clients`
+  is its own package instead of living inside `internal/jobs` (auth/client identity vs. job
+  lifecycle are different concerns owned by different repos). `internal/jobs` should gain
+  only the two new columns on the existing `Job`/`CreateParams` structs — it must NOT import
+  `internal/presets` (jobs stays the single source of truth for job state; presets stay a
+  read-only, resolved-once-at-creation-time input to that state, same relationship storage
+  and queue already have to jobs).
+- **`cmd/manage-presets` mirrors `cmd/manage-clients` file-for-file:** same `os.Args`-based
+  subcommand dispatch, same "connect to Postgres directly, no HTTP/auth layer" pattern (an
+  operator CLI, not a client-facing surface), same fail-fast `log.Fatalf` on `db.Connect`
+  error. This is a deliberate case where copying the existing pattern's shape (not the
+  literal keys code) is lower-risk than inventing a new CLI idiom.
+- **Single `.github/workflows/ci.yml`, not four files:** the four tiers are strictly
+  sequential/dependent (see Build Order below), not independently-triggered workflows. A
+  single file with `needs:` job dependencies gives one place to read the whole pipeline,
+  and branch-protection required-checks configuration only has to reference job names inside
+  one workflow rather than coordinating `workflow_run` triggers across files (which is more
+  fragile — cross-workflow triggers only fire off the DEFAULT branch's workflow definition,
+  a common gotcha with the multi-file approach on PRs from branches).
+
+## Architectural Patterns
+
+### Pattern 1: Preset resolution as a pre-validation stage (extends the existing validated-opts pipeline)
+
+**What:** `preset=<name>` is a THIRD form field alongside `target`/`opts`, mutually exclusive
+with them. When present, it resolves — via a narrow `PresetRepo` interface — to a
+`(target_format, options)` pair which is then fed into the *exact same* downstream code paths
+(`convert.Default.EngineFor`, `convert.ParseDocOpts`/`ParseHTMLOpts`,
+`ValidateApplicability`/`ValidateHTMLApplicability`) that already exist for manual
+`target`+`opts` requests. No new validation logic is invented — the preset is just an
+alternate SOURCE of the same two already-validated fields.
+
+**When to use:** Any time a client wants server-stored, named defaults instead of repeating
+`target`+`opts` on every request. This is the standard "template/preset resolves to concrete
+parameters, then re-enters the normal validation pipeline" shape — the same shape
+`DocOptsFromMap` (`internal/convert/opts.go:113-122`) already uses to re-validate
+already-persisted `jobs.options` on the worker's read path. Preset resolution is that same
+"never trust a persisted value without re-parsing it through the strict parser" discipline,
+applied to `presets.options` instead of `jobs.options`.
+
+**Trade-offs:** Slightly more branching in `handleCreateJob`, but it reuses 100% of the
+existing fail-closed opts machinery — zero new attack surface for opts injection, because
+`ParseDocOpts`/`ParseHTMLOpts` never trust the caller regardless of whether the raw JSON came
+from the multipart form or from a `jsonb` column.
+
+**Where it plugs in (exact insertion point in `internal/api/handlers.go`):**
+
+```
+1. ParseMultipartForm                                    (unchanged)
+2. read `target` AND `preset` form fields                (MODIFIED: was target-only)
+3. IF both target and preset are set        → 400 (ambiguous, fail closed, no silent precedence)
+   IF neither is set                        → 400 "missing target format" (unchanged message)
+4. read file, header, declared source-from-extension       (unchanged)
+5. resolve client from context                              (unchanged — already before content
+                                                              detection, needed for preset lookup too)
+6. IF preset is set:
+     row, err := s.presets.GetActiveByNameAndClient(ctx, client.ID, presetName)
+     - not found / inactive / operation != "convert"       → 422 "unknown or inactive preset"
+     - target = convert.NormalizeFormat(row.TargetFormat)
+     - presetOptsMap = row.Options   (map[string]any, already unmarshaled from jsonb)
+     IF the raw `opts` form field is ALSO non-empty         → 400 (ambiguous, fail closed —
+                                                              preset governs opts exclusively,
+                                                              no merge)
+7. Sniff / SniffContainer / LooksLikeHTML / IsOLECFB content detection    (UNCHANGED —
+                                                              preset never supplies source
+                                                              format; detected content is
+                                                              still the sole source of truth)
+8. engine, ok := convert.Default.EngineFor(detected, target)              (UNCHANGED CALL —
+                                                              target is now preset-resolved
+                                                              when applicable; this IS the
+                                                              "format-pair validation" the
+                                                              preset must resolve before)
+9. dimension check                                                        (unchanged)
+10. callback_url validation                                               (unchanged)
+11. opts parsing:
+      IF preset was used: rawOpts source = json.Marshal(presetOptsMap)
+      ELSE:                rawOpts source = r.FormValue(formFieldOpts)     (existing)
+      → same engine-keyed switch: ParseDocOpts/ParseHTMLOpts + ValidateApplicability/
+        ValidateHTMLApplicability                                          (UNCHANGED CALLS)
+12. storage.Upload, repo.Create (now also persists PresetName/PresetVersion),
+    engine-queue enqueue                                                   (repo.Create only
+                                                              MODIFIED to add 2 columns)
+```
+
+This ordering satisfies the requirement precisely: preset resolves to `target_format`+`opts`
+BEFORE the `EngineFor` format-pair check (step 8), and the resolved opts flow through the
+identical `ParseDocOpts`/`ParseHTMLOpts` fail-closed validators (step 11) — never a
+preset-specific bypass.
+
+**Example (Go, illustrative — not exact final code):**
 ```go
-outName := "out." + job.TargetFormat
-outKey := storage.OutputKey(job.ID, 0, outName)
-h.uploadFrom(attemptCtx, outKey, outPath, convert.MIMEType(job.TargetFormat))
-...
-h.repo.AddOutput(attemptCtx, job.ID, jobs.Output{Format: job.TargetFormat, ContentType: convert.MIMEType(job.TargetFormat), ...})
+target := convert.NormalizeFormat(r.FormValue(formFieldTarget))
+presetName := r.FormValue(formFieldPreset)
+if target != "" && presetName != "" {
+    writeError(w, http.StatusBadRequest, "specify either target or preset, not both")
+    return
+}
+// ... file, source, client resolution unchanged ...
+
+var presetOpts map[string]any
+if presetName != "" {
+    p, err := s.presets.GetActiveByNameAndClient(ctx, client.ID, presetName)
+    if err != nil || p == nil || p.Operation != operationConv || p.TargetFormat == "" {
+        writeError(w, http.StatusUnprocessableEntity, "unknown or inactive preset: "+presetName)
+        return
+    }
+    if r.FormValue(formFieldOpts) != "" {
+        writeError(w, http.StatusBadRequest, "opts is not allowed together with preset")
+        return
+    }
+    target = convert.NormalizeFormat(p.TargetFormat)
+    presetOpts = p.Options
+}
+if target == "" {
+    writeError(w, http.StatusBadRequest, "missing target format or preset")
+    return
+}
+// ... content detection, EngineFor(detected, target) unchanged ...
+// opts stage: if presetName != "", marshal presetOpts and feed it through the
+// SAME ParseDocOpts/ParseHTMLOpts + ValidateApplicability calls that already
+// exist for the manual-opts branch.
 ```
-`convert.MIMEType` (`internal/convert/sniff.go:102-131`) already has entries for all six document formats plus `pdf`, so Content-Type for a docx→odt job is already correct today with zero code change. This is the single biggest simplifying fact for DOC-V2-01: **the API and worker's output-naming/Content-Type layers need no changes.**
 
-**The actual gap is entirely inside `LibreOfficeConverter.Convert`** (`internal/convert/libreoffice.go`), which today hardcodes the PDF path in three places:
+### Pattern 2: Repo interface shape — `GetActiveByNameAndClient` with system-fallback query
 
-1. `Pairs()` (line 21-27) only emits `{format, "pdf"}` — must be extended to emit the cross-format pairs (`docx→odt`, `odt→docx`, `xlsx→ods`, `ods→xlsx`, `pptx→odp`, `odp→pptx`) so `convert.Default.Register` indexes them and `EngineFor`/`Lookup` see them.
-2. `filterFor(sourceExt)` (line 76-87) picks a LibreOffice *export* filter name keyed only on the **source** application family, always ending in `_pdf_Export`. It must become target-aware — e.g. `filterFor(sourceExt, targetFormat)` — because the filter name differs by target: `writer8` for odt-target, `"MS Word 2007 XML"` for docx-target, `calc8`/`"Calc MS Excel 2007 XML"`, `impress8`/`"Impress MS PowerPoint 2007 XML"`. This requires a small lookup table keyed on `(sourceApp, targetFormat)`, not just `sourceApp → pdf filter`.
-3. The `--convert-to` invocation itself (line 50) is `"--convert-to", "pdf:" + filter` — must become `"--convert-to", targetFormat + ":" + filter`, and the produced-file rename logic (line 62, `workDir/in.<base>.pdf`) must use `.` + targetFormat instead of the hardcoded `.pdf` suffix.
+**What:** A single SQL query resolves preset lookup with client-scope taking priority over
+system-scope, using an ORDER BY trick rather than two round-trips:
 
-**Output validation — the real answer to "what validates a docx→odt output":** `validatePDF(path)` (line 92-117) unconditionally checks the `%PDF-` magic prefix, which is meaningless for a non-PDF target. The correct generalization reuses infrastructure that **already exists one layer up**: `convert.SniffContainer` (`internal/convert/docsniff.go`), currently only called from `internal/api/handlers.go` at upload time to disambiguate the six ZIP-based office formats. Since `SniffContainer` lives in the same `convert` package as `LibreOfficeConverter`, it is directly callable from the worker side with zero new import surface:
+```sql
+SELECT id, name, version, scope, client_id, operation, target_format, options, description
+FROM presets
+WHERE name = $1
+  AND is_active = true
+  AND ((scope = 'user' AND client_id = $2) OR scope = 'system')
+ORDER BY (scope = 'user') DESC, version DESC
+LIMIT 1
+```
 
+`ORDER BY (scope = 'user') DESC` sorts true-before-false in Postgres, so a matching
+user-scoped preset always outranks a same-named system-scoped one in a single query; `version
+DESC` is the tiebreaker if more than one row is (accidentally) `is_active` for the same
+scope/name — a defensive ORDER BY, not a substitute for the CLI enforcing single-active-version
+per name (see Anti-Patterns below).
+
+**When to use:** Exactly this one lookup — the per-request hot path inside `handleCreateJob`.
+Any other preset access (CLI listing, admin views) can use simpler, unindexed queries since
+they aren't per-request.
+
+**Trade-offs:** The boolean-in-ORDER-BY idiom is a well-known Postgres pattern but reads as
+"clever" to anyone unfamiliar with it — worth a one-line comment at the call site (matches
+the codebase's convention of explaining non-obvious "why" decisions inline, per
+`internal/convert/exec.go`'s process-group-kill comment style).
+
+**Example (Go):**
 ```go
-// Sketch — internal/convert/libreoffice.go
-func validateDocumentOutput(path, targetFormat string) error {
-    fi, err := os.Stat(path)
-    if err != nil { return fmt.Errorf("libreoffice: stat output: %w", err) }
-    if fi.Size() == 0 { return fmt.Errorf("libreoffice: output is empty") }
-    if NormalizeFormat(targetFormat) == "pdf" {
-        return validatePDF(path) // keep exact %PDF- check unchanged
-    }
-    f, err := os.Open(path)
-    if err != nil { return fmt.Errorf("libreoffice: open output: %w", err) }
-    defer f.Close()
-    cr, err := SniffContainer(f, fi.Size())
-    if err != nil || cr.Format != NormalizeFormat(targetFormat) || cr.DuplicateRootPart {
-        return fmt.Errorf("libreoffice: output missing expected container format %s", targetFormat)
-    }
-    return nil
+// Preset mirrors a subset of the presets table row.
+type Preset struct {
+    ID           uuid.UUID
+    Name         string
+    Version      int
+    Scope        string // "system" | "user"
+    ClientID     uuid.UUID
+    Operation    string
+    TargetFormat string
+    Options      map[string]any
+    Description  string
+}
+
+// Repo is the presets repository backed by a pgx pool.
+type Repo struct{ pool *pgxpool.Pool }
+
+func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
+
+// GetActiveByNameAndClient resolves an active preset by name, preferring a
+// client-scoped preset over a same-named system-scoped one (client-scope wins).
+func (r *Repo) GetActiveByNameAndClient(ctx context.Context, clientID uuid.UUID, name string) (*Preset, error) {
+    // ... query above, Scan into Preset, json.Unmarshal options jsonb ...
 }
 ```
-This is a genuine reuse of an existing, already-tested security-relevant primitive rather than a new hand-rolled magic-byte table per ODF/OOXML format — consistent with the project's stated zero-new-deps philosophy (Key Decisions table, PROJECT.md).
 
-**Cross-file coupling this creates (must change together):** `internal/worker/worker.go`'s `terminalLibreOfficeSignatures` list (lines 45-49) pattern-matches on the exact error strings `validatePDF` produces (`"output missing %pdf- magic bytes"`, `"output is empty"`). If `validateDocumentOutput`'s new non-PDF branch produces a different message (e.g. `"output missing expected container format"`), that string **must** be added to `terminalLibreOfficeSignatures`, or a corrupt/mismatched cross-format output will be misclassified as transient and retried pointlessly against `isDocumentTerminal` (`internal/worker/worker.go:115-123`) up to `DOCUMENT_MAX_RETRY` times before finally failing — the same fail-slow bug class `validatePDF` was originally built to prevent.
+### Pattern 3: CI as a single tiered workflow (`needs:` job graph, not multiple workflow files)
 
-**Build-order implication:** the `Converter` interface itself (`internal/convert/convert.go`) needs no change — `Pairs()`/`Convert()`/`Engine()` already support arbitrary `(from,to)` pairs and an opts-aware signature. This work is entirely internal to `internal/convert/libreoffice.go` (+ its test file) and must land **before** any cross-format pair is registered in `internal/convert/converters.go`, since registering an untested pair would silently start producing unvalidated LibreOffice output.
+**What:** One `.github/workflows/ci.yml`, triggered on `push` and `pull_request`, with four
+jobs chained by `needs:`:
 
-## Integration Point (b): `opts` plumbing (API → jobs table → `Converter.Convert`)
-
-**Current state, verified:** the DB column already exists and is inert. `jobs.options jsonb NOT NULL DEFAULT '{}'::jsonb` is in the original schema (`internal/db/migrations/0001_init.sql:55`), but:
-- `jobs.CreateParams` and `jobs.Job` (`internal/jobs/jobs.go`) have no `Opts` field.
-- `Repo.Create`'s INSERT (`internal/jobs/repo.go:87-93`) never writes `options`.
-- `Repo.Get`'s SELECT (`internal/jobs/repo.go:294-299`) never reads `options`.
-- `internal/api/handlers.go`'s `handleCreateJob` never reads an `opts` form field.
-- `internal/worker/worker.go:404` calls `conv.Convert(attemptCtx, inPath, outPath, nil)` — **hardcoded `nil`**, discarding whatever `job.Opts` would be even if it existed.
-- `LibreOfficeConverter.Convert`'s `opts` parameter is literally named `_` (line 34) — actively discarded.
-
-So the full chain needs five coordinated changes, all mechanical given the DB column already exists (no new migration needed for storage — only for the `engine` CHECK constraint, see (d)/(e) below):
-
-1. **`internal/jobs/jobs.go`** — add `Opts map[string]any` to both `Job` and `CreateParams`.
-2. **`internal/jobs/repo.go`** — `Create` inserts `options` (marshal `p.Opts`, default to `{}` if nil, mirroring the existing `detail`-marshal pattern in `transition()`); `Get` selects `options` into a `[]byte`/`json.RawMessage` and unmarshals into `Job.Opts`.
-3. **`internal/api/handlers.go`** — parse an optional `opts` multipart field (`r.FormValue("opts")`, a JSON-encoded string, mirroring how `callback_url` is optional-and-validated at lines 219-225). Given the project's consistent fail-closed posture (unknown macro/mismatch/dimension → 422, never silently ignored), `opts` should be validated against a **closed allow-list of recognized keys** for this milestone (just the PDF/A key, e.g. `{"pdf_a": true}` or `{"pdf_a_variant": "1b"}`) — an unrecognized key or wrong-typed value should 422, not pass through silently to the engine. This validation belongs in `internal/api/handlers.go` (or a small new `internal/api/opts.go` mirroring `callbackurl.go`'s single-purpose-file convention), not in the worker, so bad input is rejected before any storage write — same principle already applied to format-pair/dimension/zip-bomb checks.
-4. **`internal/worker/worker.go:404`** — change `conv.Convert(attemptCtx, inPath, outPath, nil)` to `conv.Convert(attemptCtx, inPath, outPath, job.Opts)`. `job` is already loaded via `h.repo.Get` before `process()` is called (both `HandleImageConvert` and `HandleDocumentConvert`), so no new DB read is needed.
-5. **`internal/convert/libreoffice.go`** — `Convert`'s opts parameter stops being discarded; when `NormalizeFormat(target) == "pdf"` and `opts["pdf_a"]` (or equivalent) is set, the `--convert-to` filter string gains a `FilterOptions` JSON suffix. **Verified via WebSearch (MEDIUM confidence, multiple independent sources agree — vmiklos.hu blog, LibreOffice help docs, Ask LibreOffice):** the CLI syntax is
-   ```
-   soffice --convert-to 'pdf:writer_pdf_Export:{"SelectPdfVersion":{"type":"long","value":"1"}}' in.docx
-   ```
-   where `SelectPdfVersion` value `1` selects PDF/A-1b (value `0` is plain PDF). This must be quoted as a single shell argument — since `runCommand` (`internal/convert/exec.go`) already builds `args []string` and calls `exec.Command` directly (no shell interpolation), the JSON-with-embedded-double-quotes can be passed as one `args` element with **no shell-escaping risk** (no `/bin/sh -c` in the exec path) — this is actually safer than the naive shell-quoted examples found via search, and requires no change to `exec.go`.
-
-**Why opts validation must be closed-allow-list, not passthrough:** the project's constraint set (internal-only clients, no untrusted third parties) lowers but does not eliminate risk — `opts` flows unvalidated all the way to a CLI invocation of `soffice`. An unbounded/free-form JSON blob accepted at the API and forwarded into filter-options JSON risks either LibreOffice CLI parse errors surfacing as confusing engine failures, or (lower likelihood but non-zero) unexpected FilterData keys triggering undocumented LibreOffice behavior. A closed key allow-list validated at the API layer (same posture as the macro/zip-bomb/dimension checks already in `handleCreateJob`) is the only approach consistent with existing conventions.
-
-**Build-order implication:** items 1-4 (plumbing) are prerequisite infrastructure with zero engine-specific logic and should land as their own unit before item 5 (PDF/A-specific filter logic), and before the chromium engine work, since HTML→PDF's own opts (if any future ones are needed, e.g. page size/margins) would reuse the exact same plumbing.
-
-## Integration Point (c): OLE-CFB pre-flight detection in `handleCreateJob`'s sniff chain
-
-Current chain in `internal/api/handlers.go:118-177`, in order:
-1. `convert.Sniff(file)` — magic-byte match against the 5 registered image formats (`internal/convert/sniff.go`). Legacy binary Office files (`.doc`/`.xls`/`.ppt`, and password-protected OOXML which falls back to CFB container) do **not** match any of these signatures, so `detected == ""`.
-2. If `detected == ""`, check the first 4 bytes for the ZIP local-file-header magic `PK\x03\x04` (line 135) and, if matched, run `convert.SniffContainer` to disambiguate OOXML/ODF and check zip-bomb/macro signals.
-3. If still `detected == ""` after both, fall through to the generic 422 `"unrecognized file content for " + filename` (line 161-169).
-
-Legacy `.doc`/`.xls`/`.ppt` (and CFB-wrapped password-protected OOXML — Microsoft's "Agile Encryption" wraps an encrypted OOXML payload inside an OLE-CFB container even for `.docx`-named files) begin with the fixed 8-byte OLE-CFB signature `D0 CF 11 E0 A1 B1 1A E1`. Today these fall all the way through to the generic 422 at step 3 **only if** they don't accidentally satisfy some other check — but worse, if the OLE-CFB detection is *not* added, such a file passes `Sniff` as unrecognized, fails the ZIP branch (CFB is not ZIP), and is correctly 422'd today anyway... **except** the milestone's stated problem (`DOC-V2-02` in PROJECT.md: "запароленные/legacy бинарные doc/xls/ppt получают чёткий 422 на входе, а не невнятное падение soffice по таймауту") implies these files are *currently* passing the extension/mismatch check somehow and reaching the worker, or that the desired end-state is a **specific, diagnostic** rejection message rather than today's generic "unrecognized content" — worth flagging as a build-time verification item.
-
-**Where it slots in:** as a **third detection branch**, inserted at the same nesting level as the existing ZIP branch (between it and the final generic-422 fallback), reading the same prefix bytes already fetched via `file.ReadAt`. Recommended shape — a new file mirroring `docsniff.go`'s single-purpose convention, e.g. `internal/convert/olecfb.go`:
-
-```go
-var oleCFBMagic = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
-
-// IsOLECFB reports whether r begins with the OLE Compound File Binary
-// signature — the container format for legacy .doc/.xls/.ppt and for
-// password-protected "Agile Encryption" OOXML. Never a supported target;
-// this is a fail-closed pre-flight rejection, not a Sniff/EngineFor pair.
-func IsOLECFB(r io.ReaderAt) bool {
-    var buf [8]byte
-    n, _ := r.ReadAt(buf[:], 0)
-    return n == 8 && bytes.Equal(buf[:], oleCFBMagic)
-}
-```
-Called from `internal/api/handlers.go` right after the ZIP-branch's `if detected == ""` block (same `file.ReadAt` receiver already in scope, since `file` is the `multipart.File` which implements `io.ReaderAt`), producing a **distinct** log reason and message from the generic "unrecognized content" case — e.g. `reason=legacy_or_encrypted_document` / `"legacy or password-protected document format not supported"` — so operators/clients can tell this apart from a truly-garbage upload. This deliberately does **not** go through `convert.Default.EngineFor` (no converter is ever registered for this "format" — it is unconditionally rejected, same treatment as `HasMacro`/zip-bomb today), so no `Converter`/`Registry` change is needed.
-
-**Why this must NOT be added as a `sniff.go` `signatures` table entry:** that table's contract (`Sniff` returns a *supported, registered* format name) is different from "detected but explicitly rejected." Reusing it would require either registering a fake `"olecfb"` format with no converter (breaking `EngineFor`'s fail-closed default-case assumption in `handleCreateJob`, line 271-278, which today only ever expects `EngineFor` to return values a real `Converter.Engine()` produced) or special-casing `sniff.go` for a non-convertible signature, which conflates two different roles (detect-a-supported-format vs. detect-and-reject-a-known-bad-format). Keeping it as a separate, explicit check in `handleCreateJob` mirrors how `HasMacro`/zip-bomb rejections are already handled inline rather than through the registry.
-
-**Build-order implication:** independent of (a)/(b)/(d)/(e) — pure API-layer addition, no DB/queue/worker changes, no dependency on cross-format pairs landing first. Can be built and shipped first or in parallel with everything else.
-
-## Integration Point (d): Webhook consumer decoupling topology
-
-**Current state (SEED-002 confirmed by direct read):** `internal/worker/worker.go`'s `HandleWebhookDeliver` is a `Handler` method usable by any process, but only `cmd/worker/main.go:85` registers it (`mux.HandleFunc(queue.TypeWebhookDeliver, h.HandleWebhookDeliver)`) and claims the `webhook` queue capacity (`Queues: map[string]int{queue.QueueImage: 2, queue.QueueWebhook: 1}`, line 89). `cmd/document-worker/main.go` explicitly documents the opposite choice (lines 50-53: `signingSecret` is accepted but "inert," "document-worker neither delivers nor signs webhooks (D-06 — cmd/worker remains the sole webhook consumer)"). Deploying only `document-worker` (or a future `chromium-worker`) while `worker` (image) is down silently stops all webhook delivery — the exact SEED-002 defect.
-
-Important mechanism fact that shapes all three options: **asynq is a pull-based work queue, not pub/sub** — multiple processes registering the same task type on the same queue name **share capacity, they do not duplicate execution** (a given task is dequeued by exactly one consumer). This means any topology change here is safely additive/incremental — a new consumer can be introduced alongside the old one with zero risk of double-delivery, and the old registration removed afterward once the new one is proven live. `webhook_deliveries`'s per-job `asynq.Unique` lock (already in place, `internal/queue/queue.go:104-114`) provides the separate, independent duplicate-prevention guarantee this doesn't need to worry about.
-
-**Option 1 — dedicated `cmd/webhook-worker` binary (recommended):**
-- New `cmd/webhook-worker/main.go`, near-identical skeleton to `cmd/document-worker/main.go` but registering only `mux.HandleFunc(queue.TypeWebhookDeliver, h.HandleWebhookDeliver)` on `Queues: map[string]int{queue.QueueWebhook: N}`.
-- New `Dockerfile.webhook-worker`: no `libvips-tools`, no LibreOffice, no `tini` — this process never forks an external engine (no `runCommand`/process-group concerns at all), so it needs only `ca-certificates` on top of `debian:bookworm-slim` (or could even move to `distroless/static` given `CGO_ENABLED=0` static builds — worth flagging as a possible further hardening, out of scope to decide here). Lightest container of the whole fleet.
-- New compose service `webhook-worker`, same `depends_on`/env shape as `document-worker` minus `DOCUMENT_*` vars, plus the required `WEBHOOK_SIGNING_SECRET` (this process becomes the **sole** required consumer of that secret going forward).
-- `worker.NewHandler`'s existing constructor signature (`internal/worker/worker.go:139`) is reused as-is — `webhook-worker` still needs a `*convert.Registry` argument even though it never calls `process()`/`conv.Convert`; passing `convert.Default` is harmless (same pattern `document-worker` already follows for fields it doesn't exercise).
-- **Migration path (safe, given the pull-queue fact above):** add `cmd/webhook-worker` and deploy it consuming `QueueWebhook` *before* removing the registration from `cmd/worker/main.go` — both can run simultaneously with zero double-delivery risk — then remove `mux.HandleFunc(queue.TypeWebhookDeliver, ...)` and the `QueueWebhook` entry from `cmd/worker/main.go`'s `Queues` map, and drop `webhook.NewRepo`/`webhook.NewDeliverer`/`signingSecret` wiring from `cmd/worker/main.go` (the image worker no longer needs `WEBHOOK_SIGNING_SECRET` at all after this — mirroring `document-worker`'s existing accepted-but-inert pattern, except here it can be removed entirely since nothing calls `HandleWebhookDeliver` from that binary anymore).
-- **Trade-off vs. the existing one-binary-per-engine-class pattern:** webhook delivery isn't an "engine class" in the `Converter.Engine()` sense — there's no `Converter` implementation, no format pair, no `EngineFor` entry — so this new binary is architecturally a *different kind* of worker (a cross-cutting delivery process, not an engine-class consumer). It's still the best fit because it's the only option that fully satisfies "any subset of engine-workers deployed must not lose webhooks" — with this topology, webhook delivery has **zero** dependency on any engine worker's liveness.
-- **Reconciler stays where it is.** `reconciler.Sweeper`'s webhook-gap sweep (RECON-04, `internal/reconciler/reconciler.go:222-252`) only *enqueues* onto `QueueWebhook` via `queue.Client` — it never consumes. No change needed to move it; it's already decoupled from the consumer side through Redis. (It remains true that only `cmd/worker/main.go` runs the sweeper at all per the existing D-05 comment — that's an orthogonal, already-settled decision, not something this milestone needs to revisit unless the image worker's role changes further.)
-
-**Option 2 — every engine worker also consumes the webhook queue:**
-- Each of `cmd/worker`, `cmd/document-worker`, and the future `cmd/chromium-worker` registers `TypeWebhookDeliver` on its own mux alongside its own engine type.
-- Pro: as long as *any one* worker (of any class) is up, webhooks flow — arguably stronger redundancy than a single dedicated binary (which is itself a single point of failure unless it's scaled to ≥2 replicas).
-- Con: reverses `document-worker`'s current explicit design decision (D-06) and requires provisioning `WEBHOOK_SIGNING_SECRET` + `webhook.Repo`/`Deliverer` wiring into every worker binary, including the new chromium worker — multiplying the secret's distribution footprint across N containers instead of 1, and re-coupling engine-class deploys to webhook-delivery code paths (the exact shape of coupling SEED-002 is trying to eliminate, just spread wider instead of removed). Also dilutes/complicates per-process `Concurrency`/`Queues` capacity planning as engine classes grow (already 3, `PROJECT.md`'s Out of Scope notes more are coming later) — every new engine class binary has to also reason about webhook-queue capacity, not just its own.
-
-**Option 3 — API-process consumer (webhook delivery folded into `cmd/api`):**
-- Con, decisively: `cmd/api/main.go` today has **zero** asynq-server/task-consumer code — it is purely an HTTP-serving process (`http.Server` + a separate metrics `http.Server`, both with their own graceful-shutdown sequences already). Adding an `asynq.Server` here means a third independent shutdown sequence to coordinate, and couples API-process resource sizing to webhook-delivery throughput even though the two have unrelated scaling profiles (API scales with inbound request rate; webhook delivery scales with completed-job rate × external-endpoint latency, and can legitimately want a much higher concurrency for slow/misbehaving client callback endpoints without touching API capacity at all). It also breaks the clean one-process-one-job convention that has held without exception since v1.0 (`cmd/api`, `cmd/worker`, `cmd/document-worker`, `cmd/migrate`, `cmd/manage-clients` — each has exactly one responsibility).
-
-**Recommendation:** Option 1. It is the only topology that fully and unambiguously satisfies the SEED-002 requirement, it is safely rollout-able with zero double-delivery risk (pull-queue semantics), and it extends — rather than contradicts — the existing engine-class-worker precedent (new `cmd/`, new minimal `Dockerfile.*`, new compose service), even though webhook delivery is not itself an engine class.
-
-## Integration Point (e): Chromium HTML→PDF engine — container, safety model
-
-**Fits the existing `Converter` abstraction with zero interface changes.** A new `internal/convert/chromium.go` implementing `Converter{Pairs() []Pair{{"html","pdf"}}, Convert(...), Engine() string { return "html" }}` shells out through the **already-hardened** `runCommand` (`internal/convert/exec.go`) exactly like `LibvipsConverter`/`LibreOfficeConverter` do — no changes needed to `exec.go`'s `Setpgid`+`SIGKILL`-on-timeout process-group handling, since headless Chromium's `--print-to-pdf` CLI mode is a single foreground process (verified: unlike LibreOffice's `oosplash`→`soffice.bin` fork chain, which required `tini` as PID 1 in `Dockerfile.document-worker`, a plain `chromium --headless --print-to-pdf=out.pdf in.html` invocation does not fork a detached child the way `oosplash` does — but this should be confirmed live during implementation the same way `tini`'s necessity was confirmed live for LibreOffice in the existing codebase, per that Dockerfile's own comment "confirmed live (09-02)").
-
-**New engine-class scaffolding needed (mirrors v1.2's document-engine pattern exactly, called out as the ready template in PROJECT.md's Key context):**
-- `internal/db/migrations/0005_html_engine.sql` (or similar) — **the `jobs.engine` CHECK constraint is a closed list** (`CHECK (engine IN ('image', 'document', 'av', 'cad', 'archive', 'probe'))`, `internal/db/migrations/0001_init.sql:47-48`) and does **not** include `html`/`chromium`. This is a hard blocker — the third engine class cannot be created without an `ALTER TABLE jobs DROP CONSTRAINT ... ADD CONSTRAINT ... CHECK (engine IN (..., 'html'))` migration landing first (naming: given the existing list already reserves `av`/`cad`/`archive`/`probe` as placeholders for later engine classes with no `html` slot, a new value must be added, not substituted).
-- `internal/queue/queue.go` — new `TypeHTMLConvert`/`QueueHTML` constants, `NewHTMLConvertTask`, `htmlRetrySchedule`/`HTMLRetryDelay`, `HTMLUniqueTTL` — mirroring the image/document pairs exactly (each new engine class has so far always gotten its own retry schedule + derived unique-TTL, not shared constants — this is the established convention, not incidental duplication, per the codebase's own comments about `IMAGE_MAX_RETRY` vs `DOCUMENT_MAX_RETRY` being deliberately different budgets for different per-attempt costs).
-- `internal/queue/client.go` — `EnqueueHTMLConvert`, wired into `internal/api/api.go`'s `Enqueuer` interface and `internal/api/handlers.go`'s engine-switch (lines 265-278, currently `image`/`document` only) and `internal/reconciler/reconciler.go`'s engine-switch (lines 131-149, currently `image`/`document` only, `default` fail-closed-skips unrecognized engines — this default-skip behavior is exactly why `html` must be added as an explicit `case`, not left to fall through).
-- New `cmd/chromium-worker` binary + `Dockerfile.chromium-worker` + compose service, following `cmd/document-worker`'s shape (own `*_ENGINE_TIMEOUT`/`*_WORKER_CONCURRENCY` env vars, own resource limits in compose, `USER nobody`).
-
-**Container requirements (fonts, sandboxing, resource limits) — verified via WebSearch, MEDIUM confidence, multiple independent sources agree (oneuptime.com Docker/Chrome guide, hexdocs ChromicPDF docs, docker-html-to-pdf reference project):**
-- **Fonts:** headless Chromium ships no fonts of its own on a minimal Debian base; install a font package explicitly (mirroring `Dockerfile.document-worker`'s `fonts-crosextra-*`/`fonts-liberation2` pattern) — at minimum `fonts-liberation` for common Latin text; if the HTML corpus includes non-Latin scripts, additional font packages (e.g. `fonts-noto-cjk`) would need adding, which inflates image size non-trivially — worth flagging as a scope question for planning (which scripts must render correctly) rather than assuming.
-- **Sandboxing:** Chromium's own internal process sandbox expects either a SUID-root helper binary or unprivileged user namespaces; both are typically unavailable in a `debian:bookworm-slim` container running as non-root `nobody` (the same non-root posture this project already uses for `worker`/`document-worker`, for the same "shells out to untrusted-input engines" reason stated in both existing Dockerfiles). Sources confirm the two real options: (1) `--no-sandbox` — the flag virtually every containerized-Chrome guide defaults to, accepting loss of Chromium's *own* internal sandbox layer while relying on Docker's container boundary as the outer isolation layer (consistent with how this project already relies on the container boundary + non-root user + process-group kill rather than an in-process sandbox for LibreOffice/libvips); or (2) a custom `seccomp` security profile (`security_opt: seccomp=./chromium.json`) that grants exactly the syscalls Chromium's sandbox needs while keeping it enabled — meaningfully more secure but adds a new artifact (a seccomp JSON profile) to maintain, and no such per-service `security_opt` precedent exists yet in `docker-compose.yml`. Given the project's stated risk posture (internal clients only, not adversarial third parties, existing accepted-residual-risk decisions logged in PROJECT.md's Key Decisions table for e.g. resource-exhaustion via complex documents), `--no-sandbox` plus the existing container/process/resource-limit isolation stack is the pragmatic default, consistent with existing choices — the seccomp-profile route is a valid escalation if the risk tolerance for this specific engine is judged higher than for libvips/LibreOffice (arguable, since Chromium's attack surface from arbitrary attacker HTML/CSS/JS is considerably larger than libvips' or LibreOffice's from a document).
-- **Resource limits:** existing convention (both `worker` and `document-worker` set `cpus: "2.0"`/`memory: 1g` in compose) should extend to `chromium-worker` — Chromium is materially more memory-hungry per invocation than either existing engine, so this ceiling likely needs raising for this specific service rather than copy-pasted verbatim; also add `--disable-dev-shm-usage` (documented as close to mandatory for containerized Chrome, since Docker's default `/dev/shm` size of 64MB is too small for Chromium's shared-memory usage and causes crashes) alongside `--disable-gpu` (no GPU in this deployment target) as baseline CLI flags for the `Convert()` invocation.
-
-**HTML input safety differs fundamentally from ZIP-based formats — this is the milestone's own stated highest-risk item, and rightly so:**
-The existing document-format safety model (`docsniff.go`'s zip-bomb/macro checks) protects against a **passive** attack surface — a crafted archive that misbehaves the *parser* (decompression bomb) or smuggles executable content that would run *if* opened interactively (macros, unconditionally rejected). HTML is an **active** attack surface: the engine *itself* (a full browser rendering engine) will execute arbitrary CSS/JS and attempt arbitrary outbound network fetches by design — `<img src="http://169.254.169.254/...">`, `<link rel="stylesheet" href="https://...">`, `<script src="...">`, CSS `url(...)`, `fetch()`/`XMLHttpRequest` from injected JS, `<iframe src="http://internal-service/...">` — every one of these is a live SSRF vector at *render* time, structurally the same class of risk the project already built a dedicated guard for (`internal/api/callbackurl.go`'s `validateCallbackURL`/`isBlockedIP`), except here the untrusted payload is the entire HTML/CSS/JS document rather than a single URL string, so a single upfront URL-validation function cannot cover it — the check has to happen at render time, inside Chromium, against every resource load it attempts.
-
-The milestone's own framing ("offline rendering") is the right target, but achieving it requires more than just "don't add a proxy" — a plain `chromium --headless --print-to-pdf` invocation with default flags **will** attempt real network fetches for every absolute `http(s)://` reference in the document, because vanilla `--print-to-pdf` mode has no request-interception hook (that capability only exists via the DevTools Protocol, i.e. driving Chromium through Puppeteer/Playwright-style tooling — one of the WebSearch sources for this milestone explicitly notes "using Puppeteer... provides better flexibility... allows intercepting and cancelling network requests" as the alternative to relying on bare `--print-to-pdf`). Two concrete mitigation paths, in order of robustness, both compatible with the project's zero-new-deps philosophy (neither requires a new language runtime or SDK):
-1. **Network-level allow-list at the container/compose layer** — the `chromium-worker` container only needs egress to Postgres, Redis, and S3/MinIO hosts (the same three dependencies every worker needs); a custom Docker network + firewall rule (or, in a future Kubernetes deployment, a `NetworkPolicy`) that denies all other egress achieves genuine offline rendering without any code change, and is the most bulletproof option because it holds even against JS-driven fetches that a URL-parsing approach could miss.
-2. **Chromium CLI-level network black-holing** — flags such as `--host-resolver-rules="MAP * 127.0.0.1"` (force all DNS resolution to a local sinkhole) are a documented technique for making a headless Chromium instance effectively unable to reach the real network, without needing Puppeteer/CDP request-interception or a firewall change; this is lower-effort than (1) but is a Chromium-internal control, not an infrastructure-level guarantee, so it is weaker in the same way relying purely on `validateCallbackURL` (application-level) would be weaker than a network firewall for the webhook SSRF case.
-Given the project already accepted an analogous trade-off for webhook SSRF (an application-level check plus a narrow, explicit opt-out, rather than a network firewall), a hybrid of both — CLI flags as the first line of defense, network-level egress restriction on the `chromium-worker` container as defense-in-depth given the qualitatively larger attack surface (full JS engine vs. a single outbound POST) — is the recommended target, with the exact mechanism (compose network rules vs. iptables vs. a sidecar) an implementation detail to resolve during planning rather than research.
-
-**Build-order implication:** the `jobs.engine` CHECK-constraint migration is a hard prerequisite for *any* chromium-engine work (job creation will fail at the DB layer otherwise) and should land in the same wave as the `internal/queue` scaffolding (new task type/queue/retry schedule) — before the converter implementation or the container/Dockerfile work, since those can be developed and unit-tested against the registry/queue plumbing independently of a working Chromium binary. The network-egress-restriction mechanism for offline rendering should be decided before (not after) the `chromium-worker` Dockerfile/compose service is finalized, since it likely shapes the container's network configuration (custom bridge network, explicit allow-listed hosts) rather than being a post-hoc addition.
-
-## Data Flow — what changes end to end
-
-### Cross-format document job (docx → odt)
-```
-handleCreateJob: Sniff→"" ; PK\x03\x04 branch ; SniffContainer→docx ; EngineFor("docx","odt")→"document"
-  → Upload(S3, uploads/{id}/0-file.docx) → Repo.Create(engine="document", opts={}) → EnqueueDocumentConvert
-document-worker: process() → registry.Lookup("docx","odt") → LibreOfficeConverter.Convert(..., "odt", opts)
-  → soffice --convert-to odt:writer8 ... → produced workDir/in.odt
-  → validateDocumentOutput(path,"odt") → SniffContainer(output) confirms cr.Format=="odt"
-  → upload results/{id}/0-out.odt, Content-Type=application/vnd.oasis.opendocument.text (already correct, MIMEType unchanged)
-  → AddOutput(Format="odt") → MarkDone → EnqueueWebhookDeliver (now consumed by cmd/webhook-worker, not cmd/worker)
+```yaml
+jobs:
+  gate:
+    # gofmt -l ., go vet ./..., go build ./..., go test ./...
+    # internal/e2e self-skips (E2E_BASE_URL unset) — this tier stays fast & offline-safe.
+  race:
+    needs: gate
+    # go test -race ./...
+  docker-build:
+    needs: race
+    # docker build for Dockerfile.api / .worker / .document-worker / .chromium-worker /
+    # .webhook-worker (5 images — Dockerfile.worker-test is a dev/CI-support image for a
+    # separate soffice-gated local test flow, NOT one of the 5 deployment images)
+  e2e-live:
+    needs: docker-build
+    # docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+    # wait for healthchecks, then go test ./internal/e2e/... with the documented env
+    # contract; docker compose down -v in an always()-guarded teardown step
 ```
 
-### PDF/A export (opts-driven)
+**When to use:** Any project whose CI tiers are strictly escalating in cost/duration and
+strictly dependent (a later tier only makes sense if the earlier one passed) — exactly this
+project's stated tier order (gate → race → docker-build → e2e). Independent/parallel checks
+(e.g., a separate lint-only job that doesn't gate anything else) would instead be siblings
+with no `needs:`, but none of the four tiers here are independent of each other.
+
+**Trade-offs:** A single workflow file means one YAML file grows to ~80-120 lines instead of
+four ~20-line files — acceptable given the project's existing "no fragmented tooling"
+convention (no Makefile, no separate lint config, one `docker-compose.yml`). The main
+downside — a change to `docker-build` triggers `gate`+`race` to (harmlessly) re-run even if
+Go code didn't change — is not a real cost here since ALL pushes/PRs must pass ALL tiers
+anyway per the milestone's own requirement ("Каждый push проверяется автоматически вплоть до
+живого E2E").
+
+## Data Flow
+
+### Preset resolution flow (new)
+
 ```
-handleCreateJob: opts form field {"pdf_a":"1b"} validated against closed allow-list
-  → Repo.Create(..., Opts={"pdf_a":"1b"})
-document-worker: process() → job.Opts carried through → conv.Convert(ctx,in,out,job.Opts)
-  → LibreOfficeConverter reads opts["pdf_a"] → --convert-to 'pdf:writer_pdf_Export:{"SelectPdfVersion":{"type":"long","value":"1"}}'
-  → validateDocumentOutput(path,"pdf") → existing %PDF- check (unchanged)
+POST /v1/jobs  (multipart: file, preset=<name>, [callback_url])
+    ↓
+handleCreateJob: parse form → read target XOR preset
+    ↓ (preset branch)
+s.presets.GetActiveByNameAndClient(ctx, client.ID, name)
+    ↓ (found, active, operation=="convert")
+target = preset.TargetFormat ; presetOpts = preset.Options
+    ↓
+[UNCHANGED] content sniff → detected format
+    ↓
+[UNCHANGED] convert.Default.EngineFor(detected, target)  — format-pair validation
+    ↓
+[UNCHANGED, fed from presetOpts instead of r.FormValue] ParseDocOpts/ParseHTMLOpts
+    + ValidateApplicability/ValidateHTMLApplicability
+    ↓
+[UNCHANGED] storage.Upload
+    ↓
+[MODIFIED] repo.Create(ctx, jobs.CreateParams{ ..., PresetName: name, PresetVersion: preset.Version })
+    → INSERT INTO jobs (..., preset_name, preset_version, ...) — columns already exist,
+      unused since Phase 1 (0001_init.sql:53-54)
+    ↓
+[UNCHANGED] engine-class enqueue (image/document/html queue)
 ```
 
-### HTML→PDF (new engine class)
+### CI flow (new, per push/PR)
+
 ```
-handleCreateJob: Sniff→"" (html has no binary magic bytes worth trusting) ; no ZIP/CFB match
-  → detect via extension + a minimal structural check (e.g. leading "<!DOCTYPE"/"<html" after whitespace-trim,
-    itself an open question for planning — html is unlike every other supported format in having no reliable
-    magic-byte signature, an existing-pattern gap worth flagging, not resolving, here)
-  → EngineFor("html","pdf")→"html" → Upload → Repo.Create(engine="html") → EnqueueHTMLConvert
-chromium-worker: process() → registry.Lookup("html","pdf") → ChromiumConverter.Convert
-  → chromium --headless --disable-gpu --disable-dev-shm-usage --no-sandbox
-             --host-resolver-rules="MAP * 127.0.0.1" --print-to-pdf=out.pdf file://in.html
-  → validatePDF(out.pdf) (existing %PDF- check, reused verbatim — pdf target unchanged from document engine)
-  → AddOutput(Format="pdf") → MarkDone → EnqueueWebhookDeliver
+git push / PR opened
+    ↓
+GitHub Actions: ci.yml triggered
+    ↓
+gate  (gofmt, vet, build, unit test — offline, ~1-2 min)
+    ↓ (needs: gate)
+race  (go test -race ./... — requires fakeEnqueuer mutex fix, else flaky/red)
+    ↓ (needs: race)
+docker-build  (5 images: api, worker, document-worker, chromium-worker, webhook-worker)
+    ↓ (needs: docker-build)
+e2e-live  (docker compose up -d --build using docker-compose.yml + docker-compose.e2e.yml,
+           wait for healthchecks, go test ./internal/e2e/... — requires the new
+           TestImageConversionE2E to exist for full-matrix coverage, else the tier is green
+           but blind to the image/libvips pipeline)
+    ↓
+docker compose down -v  (always()-guarded teardown)
 ```
 
-## Anti-Patterns to Avoid
+### Key Data Flows
 
-### Anti-Pattern: Registering a cross-format pair before generalizing output validation
-**What people do:** add `{docx, odt}` etc. to `LibreOfficeConverter.Pairs()` and wire the `--convert-to` target-aware filter, but leave `validatePDF` unconditionally called at the end of `Convert`.
-**Why it's wrong:** every non-PDF-target job would fail validation on a correctly-produced file (the `%PDF-` check would reject valid odt/docx/xlsx output), turning every cross-format conversion into a guaranteed terminal failure.
-**Instead:** land `validateDocumentOutput`'s format dispatch (reusing `SniffContainer`) and the matching `terminalLibreOfficeSignatures` update in `internal/worker/worker.go` in the *same* change as the first cross-format pair registration.
+1. **Preset provenance on the job row:** `jobs.preset_name`/`jobs.preset_version` are written
+   at creation time from the RESOLVED preset row, not re-looked-up later — mirrors the
+   existing "resolve once at creation, never re-resolve mid-flight" discipline already used
+   for `engine`/`source_format`/`target_format` (the worker re-reads these from Postgres, not
+   from the presets table, so a preset later being deactivated/edited never retroactively
+   changes an in-flight or historical job's behavior — the job's `options` column already
+   holds the fully-resolved, validated opts snapshot, same as today).
+2. **CI env contract is 100% inherited, not reinvented:** the `e2e-live` job sets no new
+   environment variables beyond what `docker-compose.yml`'s `api`/`webhook-worker-*` services
+   and `internal/e2e/e2e_test.go`'s documented contract already define — `E2E_BASE_URL`,
+   `DATABASE_URL`, `API_KEY_SALT` (must equal the `api` service's `API_KEY_SALT` value,
+   `"dev-only-change-me-in-real-deploys"`), and `E2E_S3_DIAL_ADDR=127.0.0.1:9100` (since the
+   presigned URL host `minio:9000` isn't resolvable from the GitHub Actions runner, same
+   reason local dev needs it). `WEBHOOK_SIGNING_SECRET` should also be set to match
+   `webhook-worker-1/-2`'s value so the HMAC signature gets verified, not just
+   asserted-non-empty (stronger CI coverage than the minimum required by the test file).
 
-### Anti-Pattern: Treating `opts` as a passthrough blob
-**What people do:** accept any JSON object in the `opts` form field and forward it verbatim into `Converter.Convert`.
-**Why it's wrong:** breaks the project's consistent fail-closed-at-the-API-boundary discipline (format mismatch, zip-bomb, macro, dimension-limit are all rejected with a specific 422 before storage/DB writes) and turns unvalidated client input directly into engine CLI arguments.
-**Instead:** validate `opts` against a closed key/value allow-list in `internal/api` before it ever reaches `jobs.CreateParams`.
+## Scaling Considerations
 
-### Anti-Pattern: Letting every worker consume the webhook queue "just in case"
-**What people do:** register `TypeWebhookDeliver` on every engine worker's mux for redundancy.
-**Why it's wrong:** re-couples webhook delivery (and its signing-secret distribution) to every engine worker's deploy lifecycle — the opposite of SEED-002's goal — and dilutes per-process capacity planning as engine classes grow.
-**Instead:** one dedicated `cmd/webhook-worker`, decoupled from every engine class.
+Not meaningfully relevant to this milestone — CI/presets/debt-cleanup don't change runtime
+scaling characteristics. One CI-specific note:
 
-### Anti-Pattern: Trusting `--print-to-pdf`'s default network behavior for "offline rendering"
-**What people do:** assume that because the API never uploads HTML anywhere but S3/local disk, Chromium won't reach the network.
-**Why it's wrong:** vanilla headless Chromium `--print-to-pdf` will fetch every absolute-URL resource referenced by the HTML/CSS/JS at render time; "offline" is not the default, it must be actively enforced (DNS sinkhole flag and/or network egress restriction).
-**Instead:** treat this exactly like the existing `callback_url` SSRF guard — an explicit, tested control, not an assumption.
+| Concern | Now (v1.4) | Later |
+|---------|-----------|-------|
+| CI job duration | 4 sequential tiers on every push; e2e-live (`docker compose up --build` + healthcheck wait + live conversions) is the dominant cost, likely 3-6 min | If this becomes a bottleneck, cache Docker layers (`actions/cache` or GHA's built-in Docker layer caching) before splitting anything — do not prematurely parallelize docker-build's 5 images into a matrix until build time is actually measured |
+| Preset table read load | One extra indexed `SELECT` per job creation when `preset` is used — negligible; `presets_system_uq`/`presets_user_uq` indexes already exist for exact-match lookups, though the fallback query above doesn't hit them directly (it does `(scope='user' AND client_id=$2) OR scope='system'`, not an indexed equality on both branches) | If preset-based job creation becomes a large fraction of traffic, add a targeted index e.g. `CREATE INDEX presets_active_name_idx ON presets (name) WHERE is_active` to speed the fallback query — not needed at internal-client-service load levels |
 
-## Integration Points Summary
+## Anti-Patterns
 
-| Boundary | Change | Files |
-|----------|--------|-------|
-| API sniff chain ↔ OLE-CFB rejection | New third detection branch, own error path | `internal/api/handlers.go`, new `internal/convert/olecfb.go` |
-| API ↔ jobs.opts | New optional form field + closed-allowlist validation | `internal/api/handlers.go`, new `internal/api/opts.go` (suggested) |
-| jobs.Opts ↔ Postgres | New struct field + INSERT/SELECT columns (column already exists) | `internal/jobs/jobs.go`, `internal/jobs/repo.go` |
-| worker.process() ↔ Converter.Convert | Replace hardcoded `nil` opts with `job.Opts` | `internal/worker/worker.go:404` |
-| LibreOfficeConverter ↔ target format | Target-aware filter table, generalized rename, generalized validation | `internal/convert/libreoffice.go` |
-| worker terminal-classification ↔ new validation error strings | Must update in lockstep | `internal/worker/worker.go` (`terminalLibreOfficeSignatures`) |
-| jobs.engine CHECK constraint ↔ new engine class | New migration required before any `html`-engine job can be created | new `internal/db/migrations/000X_html_engine.sql` |
-| queue/reconciler/api engine-switches ↔ new engine class | Explicit new `case "html"` in each fail-closed switch | `internal/api/handlers.go`, `internal/reconciler/reconciler.go`, `internal/queue/client.go` |
-| webhook delivery ↔ consumer process | Move `mux.HandleFunc(TypeWebhookDeliver,...)` off `cmd/worker` onto new `cmd/webhook-worker` | `cmd/worker/main.go`, new `cmd/webhook-worker/main.go`, new `Dockerfile.webhook-worker` |
-| chromium engine ↔ network egress | New container-level network-restriction decision, not just CLI flags | new `Dockerfile.chromium-worker`, `docker-compose.yml` |
+### Anti-Pattern 1: Re-implementing opts validation for preset-sourced options
+
+**What people do:** Write a preset-specific opts validator (or worse, trust
+`preset.Options` as already-safe because "an operator created it") instead of routing it
+through `ParseDocOpts`/`ParseHTMLOpts`.
+**Why it's wrong:** Breaks the project's single-validation-authority invariant
+(`internal/convert` owns ALL opts validation, D-04/D-10 per existing handler comments); a
+preset could be created before a `DocOpts`/`HTMLOpts` schema change and become stale/invalid,
+or a future preset-editing surface could let a compromised operator credential smuggle
+unvalidated JSON straight to the engine's argv (the exact injection class Phase 14 closed).
+**Do this instead:** Feed `json.Marshal(preset.Options)` through the identical
+`ParseDocOpts`/`ParseHTMLOpts` + `ValidateApplicability`/`ValidateHTMLApplicability` call
+sites already in `handleCreateJob` — the same re-validate-on-every-read discipline
+`DocOptsFromMap` already applies to `jobs.options` on the worker side.
+
+### Anti-Pattern 2: Silently merging `target`/`opts` form fields with a `preset`
+
+**What people do:** Let `preset` supply defaults and let an explicit `opts`/`target` field
+"override" or "merge with" the preset, to be permissive.
+**Why it's wrong:** Ambiguous precedence is exactly the shape of bug this codebase
+consistently rejects elsewhere (e.g., the declared-extension-vs-detected-content mismatch is
+a hard 422, never an auto-correction, per D-01/D-04 in `handlers.go`). A silent-merge preset
+would make it impossible to reason about what a job actually ran with from the API contract
+alone.
+**Do this instead:** Treat `preset` and `target`/`opts` as mutually exclusive request shapes;
+supplying both is a 400, full stop — mirrors the fail-closed-on-ambiguous-input pattern
+already used throughout `handleCreateJob`.
+
+### Anti-Pattern 3: Adding a new migration for preset provenance on `jobs`
+
+**What people do:** Add `0002_add_preset_columns.sql` to store which preset produced a job.
+**Why it's wrong:** Unnecessary — `jobs.preset_name text` and `jobs.preset_version int` already
+exist in `0001_init.sql:53-54`, dormant since the schema was first written (`PROJECT.md`
+explicitly notes `presets` "остаются неиспользуемыми" — this milestone activates existing
+schema, it doesn't extend it). A new migration here would be pure debt.
+**Do this instead:** Extend `jobs.CreateParams` with `PresetName`/`PresetVersion` fields and
+add the two columns to `Repo.Create`'s existing `INSERT` statement
+(`internal/jobs/repo.go:102-108`) — a Go-only change, zero new SQL migrations.
+
+### Anti-Pattern 4: Assuming CI workflow YAML alone gates merges
+
+**What people do:** Merge `.github/workflows/ci.yml` and consider "CI blocks bad merges" done.
+**Why it's wrong:** A workflow running is not the same as a workflow being REQUIRED — without
+a branch protection rule on `main` naming the job(s) as required status checks, a red CI run
+does not block a merge button click; this is a GitHub repo-settings action, not something
+expressible inside the workflow file itself.
+**Do this instead:** After the workflow first lands and goes green once, configure branch
+protection on `main` (via GitHub UI or `gh api repos/{owner}/{repo}/branches/main/protection`)
+to require at least the `gate` job (and ideally `race`) as a required status check before
+merge. This is an explicit manual/operational follow-up step, not a code-phase deliverable —
+flag it so the roadmap doesn't silently assume the workflow file alone is sufficient.
+
+### Anti-Pattern 5: Two application-level active-preset invariants with no DB enforcement
+
+**What people do:** Rely purely on `cmd/manage-presets` application logic to keep "at most one
+`is_active=true` row per (scope, client, name)" true, with no DB constraint, and assume it'll
+always hold.
+**Why it's wrong:** The existing unique indexes (`presets_system_uq`, `presets_user_uq`) are on
+`(name, version)`/`(client_id, name, version)`, NOT on `is_active` — nothing in the DDL
+prevents two different versions of the same preset both being `is_active=true`
+simultaneously. This is the same class of risk the codebase already accepts elsewhere (e.g.
+`clients.AddSecondaryKey`'s two-active-key-slot cap is enforced in Go, not a DB constraint) —
+consistent with project convention, but worth stating explicitly rather than assuming the
+`ORDER BY version DESC LIMIT 1` fallback in `GetActiveByNameAndClient` is a correctness
+guarantee rather than a defensive tiebreaker.
+**Do this instead:** `cmd/manage-presets`'s "activate" subcommand should transactionally
+deactivate any other `is_active=true` row for the same `(scope, client_id, name)` before
+setting the new one active — mirrors `AddSecondaryKey`'s guarded, transaction-wrapped,
+lock-then-check-then-write shape (`internal/clients/repo.go:64-90`). This keeps the invariant
+true by construction in the one place that mutates it, without needing a new partial unique
+index migration.
+
+## Integration Points
+
+### External Services
+
+| Service | Integration Pattern | Notes |
+|---------|---------------------|-------|
+| GitHub Actions (ubuntu-latest runner) | Standard hosted runner; Docker Engine + `docker compose` v2 built in | `host.docker.internal:host-gateway` (used by `docker-compose.e2e.yml`'s `extra_hosts`) works unchanged on GitHub-hosted Linux runners — same Docker Engine `--add-host` mechanism as local Docker, not a Docker-Desktop-only feature |
+| No new external services | — | CI needs no cloud secrets: Postgres/Redis/MinIO/API-key-salt/webhook-signing-secret are all dev-only literal values already committed in `docker-compose.yml`/`docker-compose.e2e.yml` — reused as-is in CI, no GitHub encrypted secrets required for this milestone |
+
+### Internal Boundaries
+
+| Boundary | Communication | Notes |
+|----------|---------------|-------|
+| `internal/api` ↔ `internal/presets` | Narrow `PresetRepo` interface (interface segregation, matching existing `Repo`/`Storage`/`Enqueuer`) | `internal/api` must never import the concrete `*presets.Repo` type — same discipline as its existing `Repo`/`Storage`/`Enqueuer` interfaces |
+| `internal/presets` ↔ `internal/jobs` | **None** — no import either direction | Presets are resolved ONCE at job-creation time in the API layer; the resolved `target_format`+`options` are copied into `jobs.CreateParams` as plain fields. `internal/jobs` never needs to know presets exist |
+| `cmd/manage-presets` ↔ `internal/presets`, `internal/db` | Direct (operator CLI, no HTTP/auth layer) | Mirrors `cmd/manage-clients` exactly — connects to Postgres directly, no `internal/auth` dependency |
+| `.github/workflows/ci.yml` ↔ `docker-compose.yml` + `docker-compose.e2e.yml` | Shell steps (`docker compose -f ... -f ... up -d --build`), not a Go/API boundary | CI adds no new compose files or service definitions — it is purely a consumer of the existing two files, unmodified |
+| `cmd/document-worker`/`cmd/chromium-worker` ↔ `internal/webhook` | **REMOVED** (debt fix) | These two binaries currently construct `webhook.NewRepo`/`webhook.NewDeliverer` and pass them into `worker.NewHandler` even though they're inert (webhook delivery lives solely in `cmd/webhook-worker` since Phase 16) — the fix deletes this dead wiring; verify whether `worker.NewHandler`'s constructor signature still needs the webhook-repo/deliverer params for the image/document/HTML handlers it also builds, or whether they can become optional/nil-safe as part of this cleanup, before deleting the call sites |
+
+## Suggested Build Order
+
+Given the milestone's own stated dependency constraints (`-race`-fix before the `-race` CI
+tier; image E2E before the live-E2E CI tier) plus the fact that presets and CI are otherwise
+fully independent of each other:
+
+**1. Debt cleanup first** (small, isolated, and two of its three items are hard prerequisites
+   for parts of tier 3 below):
+   - 1a. Remove dead webhook wiring from `cmd/document-worker/main.go` +
+     `cmd/chromium-worker/main.go` — zero dependencies on anything else in this milestone,
+     do it any time, lowest risk item.
+   - 1b. Add the mutex to `fakeEnqueuer` in `internal/reconciler/reconciler_test.go` — **must
+     land before the CI workflow's `race` job is added/enabled**, otherwise the first CI run
+     is red (or worse, silently flaky) on tier 2.
+   - 1c. Add `TestImageConversionE2E` to `internal/e2e` — **must land before the CI workflow's
+     `e2e-live` job is added/enabled**, otherwise the first live-E2E CI run is green but blind
+     to the image/libvips pipeline (a false sense of full coverage).
+
+**2. Presets second** (fully independent of CI and of the debt items — no code-level
+   dependency in either direction):
+   - `internal/presets` package → `cmd/manage-presets` CLI → `internal/api` wiring
+     (`PresetRepo` interface, `handleCreateJob` preset-resolution branch, `jobs.CreateParams`
+     extension). This can technically be built in parallel with step 1, but sequencing it
+     after debt cleanup keeps the diff surface on `cmd/document-worker`/`chromium-worker`/
+     `internal/reconciler`/`internal/e2e` small and isolated from unrelated preset changes.
+
+**3. CI workflow last:**
+   - Build `.github/workflows/ci.yml`'s four tiers (`gate`, `race`, `docker-build`,
+     `e2e-live`) only after steps 1b and 1c have merged, so the workflow is green on its very
+     first run instead of needing an immediate follow-up fix. Building CI last also means its
+     `docker-build`/`e2e-live` tiers exercise the FINAL v1.4 codebase (presets included) from
+     day one, rather than validating only a partial slice.
+   - Within this step, the four jobs are naturally tiered via `needs:` as described in
+     Pattern 3 — that internal ordering is a single-workflow implementation detail, not a
+     cross-feature build-order concern.
 
 ## Sources
 
-- Direct reads of current `main` branch: `internal/convert/{convert,converters,libreoffice,docsniff,sniff,dimensions,exec}.go`, `internal/api/{handlers,api,callbackurl}.go`, `internal/worker/worker.go`, `internal/jobs/{jobs,repo}.go`, `internal/queue/{queue,client}.go`, `internal/reconciler/reconciler.go`, `internal/webhook/deliver.go`, `internal/db/migrations/0001_init.sql`, `cmd/{api,worker,document-worker}/main.go`, `Dockerfile.{worker,document-worker}`, `docker-compose.yml` — HIGH confidence, ground truth.
-- [Using Parameters from Filters in --convert-to Command Line (Ask LibreOffice)](https://ask.libreoffice.org/t/using-parameters-from-filters-in-convert-to-command-line-with-multiple-parameters/114631) — MEDIUM confidence, PDF/A `SelectPdfVersion` FilterOptions JSON syntax
-- [What is Miklos hacking – Improved PDF export options in the command-line and in Online](https://vmiklos.hu/blog/pdf-convert-to.html) — MEDIUM confidence, corroborates FilterOptions CLI syntax
-- [PDF Export Command Line Parameters (LibreOffice help)](https://help.libreoffice.org/latest/en-US/text/shared/guide/pdf_params.html) — MEDIUM confidence, official filter-options reference
-- [How to Set Up Docker for PDF Generation with Headless Chrome (oneuptime.com)](https://oneuptime.com/blog/post/2026-02-08-how-to-set-up-docker-for-pdf-generation-with-headless-chrome/view) — MEDIUM confidence, `--no-sandbox`/`--disable-dev-shm-usage`/`--disable-gpu` container flags
-- [ChromicPDF docs (hexdocs.pm)](https://hexdocs.pm/chromic_pdf/ChromicPDF.html) — MEDIUM confidence, sandbox-vs-seccomp-profile trade-off in Docker
-- [docker-html-to-pdf reference project (GitHub)](https://github.com/pinkeen/docker-html-to-pdf) — MEDIUM confidence, dockerized headless-Chrome-to-PDF conventions
+- Direct repository inspection (all findings HIGH confidence, verified against current
+  source — no external/ecosystem claims in this research):
+  - `/Users/apaderin/dev/octoconv/internal/api/handlers.go` (handleCreateJob flow, exact line
+    numbers for each validation stage)
+  - `/Users/apaderin/dev/octoconv/internal/api/api.go` (interface segregation pattern:
+    `Repo`/`Storage`/`Enqueuer`/`Pinger`)
+  - `/Users/apaderin/dev/octoconv/internal/jobs/repo.go` (repo pattern, guarded transitions,
+    `Create`'s INSERT shape)
+  - `/Users/apaderin/dev/octoconv/internal/clients/repo.go` (repo pattern to mirror for
+    presets; `AddSecondaryKey`'s guarded single-active-slot enforcement)
+  - `/Users/apaderin/dev/octoconv/cmd/manage-clients/main.go` (CLI pattern to mirror for
+    `cmd/manage-presets`)
+  - `/Users/apaderin/dev/octoconv/internal/db/migrations/0001_init.sql` (confirms `presets`
+    table and `jobs.preset_name`/`jobs.preset_version` columns already exist, unused)
+  - `/Users/apaderin/dev/octoconv/internal/convert/opts.go` (`ParseDocOpts`,
+    `DocOptsFromMap`'s re-validate-on-read pattern — the template for preset opts
+    re-validation)
+  - `/Users/apaderin/dev/octoconv/internal/queue/queue.go` (`Enqueuer` shape, per-engine-class
+    queue routing pattern referenced for context)
+  - `/Users/apaderin/dev/octoconv/cmd/document-worker/main.go` (confirmed dead webhook wiring
+    at lines 26, 50-55, 70-71; identical shape in `cmd/chromium-worker/main.go`)
+  - `/Users/apaderin/dev/octoconv/internal/reconciler/reconciler_test.go` (confirmed
+    unsynchronized `fakeEnqueuer` shared-state fields, lines 81-111)
+  - `/Users/apaderin/dev/octoconv/internal/e2e/e2e_test.go` (confirmed env-gated E2E harness
+    contract; confirmed no `TestImageConversionE2E` exists yet — only Document/Cross-Format/
+    OLE-CFB/PDF-A/Opts-Rejection/HTML tests)
+  - `/Users/apaderin/dev/octoconv/docker-compose.yml` +
+    `/Users/apaderin/dev/octoconv/docker-compose.e2e.yml` (confirmed 5 deployment Dockerfiles
+    vs. `Dockerfile.worker-test`'s separate dev/CI-support role; confirmed dev-only secrets
+    already committed, no new CI secret store needed)
+  - `/Users/apaderin/dev/octoconv/.planning/PROJECT.md` (milestone scope, prior context on
+    `presets` being dormant schema, explicit `-race`-before-CI and image-E2E-before-live-E2E
+    ordering constraints already stated by the project owner)
 
 ---
-*Architecture research for: OctoConv v1.3 "Document Class v2" milestone integration*
-*Researched: 2026-07-10*
+*Architecture research for: OctoConv v1.4 (CI pipeline, presets, debt cleanup)*
+*Researched: 2026-07-12*

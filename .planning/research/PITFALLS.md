@@ -1,375 +1,346 @@
 # Pitfalls Research
 
-**Domain:** Document Class v2 — cross-format LibreOffice conversion, OLE-CFB pre-flight detection, opts-driven PDF/A export, chromium-based HTML→PDF engine, decoupled webhook delivery (OctoConv milestone v1.3)
-**Researched:** 2026-07-10
-**Confidence:** HIGH (grounded in current codebase — `internal/convert/libreoffice.go`, `docsniff.go`, `sniff.go`, `internal/queue/queue.go`, `internal/reconciler/reconciler.go`, `internal/webhook/deliver.go`, `internal/api/callbackurl.go` — plus official LibreOffice docs and verified security research on OOXML/CFB encryption). Two pitfalls (LibreOffice cross-format fidelity specifics) rely on community bug-tracker reports rather than official docs — flagged MEDIUM inline.
+**Domain:** Adding GitHub Actions CI (with a live docker-compose E2E tier) and a server-side presets mechanism to an existing production-hardened Go conversion service (OctoConv v1.4)
+**Researched:** 2026-07-12
+**Confidence:** MEDIUM-HIGH (GitHub Actions runner limits verified via current official sources; presets pitfalls derived directly from this repo's existing DDL/code conventions, HIGH confidence; general CI flakiness patterns MEDIUM — verified against official docs where cited)
 
-This supersedes the previous milestone's PITFALLS.md (which covered v1.2's document-engine addition — LibreOffice→PDF only, reconciler engine-routing, worker-topology split — all now shipped and validated per `.planning/PROJECT.md`). This research is scoped entirely to v1.3's five features: cross-format document conversion, OLE-CFB pre-flight detection, PDF/A export, HTML→PDF via chromium, and webhook-delivery decoupling.
+This supersedes the previous milestone's PITFALLS.md (v1.3, Document Class v2 — LibreOffice cross-format, OLE-CFB, PDF/A, chromium HTML→PDF, webhook decoupling — all shipped and validated per `.planning/PROJECT.md`). This research is scoped entirely to v1.4's three feature areas: GitHub Actions CI (4 levels culminating in live E2E), a server-side presets mechanism resolved into the existing validated-opts pipeline, and the v1.3 tech-debt cleanup that gates the CI `-race` tier.
 
 ## Critical Pitfalls
 
-### Pitfall 1: Hardcoded `.pdf` assumptions break the moment output isn't PDF
+### Pitfall 1: Runner disk exhaustion from 5 image builds — already happened locally, will happen in CI too
 
 **What goes wrong:**
-`internal/convert/libreoffice.go`'s `Convert` currently hardcodes the produced-file extension and the validator: `producedPath := ... + ".pdf"` and the function unconditionally ends with `return validatePDF(outPath)`. DOC-V2-01 (docx↔odt, xlsx↔ods, pptx↔odp) makes the target format variable for the first time. If the naive change is "just call `filterFor` with the target too," these two hardcoded assumptions silently survive: soffice writes `in.odt` (say), the code looks for `in.pdf`, the rename fails or — worse, if a stale `in.pdf` from a previous PDF-export test happens to exist in the reused workDir pattern — succeeds by picking up the wrong file. Then `validatePDF` checks for `%PDF-` magic bytes against a file that was never meant to be a PDF, and correctly errors — but for the wrong reason, making the failure look like a soffice bug instead of an output-handling bug.
+The stack builds 5 custom images (`Dockerfile.api`, `Dockerfile.worker`, `Dockerfile.document-worker`, `Dockerfile.webhook-worker`, `Dockerfile.chromium-worker`) on top of 5 pulled base images (`postgres:18`, `redis:8`, `minio/minio:latest`, `minio/mc:latest`, `hibiken/asynqmon:0.7.2`), where `document-worker` bundles LibreOffice and `chromium-worker` bundles a Chromium headless runtime — both multi-hundred-MB-to-1GB+ payloads on top of `golang:1.26-bookworm` build stages. A standard GitHub-hosted `ubuntu-latest` runner guarantees only **14GB of usable disk** (roughly 22GB free before any workflow step, per GitHub's own runner-images docs) — materially less than a typical developer's Docker Desktop VM disk. This project already hit "no space left on device" building this exact stack **locally** during Phase 13 Plan 03 (see `13-03-SUMMARY.md`, Docker Desktop VM disk exhaustion mid-build, resolved twice via `docker builder prune -a` / `docker image prune -a`). A CI runner with less headroom than a dev laptop will hit this reliably, not occasionally, unless mitigated up front.
 
 **Why it happens:**
-The v1.2 implementation only ever had one target format (PDF), so "the output is always `.pdf`" was baked in as an implicit invariant rather than a parameter. Cross-format conversion invalidates that invariant everywhere it was assumed, not just in `filterFor`.
+`docker compose build`/`up --build` keeps every intermediate layer and every base image resident; nothing is pruned between steps by default. Teams assume "it built fine on my machine" transfers to CI runners, which have less disk and no prior layer cache.
 
 **How to avoid:**
-Make the produced-file extension and the output validator both functions of the *target* format, not literals. `filterFor(sourceExt, targetExt)` should return the correct LibreOffice export filter for the pair (see Pitfall 3 for the filter-name matrix), and `producedPath`/output validation must derive the extension from the same target format the filter was chosen for — never from a literal `.pdf`.
+- Add an explicit disk-space step before the E2E build tier: either `docker system prune -af --volumes` right before building (cheap, safe on an ephemeral runner with nothing else on it) or a marketplace action (e.g. `jlumbroso/free-disk-space`) to reclaim the ~10-15GB GitHub pre-installs (Android SDK, .NET, Haskell toolchains) that a Go+Docker job never uses.
+- Build only the 5 images this project needs — do not `docker compose pull` unrelated tags, and pin `minio/minio:latest`/`minio/mc:latest` to specific tags (also closes a supply-chain gap the project already flags for `asynqmon` in `docker-compose.yml`'s own comment about pinned tags).
+- Prefer `docker buildx build --load` with registry/gha cache per-image over `docker compose build`'s default local-only cache (see Pitfall 3) — this avoids re-downloading `golang:1.26-bookworm` + `debian:bookworm-slim` + LibreOffice/Chromium apt payloads on every run.
+- Tear the stack down and prune between the "build all 5 images" step and any later step in the same job if disk is still tight (`docker compose down -v` frees the compose stack's own layers before a subsequent step needs headroom).
 
 **Warning signs:**
-Any grep for `".pdf"` as a string literal inside `internal/convert/libreoffice.go` after this milestone lands is a red flag — the file should have zero hardcoded target extensions once cross-format is wired.
+`no space left on device` errors during `apt-get install` inside `document-worker`/`chromium-worker` build stages (this project's exact prior local failure mode) or during `docker buildx` metadata writes; CI jobs that pass on re-run with no code change (classic disk-pressure flake signature).
 
 **Phase to address:**
-The phase implementing DOC-V2-01 (cross-format conversion), before opts/PDF/A work lands on top of it.
+The CI phase that introduces the "build all 5 Docker images" tier (CI level 3 in the milestone's 4-level design) — disk mitigation must ship in the same phase as the build step, not as a follow-up, since the failure is not hypothetical for this stack.
 
 ---
 
-### Pitfall 2: LibreOffice cross-format conversion is not lossless — expect silent content/fidelity degradation, not hard failures
+### Pitfall 2: Live E2E tier flakes from healthcheck-vs-readiness gap under slow/loaded runners
 
-**What goes wrong:** *(MEDIUM confidence — community bug reports, not official LO guarantees)*
-docx→odt and odt→docx round-trips are documented to silently drop or corrupt: alt-text on images, tab-stop spacing, tracked-changes state, and internal hyperlinks to slides/bookmarks. On the spreadsheet side, xlsx↔ods conversion is lossy for anything beyond ~250 of Excel's ~420 built-in functions, and PivotTables-with-slicers, complex conditional formatting, Power Query, and VBA macros have no ODS equivalent at all. Critically, none of this raises an error — `soffice --convert-to` exits 0 and produces a structurally valid file. The existing `validatePDF`-style approach ("did the process exit cleanly and produce a well-formed file") cannot catch fidelity loss, because fidelity loss is not a validity failure.
+**What goes wrong:**
+`docker-compose.yml`'s healthchecks (`interval: 5s, timeout: 3s, retries: 10` → ~50s worst-case before Compose considers a dependency healthy) gate `depends_on: condition: service_healthy` for `postgres`/`redis`/`minio`, and the E2E harness's own env-var contract (`E2E_S3_DIAL_ADDR`, `E2E_WEBHOOK_HOST`) further assumes the stack is fully up before the Go test process starts issuing HTTP calls. GitHub-hosted runners are frequently noisier/slower (shared CPU, cold image pulls, LibreOffice/Chromium first-boot cost inside `document-worker`/`chromium-worker`, which have no explicit healthcheck at all in `docker-compose.yml` today) than a developer's local machine. `service_healthy` only covers the 3 infra containers — `api`, `worker`, `document-worker`, `chromium-worker`, `webhook-worker-1/2` have no healthcheck and no guarantee that they've finished their own DB-connect/migrate/queue-bind startup sequence before the E2E suite's first `POST /v1/jobs`.
 
 **Why it happens:**
-LibreOffice's import/export filters are best-effort translators between two independently-evolved format families (Microsoft OOXML vs OASIS ODF); there is no cross-format feature parity guarantee, and LibreOffice's own philosophy is "convert what you can, drop what you can't" rather than "fail if anything is lost."
+Healthchecks were written and tuned against local Docker Desktop timing; nobody re-validates the same retry/interval budget against CI runner variance until the first randomly-failing run. Compose's `service_healthy` for infra containers is necessary but not sufficient — it says Postgres/Redis/MinIO are up, not that `api`/`worker`/`document-worker` have finished connecting to them.
 
 **How to avoid:**
-Do not try to detect fidelity loss programmatically (out of scope, no cheap signal exists). Instead: (1) document explicitly in the API contract that docx↔odt / xlsx↔ods / pptx↔odp is "structural best-effort conversion, not guaranteed round-trip fidelity" so internal clients don't assume archival-grade equivalence; (2) the macro-rejection guard already in `internal/api/handlers.go` (`cr.HasMacro` → 422) is a correctly-scoped mitigation, since macros are the single highest-value silent-loss case (a macro-enabled workbook converted to `.ods` loses all VBA silently) — keep it, and confirm it applies to the new cross-format pairs (not just the existing →PDF pairs, since PDF never carried macros in the first place but odt/ods/odp export could).
+- Add lightweight healthchecks (or at minimum a startup-probe loop) to `api` (`GET /healthz`, which already pings Postgres/Redis/S3 per Phase 4's observability work) and gate the E2E test invocation on that endpoint returning `200` — not just on Compose's `service_healthy` for the 3 infra containers.
+- Move stack-readiness polling into the test harness itself (or a pre-test shell step) with an explicit, generous timeout and visible progress (`curl --retry N --retry-connrefused` against `/healthz`) rather than trusting Compose's fixed `retries: 10` budget to be enough headroom on a loaded runner — this project's own E2E summaries already do a manual `curl -fsS http://localhost:8090/healthz` before running tests (see `13-03-SUMMARY.md`); formalize that as a CI step, don't rely on implicit timing.
+- Do not shrink retries defensively to "make it pass faster" — widen them for CI headroom instead; CI minutes are cheaper than flaky-test debugging time.
 
 **Warning signs:**
-Support requests along the lines of "the converted file looks different from the original" with no error in `job_events` — this is expected behavior, not a bug, but needs to be documented as such before it surprises an internal consumer.
+Intermittent `connection refused` on the first E2E HTTP call that passes on retry; E2E job failing only on CI, never locally; failures clustering on cold-cache runs (first run of the day, or after a base-image bump) rather than warm-cache runs.
 
 **Phase to address:**
-The phase implementing DOC-V2-01 — as a documentation/scope decision, not a code fix.
+Same CI phase that wires the live E2E tier into GitHub Actions — the readiness-polling step should ship alongside the workflow file, not be discovered later via flaky-test triage.
 
 ---
 
-### Pitfall 3: LibreOffice's PDF-export filter names don't work for non-PDF cross-format targets — need a real filter matrix
+### Pitfall 3: `docker compose build` silently bypasses the GitHub Actions cache backend
 
 **What goes wrong:**
-`filterFor` today only ever returns `writer_pdf_Export` / `calc_pdf_Export` / `impress_pdf_Export` — filters that are meaningless for a docx→odt or xlsx→ods conversion. The correct ODF export filters are `writer8`, `calc8`, `impress8`; the correct reverse (odt→docx etc.) filters are the "MS ... 2007 XML" family (e.g. `MS Word 2007 XML`, `Calc MS Excel 2007 XML`, `Impress MS PowerPoint 2007 XML`). These are different literal strings from the PDF-export ones, keyed by (source app family, target format), not just source format.
+Teams wire up `docker/setup-buildx-action` and expect `docker compose build`/`up --build` to automatically use the `type=gha` cache backend. It does not — `docker compose build` uses the classic builder or a local buildx driver without cache-to/cache-from flags unless each service's build section is explicitly configured with `cache_from`/`cache_to`, or the images are built individually via `docker buildx bake`/`docker buildx build` before `docker compose up` (with matching image tags so Compose reuses the just-built image instead of rebuilding). Result: every CI run re-executes the full `apt-get install libreoffice...`/chromium download from scratch, burning the disk budget from Pitfall 1 *and* run time on every single push, with the GHA cache silently doing nothing.
 
 **Why it happens:**
-It's tempting to extend the existing `switch` by source extension alone, since that's the current pattern — but the current pattern only ever needed the source's app family (Writer/Calc/Impress) because the target was always PDF. Now the filter depends on both source and target.
+`docker buildx bake` (which does understand a compose file's `build:` sections and *does* support `--set *.cache-to=type=gha`) is easy to conflate with plain `docker compose build` — the two have overlapping syntax but different cache wiring, and the distinction is easy to skim past.
 
 **How to avoid:**
-Build an explicit `(sourceFormat, targetFormat) → filterName` table (mirroring the existing `Pair{From, To}` shape already used in `Registry`), verified once against real LibreOffice output per pair — don't assume the "8" ODF filters or "2007 XML" OOXML filters based on training-data recall alone; confirm against the target LibreOffice version's own `--convert-to :help`/filter list, since exact filter-name strings have shifted across LibreOffice major versions.
+- Use `docker buildx bake -f docker-compose.yml --set '*.cache-from=type=gha' --set '*.cache-to=type=gha,mode=max'` (or build each of the 5 images individually via `docker/build-push-action` with per-image `cache-from`/`cache-to: type=gha,scope=<service-name>`) instead of `docker compose build`.
+- Give each of the 5 images its own `scope` in the gha cache key (`scope=api`, `scope=worker`, `scope=document-worker`, `scope=chromium-worker`, `scope=webhook-worker`) — without per-service scoping, 5 images sharing one cache scope will thrash each other out under the 10GB budget (see Pitfall 4).
+- Verify the cache is actually hitting: a rebuild with no Dockerfile changes should show `CACHED` on nearly every layer in the buildx log; if it doesn't, the wiring is wrong, not the cache.
 
 **Warning signs:**
-`soffice` exits non-zero with an "Error: no export filter" message, or (more dangerously) exits 0 but writes zero bytes / an empty shell document, if a stale/incorrect filter name is silently accepted for a different app family than intended.
+CI build times for the "build all 5 images" step stay constant (~same as a cold local build) across consecutive runs with no dependency/Dockerfile changes; `docker buildx build` logs show no `CACHED` layers on a second run.
 
 **Phase to address:**
-The phase implementing DOC-V2-01.
+The CI phase introducing the Docker-image-build tier — cache wiring should be validated (two consecutive runs, compare timings) before that phase is marked done, not left as a later optimization.
 
 ---
 
-### Pitfall 4: There's no cheap `%PDF-`-equivalent for ZIP-based outputs — but the codebase already has the right tool for it
+### Pitfall 4: 10GB GHA cache budget can't hold 5 images' worth of LibreOffice/Chromium layers, causing cache thrashing
 
 **What goes wrong:**
-Once targets include odt/ods/odp/docx/xlsx/pptx, `validatePDF`'s "%PDF- magic bytes + non-zero size" check no longer applies. The naive replacement — "check it's a non-empty file starting with `PK\x03\x04`" — is *weaker* than the existing input-side validation this project already applies to uploads: it would accept literally any valid ZIP as a "successful" conversion, including a soffice-produced empty/near-empty archive that technically parses as a zip but contains the wrong root part (i.e., LibreOffice's documented "exit 0 but garbage output" failure mode, the same D-02 risk `validatePDF` was built to guard against for PDF).
+GitHub's Actions cache has a **default 10GB-per-repository budget with LRU eviction** (GitHub added an option in late 2025 to raise this ceiling, but it is not the default — verify the repo's cache settings rather than assuming extra headroom). `mode=max` gha caching (needed to cache intermediate `apt-get install` layers, not just final image layers) can easily produce several GB per image once LibreOffice and Chromium's system dependencies are included. With 5 images sharing one repo-wide 10GB budget, the *first* eviction under pressure will be the least-recently-used image's cache — not necessarily the least important one — leading to cache misses that look random from a workflow-log perspective ("why did document-worker rebuild from scratch this time but not last time?").
+
+**Why it happens:**
+The 10GB limit is a repository-wide, not per-workflow or per-image, budget; teams size caching decisions per-image without accounting for the shared ceiling.
 
 **How to avoid:**
-Reuse `convert.SniffContainer` — already built for input-side format disambiguation — as the *output*-side validator too: after conversion, run it against the produced file and assert `cr.Format == <expected target format>` (not just "some non-empty zip"). This is a natural, already-available cheap validity check that's stronger than a bare magic-bytes check, consistent with the project's existing single-pass-central-directory convention, and requires no new code beyond calling an existing function with the target format as an expectation.
+- Use `mode=min` (only final-stage layers) for the base `debian:bookworm-slim` runtime stages of `document-worker`/`chromium-worker` where the heavy apt payload already lives in the final image anyway, and reserve `mode=max` for the Go builder stage (`golang:1.26-bookworm`, sharing an identical build pattern across all 5 images) — that's the layer most worth deduping.
+- Consider registry-based caching (`cache-to=type=registry,ref=<ghcr>/octoconv-cache:<service>`) instead of `type=gha` if the 10GB ceiling proves too tight in practice — registry caching has no comparable size ceiling tied to the Actions cache quota.
+- Monitor: GitHub's cache usage UI (Settings → Actions → Caches) shows current usage; check it after the first few CI runs post-launch rather than assuming 10GB is comfortable headroom for 5 images with LibreOffice/Chromium payloads.
 
 **Warning signs:**
-A conversion "succeeds" (job marked `done`, webhook fired) but the presigned download, when opened, is corrupt or is a different document type than requested — the exact failure mode this check is meant to catch before it reaches the client.
+Build times for one or two of the 5 images regress unpredictably run-to-run while others stay fast; cache usage dashboard shows near-100% of the 10GB budget shortly after the CI tier ships.
 
 **Phase to address:**
-The phase implementing DOC-V2-01, as part of generalizing `validatePDF` into a target-format-aware `validateOutput`.
+Same CI phase as Pitfall 3 — cache scoping strategy is a design decision made once, at the time the build-and-cache step is written, not a tuning pass done after the fact.
 
 ---
 
-### Pitfall 5: OLE-CFB magic bytes cannot distinguish "legacy binary .doc/.xls/.ppt" from "password-protected modern OOXML" — both share the identical 8-byte header
+### Pitfall 5: Zombie compose stacks eating runner minutes and destroying diagnostics when a step fails mid-suite
 
 **What goes wrong:**
-Both a legacy binary `.doc`/`.xls`/`.ppt` file *and* a password-protected/encrypted modern `.docx`/`.xlsx`/`.pptx` (ECMA-376 Agile or Standard encryption) begin with the exact same Compound File Binary (OLE2/MS-CFB) magic: `D0 CF 11 E0 A1 B1 1A E1`. A pre-flight check that stops at "does this look like CFB → reject" cannot tell an internal client *why* their upload was rejected: "this is an old binary format we don't support" and "this is a modern format we do support, but it's encrypted and we can't open it without a password" are different problems requiring different client-side remediation, and the milestone's goal is explicitly a "clear 422," not a generic one.
+If `docker compose up -d --build` succeeds and the E2E test step fails (assertion failure, timeout, or a genuine bug), and the workflow has no explicit teardown step, GitHub Actions will still terminate the runner VM at job end — so this project's specific residual risk isn't "the container runs forever," it's (a) the diagnostic record of a still-running stack being lost with no `docker compose logs` capture, and (b) any future move to self-hosted/persistent runners inheriting stale containers/volumes from the failed run, corrupting the next run's Postgres/MinIO state.
 
 **Why it happens:**
-Encrypted OOXML is, by design, a CFB *container* wrapping the real (encrypted) ZIP/OOXML package inside two internal streams (`EncryptedPackage` holding the ciphertext, `EncryptionInfo` holding the key-derivation parameters) — so at the outer-container level it is byte-for-byte indistinguishable from a genuinely legacy binary document, which uses entirely different internal stream names (`WordDocument`/`1Table`/`0Table` for legacy .doc, `Workbook`/`Book` for legacy .xls, `PowerPoint Document` for legacy .ppt).
+Compose teardown steps are written for the happy path (`docker compose down` as the last step) without `if: always()`, so a failing test step causes the workflow to skip straight to job cleanup, silently dropping the teardown (and any diagnostic log dump that would have explained the failure).
 
 **How to avoid:**
-Distinguishing the two cases requires walking *inside* the CFB container's directory structure (not just its outer magic) and checking for the presence of an `EncryptedPackage`/`EncryptionInfo` stream pair (→ "password-protected modern format") versus the legacy-format stream names above (→ "legacy binary format, never supported"). Return a distinct, specific error message for each case rather than one generic "OLE-CFB detected, rejected" message.
+- Always pair the "bring the stack up" step with an `if: always()` teardown step (`docker compose -f docker-compose.yml -f docker-compose.e2e.yml down -v`) later in the same job.
+- Add an `if: failure()` step that dumps `docker compose logs` (all 8 services: postgres, redis, minio, api, worker, document-worker, chromium-worker, webhook-worker-1/2) as a build artifact before teardown — this project's failure modes (LibreOffice filter mismatches, timeout-vs-retry classification bugs) are exactly the kind that are undiagnosable from the Go test's stdout alone.
+- If self-hosted runners are ever introduced (not currently in scope, but worth flagging given `docker-compose.yml`'s heavy resource limits — `chromium-worker` at 2 CPU/2GB, `document-worker`/`worker` at 2 CPU/1GB each — which may exceed GitHub-hosted runners' default 2-core/7GB), always start such jobs with `docker system prune -af` as a hygiene step, since a self-hosted runner accumulates state across jobs in a way GitHub-hosted ephemeral runners do not.
 
 **Warning signs:**
-Internal client teams filing tickets asking "is my file corrupted?" when it's actually just password-protected — a sign the error message collapsed a genuinely useful distinction into one bucket.
+CI minutes consumption climbing without a corresponding increase in run count; failed E2E jobs with no useful log output beyond "test failed" and no compose logs artifact to explain why.
 
 **Phase to address:**
-The phase implementing DOC-V2-02.
+The CI phase introducing the live E2E tier — teardown-with-`if: always()` and failure-log-capture should be in the first version of the workflow file, not retrofitted after the first opaque failure.
 
 ---
 
-### Pitfall 6: The project's "zero new dependencies" conviction hits a real wall at CFB parsing — Go's stdlib has no OLE2/CFB reader
+### Pitfall 6: Superseded runs pile up and starve concurrency-limited runners
 
 **What goes wrong:**
-Every prior format-sniffing addition in this codebase (`sniff.go` for magic-byte image formats, `docsniff.go` for ZIP-based office formats) either needed a handful of byte comparisons or could lean on Go's stdlib `archive/zip`. There is no stdlib equivalent for OLE2/CFB — walking the CFB directory sector chain (and, for files above the CFB "mini stream" cutoff, the FAT sector chain too) to enumerate top-level stream names is a real, non-trivial parser to hand-roll correctly, unlike the ZIP central-directory read that `SniffContainer` already does in ~15 lines via stdlib.
+Without a `concurrency` group, every push to a branch (including rapid-fire pushes during active development, which this project's git history shows happens often — multiple commits per day across `main`) queues a full new CI run, including the heaviest tier (5-image build + live E2E). Old runs for commits that are already superseded keep consuming runner slots/minutes even though their result is moot the instant a newer push lands.
 
 **Why it happens:**
-CFB predates ZIP-based formats by over a decade and was never given first-class Go stdlib support the way ZIP was; the "structural sniffing, zero new deps" pattern established for Phase 7/document formats does not automatically generalize to every container format.
+`concurrency:` groups are opt-in in GitHub Actions; a first CI pass often omits them since the workflow "works" without one — the cost only becomes visible under real push cadence.
 
 **How to avoid:**
-Treat this as an explicit build-vs-depend decision, not a drop-in extension of `docsniff.go`. Options, in order of fit with existing conventions: (1) hand-roll a *minimal* CFB directory-stream-name reader that only needs to enumerate top-level stream names (not full content extraction) — feasible since the detection only needs stream *names*, not decrypted content, and keeps the zero-new-deps convention intact, but budget real implementation/testing time for it, it is meaningfully more code than `docsniff.go`; (2) take a small, audited third-party Go CFB library, explicitly breaking the established convention — acceptable only if hand-rolling proves too costly, and should be logged as a Key Decision in PROJECT.md the way the "zero-dependency parsers" decision was for Phase 7; (3) do **not** shell out to an external tool (e.g. `file`, `olevba`) for this — that reintroduces the exact untrusted-input-to-exec attack surface the project has otherwise been careful to bound only to conversion engines, for a step that runs *before* the format is even confirmed convertible.
+Add a `concurrency: { group: ci-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }` block at the workflow level (or per-job for the heavy E2E job specifically, if base-gate jobs should never be cancelled mid-run). Scope the group to `github.ref` so concurrent PRs against different branches don't cancel each other.
 
 **Warning signs:**
-Scope creep — if implementing CFB detection starts pulling in a general-purpose OLE2 reader/writer library "just in case," that's a sign the minimal stream-name-only reader wasn't scoped tightly enough.
+GitHub Actions usage/minutes dashboard showing runs that never reached "complete" (cancelled manually or timed out) alongside runs for commits nobody cares about anymore; PR checks staying "in progress" long after a newer commit was pushed to the same branch.
 
 **Phase to address:**
-The phase implementing DOC-V2-02 — flag explicitly as needing its own implementation-complexity estimate, don't fold it into the same estimate as the ZIP-based sniffing work it superficially resembles.
+The CI phase that first introduces the workflow file — concurrency control is a one-line addition, cheapest to include from day one.
 
 ---
 
-### Pitfall 7: `EmbedStandardFonts` defaults to `false`, and PDF/A requires *all* fonts embedded — a PDF/A export can "succeed" while being non-conformant
+### Pitfall 7: `-race` + real-wall-clock reconciler soak test pushes past `go test`'s default 10-minute timeout
 
 **What goes wrong:**
-LibreOffice's PDF export filter has an `EmbedStandardFonts` boolean parameter (default `false`) controlling whether the 14 base PDF fonts are embedded. PDF/A conformance (any of the -1/-2/-3 flavors) requires **every** font used in the document to be embedded — including ones a normal PDF viewer would assume are always available. If the opts-driven PDF/A path only sets `SelectPdfVersion` and doesn't also force font embedding on, the produced file can still exit 0, pass the existing `%PDF- magic bytes` check, and even superficially look like a PDF/A (correct version byte, maybe even correct XMP metadata block) while failing true conformance the moment a validator (or a downstream archival system) checks for embedded fonts.
+`go test`'s default per-package `-timeout` is 10 minutes if not overridden. `-race` instrumentation typically adds 2-10x wall-clock overhead. This project already has `internal/reconciler/reconciler_soak_test.go`, whose own doc comment states it verifies recovery "using REAL elapsed wall-clock time. No SQL backdating of created_at is used" (RECON-05) — a design choice made deliberately to prove production timing behavior, not a mock-clock unit test. While the current soak test's actual sleeps are short (100-150ms, confirmed in code) and the test is `DATABASE_URL`-gated (skips without a live Postgres), the *pattern* is real-time-based and one accidental configuration change (a bumped `RECONCILER_*_STALE_AFTER` test fixture, or a future soak-style test copied from this one) is one step away from silently exceeding the default timeout once `-race` overhead stacks on top — especially if such a test ever leaks into the plain `go test ./...` gate that runs without an explicit `-timeout` override (the existing E2E tier already sets `-timeout 30m` explicitly, per `13-03-SUMMARY.md`'s documented run command — the base/`-race` gate tiers do not appear to, based on this repo's existing test invocations).
 
 **Why it happens:**
-`SelectPdfVersion` and `EmbedStandardFonts` are independent filter parameters; setting one does not imply the other. It's an easy trap to reach for "the one PDF/A flag" and assume it's sufficient.
+`-timeout` defaults are easy to forget because "it passed in under 10 minutes" during development on a fast local machine; `-race`'s overhead and CI runner CPU throttling both push the same suite closer to (or past) that ceiling without any code change.
 
 **How to avoid:**
-When building the opts→filter-options JSON for a PDF/A request, force `EmbedStandardFonts: true` (and `UseTaggedPDF`/`PDFUACompliance` only if accessibility is separately required — don't conflate PDF/A with PDF/UA, they're different specs with overlapping-but-distinct requirements) alongside the version selector, as a hardcoded pairing whenever `pdf_a` is requested — never let these be independently client-settable (see Pitfall 9).
+- Set an explicit `-timeout` flag (e.g. `-timeout 5m` for the fast unit-test/`-race` tier, sized with headroom above the tier's actual measured duration, and the already-established `-timeout 30m` for the live E2E tier) in every `go test` invocation in the CI workflow — never rely on the 10-minute default, since its adequacy is a moving target as `-race` gets enabled and test suites grow.
+- Keep real-wall-clock tests (soak-style) `DATABASE_URL`-gated and confined to the live-E2E tier (as `reconciler_soak_test.go` already is) rather than letting them leak into the fast `-race` gate tier — this is already this project's existing pattern; preserve it explicitly as a rule when adding the CI workflow, don't let a future test accidentally add a `DATABASE_URL`-independent real-time wait to the fast tier.
 
 **Warning signs:**
-A produced "PDF/A" file that renders fine in a normal PDF viewer (which silently substitutes system fonts for anything unembedded) but fails when opened in a strict PDF/A viewer or long-term archival tool — the exact failure mode PDF/A exists to prevent.
+`panic: test timed out after 10m0s` appearing only in the `-race` CI job, never in a plain local `go test ./...` run; CI job duration for the `-race` tier creeping upward release over release without a corresponding growth in test count.
 
 **Phase to address:**
-The phase implementing DOC-V2-03.
+The CI phase that enables `-race` (level 2) — set the explicit timeout at the same time the flag is added, as a preventive measure, not reactively after the first timeout. Note: this phase depends on the tech-debt phase fixing the `fakeEnqueuer` data race first (see Pitfall-to-Phase Mapping) — `-race` cannot be enabled cleanly while that race exists.
 
 ---
 
-### Pitfall 8: `%PDF-` magic bytes (the existing `validatePDF` check) proves nothing about PDF/A conformance — full conformance validation (veraPDF) is a real dependency the project likely can't justify yet
+### Pitfall 8: Preset resolution TOCTOU — preset deactivated/edited between lookup and job-row insert
 
 **What goes wrong:**
-The existing `validatePDF` was correctly scoped for its original job — catching LibreOffice's documented "exit 0, empty/corrupt output" failure — but it says nothing about whether a PDF/A-flagged export actually conforms to ISO 19005. A PDF's own internal metadata can *claim* PDF/A-1b conformance (via XMP `pdfaid:part`/`pdfaid:conformance` and a `/GTS_PDFA1` output-intent identifier) without the document structure actually satisfying every PDF/A structural rule — the claim and the reality can diverge, and only a purpose-built conformance checker (veraPDF is the industry-standard one) can authoritatively tell them apart.
+`presets` (per `internal/db/migrations/0001_init.sql`) has `is_active boolean` and `version int`, and `jobs` already carries its own `preset_name`/`preset_version`/`options jsonb` columns — meaning the schema's intended design is almost certainly "resolve the preset row into the job's own `options` snapshot at creation time," not "look the preset up again on every worker read." The gap: between `SELECT ... FROM presets WHERE name=$1 AND (client_id=$2 OR scope='system') AND is_active` and the subsequent `INSERT INTO jobs (..., preset_name, preset_version, options)`, an operator could deactivate that preset via `cmd/manage-presets` (presumably mirroring `cmd/manage-clients`' create/revoke pattern) or bump its version. A naive implementation either (a) races silently and sometimes creates a job against an already-deactivated preset, or (b) wraps the whole read+insert in a transaction with row-level locking the presets table was never designed to need (presets are read far more often than clients' API keys, and locking every preset read against every job-creation request would serialize job intake under load — a much worse regression than the race itself).
 
 **Why it happens:**
-Full ISO 19005 conformance checking is a large, Java-based dependency (veraPDF) — a poor fit for this project's established "zero new deps, small Go binaries" convention, and arguably disproportionate engineering effort for an internal tool whose PDF/A feature is "archival export," not "guaranteed regulator-grade conformance."
+The codebase's existing guarded-transition pattern (`Repo.transition`, `SELECT ... FOR UPDATE`) trains developers to reach for row-locking as the default answer to any read-then-write race; applying that same heavyweight pattern to a hot read path (every job creation) is a mismatch for a resource (presets) that changes rarely and is read on every request.
 
 **How to avoid:**
-Pick a deliberate, documented middle ground rather than silently shipping the weakest option: extend the output validator to also grep the produced PDF bytes for the expected `/GTS_PDFA1` (or `/GTS_PDFA2`/`/GTS_PDFA3`) OutputIntent identifier string matching the requested `SelectPdfVersion`, as a cheap (no new dependency) but explicitly *non-authoritative* sanity check — it confirms LibreOffice *attempted* to tag the file correctly, not that the file is truly conformant. Document this limitation as an accepted residual risk in PROJECT.md (mirroring the existing DOC-V2-05 resource-exhaustion residual-risk entry) rather than letting "we validate PDF/A" become an implicit, false claim. Defer full veraPDF integration explicitly rather than silently never revisiting it.
+- Accept the race as a documented, narrow, acceptable window (matching this project's existing precedent for other narrow, accepted residual risks — e.g. the `file://` residual-read risk accepted in Phase 15) — the practical consequence of "job created against a preset deactivated 50ms earlier" is: one job runs with settings an operator just decided to retire, materially the same outcome as if the deactivation had landed 50ms later. This does **not** need transactional protection; it needs the resolved options to be **snapshotted onto the job row** (already the schema's apparent intent) so a *later* preset edit/deactivation never retroactively changes an already-created job's behavior — that is the actual invariant worth protecting, not the split-second creation-time race.
+- What must not be skipped: re-checking the preset's `is_active` flag with a plain (non-locking) read immediately before the `INSERT`, so an already-deactivated preset is rejected for *new* jobs (404, matching cross-client convention — see Pitfall 12) even if the race window itself is not closed with a lock.
 
 **Warning signs:**
-Any internal documentation or client-facing claim that says "PDF/A output is validated" without qualifying *what* is validated (structural tag presence) versus what isn't (full ISO 19005 conformance).
+A job created with a `preset_name` that scans as inactive when audited after the fact — expected occasionally under concurrent deactivation, a *problem* only if it happens for presets that were already inactive well before the request (which would indicate the active-check was skipped entirely, not raced).
 
 **Phase to address:**
-The phase implementing DOC-V2-03 — as an explicit scope/residual-risk decision, logged in PROJECT.md's Key Decisions table the way prior accepted risks have been.
+The presets resolution phase (server-side `preset=<name>` → validated opts) — the snapshot-onto-job-row behavior is core design and must be correct from the first implementation; the "acceptable race window" decision should be an explicit, written Key Decision (matching this project's existing convention of recording accepted residual risks in `PROJECT.md`), not an implicit unstated assumption.
 
 ---
 
-### Pitfall 9: `opts` is a brand-new, currently-unguarded plumbing path — the injection risk is UNO filter-property injection, not shell injection
+### Pitfall 9: Trusting stored preset options without re-running them through the current opts-validation allowlist
 
 **What goes wrong:**
-`Convert(ctx, inPath, outPath string, _ map[string]any)` already has an `opts` parameter in its signature today, but it is completely ignored (`_ map[string]any`) — there is no `opts` column in the jobs schema, no API parameter parsing, no validation, nothing. DOC-V2-03 is the *first* feature to actually route data through this path end-to-end, so there's no existing precedent or guardrail to lean on. Because `runCommand`/`exec.Command` passes arguments as an argv array (not through a shell), classic shell-metacharacter injection isn't the risk here — but if client-supplied `opts` values get marshaled directly into the LibreOffice filter-options JSON blob (the single argv token after `pdf:writer_pdf_Export:`), the attacker isn't escaping a shell, they're supplying arbitrary **UNO API filter properties** LibreOffice's own option parser will honor: e.g. setting an encryption password on the output (`EncryptFile`/`DocumentOpenPassword`), altering export quality/compression in ways that degrade output, or otherwise reaching properties well outside "which PDF/A version" that the API was ever meant to expose.
+`presets.options` is `jsonb NOT NULL DEFAULT '{}'::jsonb` — a schema-flexible blob, by design, since presets must cover multiple `operation`/engine types over time. The project's existing opts pipeline (`ParseDocOpts`/`ParseHTMLOpts` in `internal/convert/opts.go`/`htmlopts.go`) is the single validated chokepoint guaranteeing "client bytes never reach engine argv/CSS unvalidated" (OPTS-01/02, HTML-03). If preset resolution reads `presets.options` and passes it directly into the job's `options` column (or worse, directly into the converter) **without** re-running it through the same `ParseXOpts` allowlist function used for ad-hoc client-submitted opts, two failure modes open up: (a) a preset created under an older, looser allowlist (e.g. before `htmlMarginMMMax` was tightened, or before a field was removed from `HTMLOpts`) silently carries forward now-invalid values that bypass current validation entirely because "it's a preset, not raw client input"; (b) a future allowlist tightening has no effect on already-stored presets, creating a two-tier trust model (ad-hoc opts are always current-validated, preset opts are validated-at-creation-time-only) that directly contradicts this project's own stated invariant that client bytes never carry unvalidated data past the parse boundary — a preset's stored JSON *is* client/operator-originated data (entered via `cmd/manage-presets`, which itself may predate a schema change).
 
 **Why it happens:**
-`map[string]any` is a natural-looking shape for "generic options," and it's tempting to serialize it close to verbatim into the filter-options JSON for convenience — especially since the JSON-based filter-options syntax itself looks like a natural pass-through target.
+"It's already a preset, presumably validated when created" is an intuitive but false assumption — validation is a property of *when a value is checked*, not a permanent property of the value itself. Every other piece of durable state in this codebase (job status transitions, callback URLs) is re-checked at the point of use, not trusted from creation time; presets should follow the same rule but are new enough to not yet have that rule encoded.
 
 **How to avoid:**
-Never marshal client-supplied `opts` directly into the filter-options string. Define a small, closed, strictly-typed Go struct (e.g. `type DocOpts struct { PDFA bool }`, extended only as new options are deliberately added) that the API parses and validates client input into with an allow-list of known keys — reject unknown keys/values with 422 rather than silently ignoring or passing them through. Build the actual LibreOffice filter-options JSON purely from server-side constants keyed off the validated struct fields (e.g. `PDFA: true` → the hardcoded `SelectPdfVersion`+`EmbedStandardFonts` pair from Pitfall 7) — the client-controlled bytes should never appear inside the string handed to `soffice`'s argv.
+- At preset-resolution time (inside `handleCreateJob`, alongside the existing engine/format validation), run `presets.options` through the exact same `ParseDocOpts`/`ParseHTMLOpts` (or a shared dispatcher keyed by `operation`/engine, matching the existing `Registry.EngineFor` pattern) used for direct client-submitted opts — never branch preset-sourced opts around that call.
+- If a stored preset now fails current validation (allowlist tightened since creation), fail the job creation with a clear, non-leaking error (see Pitfall 12) rather than silently coercing/dropping the invalid field — the operator who owns the preset needs to know it's stale, not have it silently misbehave.
+- Consider a `cmd/manage-presets validate` (or `lint`) subcommand that re-runs every stored preset through current `ParseXOpts` and reports failures, so allowlist changes surface stale presets proactively instead of only at first job-creation failure.
 
 **Warning signs:**
-Any code path where `json.Marshal(opts)` (the raw client map) or similar directly produces (part of) the string passed to `runCommand`/`exec.Command` — that's the injection surface, full stop, regardless of how well-intentioned the allow-list checking elsewhere looks.
+A preset that worked at creation time starts returning validation errors after an unrelated opts-schema change ships — this is actually the *correct* behavior if re-validation is wired in; its absence (a preset silently keeps "working" with fields the current allowlist would reject for ad-hoc input) is the actual warning sign that re-validation was skipped.
 
 **Phase to address:**
-The phase implementing DOC-V2-03, as a security-review gate before merge — this is the single highest-severity net-new attack surface in this milestone.
+The presets resolution phase — this must be designed in from the start since it's the one place where "presets reuse the existing validated-opts pipeline" (already the milestone's own stated design intent per `PROJECT.md`) can quietly diverge into "presets bypass the existing validated-opts pipeline" if the re-validation call is treated as optional.
 
 ---
 
-### Pitfall 10: Headless chromium's sandbox model conflicts with this project's own "run as unprivileged `nobody`" container convention
+### Pitfall 10: Scope-precedence bugs between system and per-client ("user") presets
 
 **What goes wrong:**
-Every existing OctoConv worker container runs as `USER nobody` per `Dockerfile.worker`/`Dockerfile.document-worker`. Chrome/Chromium's internal OS-level sandbox (the mechanism `--no-sandbox` disables) normally relies on a setuid-root sandbox helper binary or user/PID namespace privileges that are typically unavailable to a non-root, non-`CAP_SYS_ADMIN` process in a stock Docker container — meaning `--no-sandbox` isn't an optional performance flag here, it's close to mandatory given the existing security convention, and it removes Chromium's own internal defense against a hostile page exploiting the renderer process.
+The DDL's actual scope model is `scope IN ('system', 'user')` (not "client" as a scope label — the milestone description's "client presets" refers to `scope='user'` rows, which carry a non-null `client_id`), with independent uniqueness: `presets_system_uq (name, version) WHERE scope='system'` and `presets_user_uq (client_id, name, version) WHERE scope='user'`. **Nothing in the DDL prevents a `user`-scope preset from sharing a `name` with a `system`-scope preset** — this is presumably intentional (a client should be able to define `photo-thumbnail` locally even if a system preset of the same name exists, and have their local one take precedence when they request `preset=photo-thumbnail`), but it means preset resolution needs an explicit, tested precedence rule: "look up `(client_id, name)` in user-scope first; fall back to `(name)` in system-scope only if no user-scope match exists" — get the lookup order backwards (system-first) and a client's intentional override of a system default silently never takes effect, with no error to signal the shadowing failed.
 
 **Why it happens:**
-Generic "run headless Chrome in Docker" guidance treats `--no-sandbox` as a convenience flag ("your container is already a sandbox"), which undersells the tradeoff for *this* project specifically: the input to this engine is by definition attacker-influenced HTML (an internal client's document, potentially embedding untrusted content), and the container-level isolation this project already relies on (unprivileged user, resource caps) was designed around engines whose only real threat model was "hangs/crashes/orphaned processes" (LibreOffice, libvips), not "arbitrary renderer-process code execution against a malicious page."
+Two independent unique indexes with no cross-scope uniqueness constraint is easy to read as "these are just two separate namespaces" rather than "one namespace with an explicit override order" — the precedence logic lives entirely in application code, not the schema, so it's untestable by a DB constraint and must be covered by an explicit unit test.
 
 **How to avoid:**
-Layer container-level hardening *on top of* `--no-sandbox` rather than treating either alone as sufficient: keep the container as its own isolation boundary (already true — separate container per engine class is an established pattern here), drop all Linux capabilities beyond what's strictly needed, consider a seccomp profile, and — most importantly for this domain — enforce network egress restrictions at the container/process level (see Pitfall 11), since without Chrome's own sandbox, network access is the highest-value remaining attack surface a hostile page can exploit.
+- Write the resolution query/function as two explicit steps in a fixed order (user-scope lookup by `(client_id, name)` → if found, use it and stop; else system-scope lookup by `(name)`), and unit-test the shadowing case directly: create a system preset and a same-named user preset for one client, assert the client's job resolves to the user preset's `options`/`target_format`, and assert a *different* client with no same-named preset still resolves to the system one.
+- Also test the inverse-looking-but-different case: a client requesting a preset name that has **only** a system-scope entry (no user override) must still resolve successfully — a bug here (e.g., accidentally scoping the system lookup by `client_id IS NULL AND client_id = $1` instead of an `OR`) would make every system preset invisible to every authenticated request.
+- Log/metric the resolution outcome (`resolved_scope=system|user`) at least during initial rollout so scope-precedence bugs are observable, not just silent.
 
 **Warning signs:**
-Treating "we set `--no-sandbox`, it works" as the finish line during implementation, without a follow-up conversation about what compensating controls replace the sandbox's removed protection.
+A client reports "my custom preset isn't being used" despite having created one with the same name as a system preset (classic shadowing-order bug); or, inversely, "system presets don't work for me at all" (classic client_id-filter-too-strict bug).
 
 **Phase to address:**
-The phase implementing DOC-V2-04 (HTML→PDF engine) — flagged in PROJECT.md's own milestone context as "the riskiest item, needs its own safety model," which this pitfall directly substantiates.
+The presets resolution phase — precedence order should be one of the phase's explicit test cases (both directions), not an implicit side effect of however the SQL happens to be written first.
 
 ---
 
-### Pitfall 11: URL-string SSRF validation (the existing `callback_url` pattern) does not transfer to chromium — a rendered page can reach internal/metadata endpoints via a raw IP literal, and DNS-rebinding-style TOCTOU is worse here because the "attacker" (page content) runs repeatedly, not once
+### Pitfall 11: Version field on presets makes "which version resolves" an unstated but load-bearing decision
 
 **What goes wrong:**
-The existing webhook SSRF guard (`internal/api/callbackurl.go`) validates a single client-supplied URL string once, at job-creation time, by resolving its hostname and checking the resolved IP against a blocklist. That pattern does not generalize to HTML→PDF: the "URL" being rendered isn't one client-supplied string, it's an entire HTML document that can contain arbitrarily many `<img src=...>`/`<iframe src=...>`/`fetch()`/`XMLHttpRequest` targets, discovered only at render time, potentially referencing bare IP literals (e.g. `http://169.254.169.254/`) that never go through hostname resolution at all — so a `net.LookupHost`-based check (even if one were bolted onto every discovered URL) wouldn't even apply to the most classic SSRF target, the cloud metadata endpoint, when addressed by IP literal directly.
+Both `presets_system_uq (name, version)` and `presets_user_uq (client_id, name, version)` include `version` in their uniqueness key, and `jobs.preset_version` exists as its own column — meaning the schema explicitly supports **multiple versions of the same preset name coexisting**. A naive `WHERE name = $1` lookup with no `version` filter and no `ORDER BY version DESC LIMIT 1` will either error (if more than one version row exists, depending on how the SQL is written) or silently resolve to whichever version Postgres happens to return first (not guaranteed to be the latest) — a correctness bug that only manifests once an operator creates a second version of an existing preset, which may not happen until well after the presets feature ships and looks "done."
 
 **Why it happens:**
-It's natural to reach for "the SSRF guard we already have" as a starting point, but that guard was built for a single, statically-known-at-creation-time URL (`callback_url`), not for content whose network-reaching behavior is fully attacker-authored and only observable at render time.
+Early testing during the presets phase will likely only ever create one version per preset name (the common case), so a missing `ORDER BY version DESC LIMIT 1` (or missing explicit "at most one active version" semantics) won't surface as a bug until a real operator creates preset v2 in production.
 
 **How to avoid:**
-Don't try to validate URLs discovered inside the HTML at all — block network access at the protocol layer instead, so the check applies uniformly regardless of hostname vs. IP literal, redirect chains, or JS-initiated fetches. The most robust mechanism is to drive Chromium via the DevTools Protocol (e.g. `chromedp`) rather than a pure one-shot `--headless --print-to-pdf` CLI invocation, specifically so the Go code can enable the `Fetch`/`Network` domain and deny every request that isn't a `file://` reference to the job's own already-downloaded input — a genuine fail-closed network guard, not a best-effort URL check. This is a real architectural divergence from the existing exec-only pattern (`runCommand`) used for LibreOffice/libvips, and should be called out explicitly as a design decision rather than discovered mid-implementation. The existing process-group-kill-on-timeout mechanism in `exec.go` still applies to whatever OS process ultimately runs the browser — that part of the hardened-exec convention transfers cleanly even if the invocation shape (long-lived CDP session vs. one-shot argv call) doesn't.
+- Decide and document explicitly: does `preset=<name>` (no version specified) always resolve to the highest active `version`, or does versioning mean something else (e.g., only one row per name is ever "active" at a time, and `version` is purely an audit/history column bumped on every edit, with old versions kept for `job.preset_version` traceability but never independently resolvable)? The DDL's `is_active` column (singular per row, not "latest active") suggests the latter is more likely intended — but this must be a stated design decision, not inferred.
+- If multiple simultaneously-active versions per name are genuinely supported, the resolution query needs an explicit `ORDER BY version DESC LIMIT 1` (or `WHERE is_active` combined with an application-level invariant that at most one version per `(scope, client_id, name)` is ever active) — write a test that creates two versions of the same preset and asserts deterministic resolution.
 
 **Warning signs:**
-A design that only validates `<img src>`/`<a href>` URLs found via a naive string scan of the HTML before rendering — trivially bypassed by anything constructed at runtime via JavaScript (`fetch(atob(...))`, dynamically-built URLs, etc.), since the scan happens before the page's own script has run.
+Resolution behaves correctly in every manual/E2E test (because only one version ever exists in those tests) but the query itself has no explicit ordering — a code-review-only catch, since it won't fail any test until a second version is created.
 
 **Phase to address:**
-The phase implementing DOC-V2-04 — this is the core of the "new safety model" the milestone context already flags as needed; it should be a named design decision (CDP-driven network blocking vs. CLI-only) before implementation starts, not an afterthought.
+The presets resolution phase — the version-resolution rule should be a written decision (added to `PROJECT.md`'s Key Decisions table, matching this project's existing convention) before the resolution query is implemented, not left implicit in whatever `LIMIT 1` behavior Postgres happens to exhibit.
 
 ---
 
-### Pitfall 12: Chromium spawns multiple sub-processes and needs an init reaper — the same class of problem `Dockerfile.document-worker`'s `tini` already solves for `soffice.bin`
+### Pitfall 12: Preset-existence leaks across clients via error message content or status code, breaking the established 404-not-403 convention
 
 **What goes wrong:**
-Headless Chromium isn't a single process — it forks a zygote, GPU process (even headless), and per-tab renderer processes. If the container's PID 1 is the Go worker binary itself (not an init system), crashed/killed Chromium children can be left as unreaped zombies, and — separately — `/dev/shm`'s default Docker size (64MB) is too small for Chromium's shared-memory needs, causing renderer crashes that look like unrelated flakiness rather than a resourcing problem.
+This project already has a hard-won, explicitly-documented convention: "cross-client доступ → 404 (никогда 403)" for API-key-authenticated resources (established in Phase 1, per `PROJECT.md`'s Validated section). Presets are the first *new* resource type added since that convention was set, and per-client (`user`-scope) presets are exactly the kind of resource where it's easy to regress: a naive implementation might return 403 ("this preset exists but isn't yours") instead of 404 ("no such preset"), or — more subtly — return a *different* error message/shape for "preset name doesn't exist at all" vs. "preset name exists but belongs to another client" (e.g., a validation error mentioning the preset's `target_format`/`operation` for the latter case but not the former), which leaks existence information through message content even while nominally returning the same status code.
 
 **Why it happens:**
-This is a well-known Docker+Chromium gotcha in general, but it's specifically relevant here because the project already solved the *identical* problem for LibreOffice's `soffice.bin` child process by making `tini` PID 1 in `Dockerfile.document-worker` — it would be easy to build the new html-worker container without carrying that same fix forward, since Chromium's need for it isn't obvious until it's already causing intermittent failures in production.
+The 404-not-403 rule was established for one resource type (client auth) and its rationale doesn't automatically propagate to a newly-added resource unless someone explicitly re-derives it; and "same status code" is an easier bar to hit in code review than "byte-for-byte same response body for both cases," so message-content leaks are more likely to slip through.
 
 **How to avoid:**
-Reuse the exact `tini`-as-PID-1 pattern from `Dockerfile.document-worker` in the new engine's Dockerfile, and explicitly set `--shm-size` (or pass `--disable-dev-shm-usage` to force Chromium to use `/tmp` instead of `/dev/shm`) in both the Dockerfile/compose config and the Chromium invocation flags — don't rely on only one of the two.
+- Implement preset lookup so that "preset doesn't exist" and "preset exists but belongs to a different client" are **literally the same code path** returning the same fixed message (e.g., `writeError(w, http.StatusNotFound, "preset not found")`) — the SQL query itself should filter by `client_id` (or `scope='system'`) as part of the `WHERE` clause, not as a separate post-lookup ownership check with a distinguishable branch, mirroring how this project already treats cross-client job access (if `GET /v1/jobs/{id}` already does this for jobs, copy that exact pattern rather than re-deriving it for presets).
+- Add a test explicitly asserting response-body equality (not just status-code equality) between "nonexistent preset name" and "preset belonging to another client" — a status-code-only test would pass even with a message-content leak.
 
 **Warning signs:**
-Intermittent renderer crashes under concurrent load that don't reproduce reliably in local single-request testing — the classic signature of an undersized `/dev/shm` only manifesting under real container resource limits.
+Any code path where preset lookup returns the row first and then checks `if preset.ClientID != authenticatedClientID` as a distinguishable branch (versus filtering by client in the query itself) — the review signal is "was the ownership check done in SQL or in Go," since the Go-branch version is the one that tempts a different error message per branch.
 
 **Phase to address:**
-The phase implementing DOC-V2-04, as part of the new Dockerfile/compose wiring.
-
----
-
-### Pitfall 13: Decoupling webhook delivery from the image worker can silently recreate the exact single-point-of-failure it's meant to fix
-
-**What goes wrong:**
-Today, `cmd/worker/main.go` is the *sole* consumer of `queue.QueueWebhook` (weighted `{image: 2, webhook: 1}` in one `asynq.Server`), and `cmd/document-worker/main.go` explicitly and deliberately does **not** register `HandleWebhookDeliver` or include the webhook queue in its `Queues` map — the code comment there says so outright: *"document-worker neither delivers nor signs webhooks (D-06 — cmd/worker remains the sole webhook consumer)."* The milestone's stated goal (SEED-002) is that "deploying any subset of engine-workers doesn't silently lose webhooks" — but the most literal reading of "decouple webhook delivery" (spin up one new dedicated `cmd/webhook-worker` binary/container, remove webhook consumption from `cmd/worker` entirely) just *moves* the single point of failure from "the image worker" to "the one webhook-worker" — deploying that one new process now becomes the new outage window for webhook delivery, which is the exact problem being solved, just relocated.
-
-**Why it happens:**
-"Decoupling" is naturally read as "give it its own dedicated process," but a *single* dedicated process is still a single point of failure; what actually satisfies "survives deploy of any subset of workers" is *redundancy* — multiple independent processes capable of consuming the webhook queue, such that a rolling deploy of any one of them still leaves at least one other consumer running.
-
-**How to avoid:**
-Design the webhook-queue consumer as a horizontally-scalable role from the start (asynq safely supports N independent servers consuming the same queue — this is native, not a workaround), and/or have every engine-class worker (image, document, and future engines) continue to consume the webhook queue redundantly alongside their own engine queue, so that no single deploy event ever drops webhook consumption to zero as long as at least one engine worker is up. A single dedicated webhook-worker with only one replica does *not* satisfy the milestone's own stated goal; make the redundancy requirement explicit in the phase's success criteria, not just "webhook delivery moved to its own binary."
-
-**Warning signs:**
-A design/PR that introduces exactly one new webhook-consuming process and removes webhook consumption from every existing worker — that's a topology change, not a resilience improvement, unless that one process is explicitly run with ≥2 replicas.
-
-**Phase to address:**
-The phase implementing SEED-002 — this should be an explicit topology decision recorded in PROJECT.md's Key Decisions table before implementation, given how easy it is to satisfy the letter of "decouple it" while missing the actual resilience goal.
-
----
-
-### Pitfall 14: The reconciler's webhook-gap sweep is a documented singleton — multi-consumer webhook topology must not duplicate it
-
-**What goes wrong:**
-`internal/reconciler/reconciler.go`'s `Sweeper` handles *both* stale-job recovery and webhook-gap recovery (RECON-04/RECON-05) in one loop, and it runs today as a single goroutine inside `cmd/worker/main.go` only — `cmd/document-worker/main.go` explicitly does not run any sweeper, with a code comment calling out exactly why: *"avoiding a double-sweep race between two independent sweep loops recovering the same stranded job."* If webhook delivery is decoupled into N redundant consumer processes (per Pitfall 13), naively running the existing `Sweeper` in *every* one of those processes reintroduces the double-sweep race this project has already identified and avoided once — now specifically for the webhook-gap sweep, which fires `EnqueueWebhookDeliver` for jobs whose completion webhook was never enqueued.
-
-**Why it happens:**
-It's natural to assume "the process that owns webhook delivery should also own webhook-gap recovery," but the sweeper's webhook-gap-recovery half only needs to run *once* across the whole fleet, regardless of how many processes are consuming the webhook delivery queue — ownership of "consuming tasks" and "the singleton sweep loop that creates tasks" are two different concerns that happened to live in the same binary before this milestone only because there was exactly one webhook-consuming process.
-
-**How to avoid:**
-Decide explicitly where the singleton sweeper lives once webhook consumption is redundant/multi-process: either (a) keep it in exactly one of the N webhook-consumer replicas via some form of leader election / "only replica 0 runs it" convention, or (b) extract the sweeper into its own always-single-instance process entirely separate from the horizontally-scaled webhook queue consumers (cleanest fit with `asynq.Unique`'s existing idempotency guarantees, since the sweeper already relies on enqueue-first + `asynq.ErrDuplicateTask` for safety against *accidental* double-enqueue, but was never designed to tolerate *N sweeper loops racing each other* on the same stranded-job/gap detection queries). Whichever is chosen, it needs to be a named decision, not an implicit side effect of wherever the new webhook-worker code happens to get written.
-
-**Warning signs:**
-Two (or more) `reconciler.NewSweeper(...).Run(ctx)` calls active simultaneously in production — check this explicitly during the phase's integration testing, since the failure mode (duplicate recovery actions on the same stranded job, mitigated only by `asynq.Unique`'s TTL-bounded lock, not by the sweeper's own logic) may not surface in a low-concurrency local test.
-
-**Phase to address:**
-The phase implementing SEED-002, as a direct consequence of resolving Pitfall 13's topology decision.
+The presets resolution phase (specifically, whichever plan wires `preset=<name>` into `POST /v1/jobs`) — this is a one-line SQL-filter decision made once at implementation time; retrofitting it later requires an audit of every place preset lookup happens (CLI included — `cmd/manage-presets` itself should presumably also enforce scope-appropriate visibility, though the CLI is likely operator-trusted and out of the client-facing 404 concern).
 
 ---
 
 ## Technical Debt Patterns
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|--------------------|-----------------|------------------|
-| Skip the CFB-internal stream-name distinction; reject all CFB-shaped uploads with one generic message | Ships DOC-V2-02 faster, avoids hand-rolling a CFB parser | Internal clients can't tell "unsupported legacy format" from "just needs a password removed," generating avoidable support tickets | Only as a documented interim step, if the CFB parser (Pitfall 6) is scoped as a separate follow-up, not silently dropped |
-| Validate PDF/A only via `%PDF-` magic bytes + a hardcoded `SelectPdfVersion`, skip the OutputIntent identifier grep (Pitfall 8) | Zero extra code | Silently ships a feature that claims "PDF/A support" without any signal distinguishing "attempted" from "actually tagged correctly" | Never — the OutputIntent grep is cheap enough that skipping it isn't a real time saving |
-| Use a one-shot `chromium --headless --print-to-pdf` CLI call (matching the existing `runCommand` pattern) instead of a CDP/`chromedp` session | Reuses the existing hardened-exec pattern verbatim, less new code | Cannot enforce fail-closed network blocking at the protocol layer (Pitfall 11) — falls back to weaker, bypassable URL-string filtering | Only if network egress from the chromium process is independently blocked at the OS/container level (e.g. a network namespace with no route out) rather than relied upon in application code |
-| Give the webhook queue a single new dedicated consumer process instead of redundant multi-consumer topology | Simpler initial implementation, matches "one engine, one binary" convention | Recreates the single point of failure SEED-002 is meant to eliminate (Pitfall 13) | Never, given the milestone's explicit stated goal |
+|----------|-------------------|-----------------|------------------|
+| Skip disk-space mitigation in CI, rely on runner defaults | One less workflow step to write | Recurring flaky-build failures once LibreOffice/Chromium images are added to the build tier — this project has already hit this exact failure locally | Never — this project has direct evidence (13-03-SUMMARY.md) the stack exceeds comfortable disk headroom |
+| Use `docker compose build` without buildx/gha cache wiring | Faster to write, "just works" | Every CI run pays full LibreOffice/Chromium build cost; burns both disk and minutes on every push | Only for a throwaway spike/prototype workflow, never the shipped CI pipeline |
+| Lock `presets.options` acceptance to "validated once at preset-creation time only" | Simpler resolution code path (no re-validation call) | Silently diverges from the project's own "never trust stored client-originated bytes" invariant; allowlist tightening has no retroactive effect | Never — this directly contradicts an established project-wide security invariant (OPTS-01/02) |
+| Return 403 for cross-client preset access "just for this one case, it's simpler" | Slightly more semantically "correct" HTTP status per REST purists | Breaks the existing, deliberate 404-only convention; leaks preset existence to unauthenticated-for-that-resource callers | Never — this project explicitly rejected 403 for this exact reason in Phase 1 |
+| Enable `-race` in CI without an explicit `-timeout` override | One less flag to reason about | Silent flakiness once `-race` overhead + CI runner throttling push any future real-time-based test past the 10-minute default | Acceptable only until the first `-race`-tier test exceeds ~5 minutes; set the explicit flag proactively instead of waiting for the first timeout |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|-----------------|-------------------|
-| LibreOffice cross-format filters | Assuming the PDF-export filter names (`writer_pdf_Export` etc.) generalize to non-PDF targets | Use the distinct ODF (`writer8`/`calc8`/`impress8`) and OOXML (`MS Word 2007 XML` etc.) filter names, verified per-pair against the actual deployed LibreOffice version |
-| LibreOffice PDF/A filter options | Setting only `SelectPdfVersion`, assuming it implies font embedding | Always pair `SelectPdfVersion` with `EmbedStandardFonts: true` for any PDF/A request |
-| Chromium in Docker | Copying generic "add `--no-sandbox --disable-dev-shm-usage`" advice without addressing what replaces the sandbox's removed protection | Layer container-level isolation (capabilities, network egress blocking) as compensating controls, not just flag-copying |
-| asynq multi-consumer webhook queue | Assuming "decoupled" means "exactly one new process" | Design for N-replica redundancy from the start; verify with an explicit rolling-deploy test that kills one replica while traffic is in flight |
-| Reconciler sweeper + multi-process webhook consumers | Running the existing `Sweeper` in every webhook-consuming replica | Keep exactly one active sweeper instance fleet-wide; make this an explicit, tested invariant |
+| GitHub Actions + Docker Buildx | Assuming `docker compose build` uses the `type=gha` cache automatically | Use `docker buildx bake` with explicit `cache-from`/`cache-to: type=gha,scope=<service>` per image, or build each image individually via `docker/build-push-action` |
+| GitHub Actions + docker-compose healthchecks | Trusting `depends_on: condition: service_healthy` alone as "the stack is ready for tests" | Add an explicit stack-readiness poll against `GET /healthz` (already exists, already pings Postgres/Redis/S3) before starting the E2E test run |
+| GitHub Actions runner host + compose network (webhook receiver reachability) | Forgetting to carry the existing `extra_hosts: host.docker.internal:host-gateway` pattern (already used for `api`, `webhook-worker-1/2`, `chromium-worker` in `docker-compose.e2e.yml`) into CI, where `host-gateway` resolution behavior can differ between GitHub-hosted Linux runners and local Docker Desktop | Explicitly verify `host.docker.internal:host-gateway` resolves correctly on `ubuntu-latest` runners in a smoke step before trusting it in the full E2E run — Linux Docker Engine (which GitHub-hosted Linux runners use, unlike Docker Desktop's VM) needs the same `--add-host` mechanism, which Compose's `extra_hosts` already provides, but this is worth a one-time explicit CI verification rather than an assumption carried over from local testing |
+| MinIO presigned URLs + `E2E_S3_DIAL_ADDR` rewrite | Assuming the CI runner's `127.0.0.1:9100` port mapping matches what worked locally without re-verifying the compose port publish (`9100:9000`) survives unchanged in the CI compose invocation | Keep the exact same `docker-compose.yml`/`docker-compose.e2e.yml` port mappings between local and CI (already the case, since CI should invoke the same compose files) — do not introduce a CI-specific compose override that changes port numbers, since `E2E_S3_DIAL_ADDR=127.0.0.1:9100` is hardcoded in the E2E harness's documented env-var contract |
+| `cmd/manage-presets` CLI + auth scoping | Building the CLI without the same client-scoping discipline as `cmd/manage-clients`, e.g. allowing an operator to accidentally create a `user`-scope preset for the wrong `client_id` with no confirmation/lookup-by-name safety net | Mirror `cmd/manage-clients`' existing UX conventions (create/add-key/revoke-style explicit subcommands, confirmation of which client a scoped action targets) rather than inventing a new CLI interaction pattern |
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|-----------------|
-| Chromium `/dev/shm` starvation under concurrent conversion load | Intermittent renderer crashes that don't reproduce in low-concurrency local testing | Set `--shm-size` explicitly in compose/Dockerfile and pass `--disable-dev-shm-usage` | Breaks specifically under concurrent HTML→PDF jobs on the default Docker 64MB `/dev/shm`, not under single-job local testing |
-| Complex documents (large spreadsheets, deeply nested HTML/CSS) exhausting `DOCUMENT_ENGINE_TIMEOUT`/the new HTML engine's timeout | Jobs marked failed/terminal on timeout rather than a clean error; accepted as residual risk already for DOC-V2-05 | Existing `ENGINE_TIMEOUT`-style bound + concurrency cap is the only mitigation currently planned; treat as pre-existing accepted risk, don't attempt content-complexity analysis in this milestone | Scales with per-job complexity, not request volume — a single sufficiently complex document can consume the full timeout budget regardless of overall load |
-| Weighted asynq queue starvation if new queue weights are copy-pasted without re-deriving them for the new topology | Webhook or document jobs experience longer tail latency than their retry schedule assumes | Explicitly re-derive per-queue weights (not copy `cmd/worker`'s `{image: 2, webhook: 1}` verbatim) for whatever new multi-process topology SEED-002 lands on | Becomes visible only under simultaneous load on multiple queues sharing a process — won't show up in single-queue testing |
+| Preset resolution re-running full opts validation on every job creation | Slightly higher CPU per job-creation request | Acceptable — this is the deliberate trade-off Pitfall 9 requires (correctness over micro-optimization); the existing opts-validation call is already fast (in-memory struct parsing, no I/O) | Not expected to break at this project's internal-clients scale; would only matter at request volumes far beyond "internal services only" |
+| Row-locking every preset read to close the TOCTOU window from Pitfall 8 | Job-creation throughput drops under concurrent load because a rarely-written, often-read table is serialized like a rarely-read, often-written one | Do not lock preset reads; accept the narrow race and protect the actual invariant (job-row snapshot) instead | Would manifest as job-creation latency climbing under load if implemented — a self-inflicted trap, not a scale threshold to actually reach |
+| 5-image CI build tier run on every single push (not just PRs/main) | CI minutes consumption grows linearly with push frequency even for unrelated doc-only commits | Path-filter the heaviest tiers (Docker build + live E2E) to skip on changes that touch only non-code paths (`.planning/**`, `*.md`), while keeping gofmt/vet/build/test on every push | Becomes noticeable once the team's push cadence is high enough that CI minutes/cost become a visible line item — worth deciding proactively given this project's demonstrated multi-commit-per-day cadence |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Marshaling client-supplied `opts` map directly into the LibreOffice filter-options JSON | Attacker-controlled UNO filter properties (e.g. output encryption password, arbitrary export properties) reach `soffice`, not classic shell injection since `exec.Command` uses argv arrays, but a real property-injection surface | Parse `opts` into a small closed Go struct with an allow-list of known keys server-side; build the filter-options JSON purely from server-side constants keyed off validated fields — never pass client bytes through |
-| Relying on URL-string SSRF validation (the existing `callback_url` pattern) for HTML→PDF content | A rendered page can reach internal/metadata endpoints via raw IP literals or JS-constructed URLs never present as a static string, bypassing any pre-render scan | Block network access at the protocol layer (CDP `Fetch`/`Network` domain interception, deny-all-except-`file://`) rather than validating URLs found in the HTML |
-| Treating `--no-sandbox` as a pure performance flag | Removes Chromium's internal defense against a hostile-page renderer-process exploit, with no compensating control | Layer container-level hardening (dropped capabilities, network egress blocking) explicitly as the replacement isolation boundary |
-| Rejecting CFB-shaped uploads without distinguishing legacy-binary from encrypted-modern | Not itself a security hole, but a diagnostic-quality gap that can mask genuinely malicious crafted-CFB uploads behind the same generic message as an ordinary password-protected file | Parse the CFB directory stream names to give an accurate, specific rejection reason (also surfaces malformed/anomalous CFB structures as a distinct case worth logging) |
-
-## UX Pitfalls
-
-| Pitfall | User Impact | Better Approach |
-|---------|--------------|-------------------|
-| Generic "unrecognized file content" 422 for both legacy-binary and password-protected uploads | Internal client teams can't tell whether their upload needs "resave in a supported format" vs. "remove the password" — leads to avoidable support tickets | Distinct, specific error messages for each case (Pitfall 5) |
-| Cross-format conversion presented as "supported" with no fidelity caveat | Internal consumers may assume archival-grade round-trip equivalence and be surprised by dropped tracked-changes, alt-text, or unsupported spreadsheet functions | Document explicitly (in API docs / response, not just internal docs) that cross-format conversion is best-effort structural translation |
-| PDF/A output silently not-actually-conformant (Pitfall 7/8) | A client relying on the PDF/A flag for genuine long-term archival compliance gets a document that looks right but fails real conformance checking downstream | Document precisely what the PDF/A validation does and doesn't guarantee; don't imply full ISO 19005 conformance if only doing a magic-bytes/OutputIntent sanity check |
+| Presets bypass the validated-opts pipeline (Pitfall 9) | Reintroduces the exact class of injection risk OPTS-01/02 was built to close — client/operator-influenced bytes (via CLI-entered preset) reaching engine argv/CSS without allowlist validation | Route `presets.options` through the same `ParseDocOpts`/`ParseHTMLOpts` call used for ad-hoc opts, with no bypass branch |
+| Cross-client preset existence leak (Pitfall 12) | Minor information disclosure (confirms a named preset exists and is used by another internal client) — low severity given internal-only clients, but inconsistent with the project's established security posture | Filter by `client_id` in the SQL `WHERE` clause, not as a post-lookup Go-side branch; identical error body for "not found" and "not yours" |
+| `WEBHOOK_ALLOW_PRIVATE_IPS`/`WEBHOOK_ALLOW_INSECURE_HTTP` relaxations in `docker-compose.e2e.yml` accidentally reused outside the E2E CI job | If a CI workflow file mistakenly builds/deploys using `docker-compose.e2e.yml` values outside the E2E job (e.g., a copy-paste into a future deploy step), the SSRF guard relaxation escapes the test-only context it was designed for | Keep the E2E-only compose override strictly confined to the E2E CI job's `docker compose -f docker-compose.yml -f docker-compose.e2e.yml` invocation; never let a later CI job (e.g., an image-publish step) reference the `.e2e.yml` override file at all |
+| Secrets (e.g. `API_KEY_SALT`, `WEBHOOK_SIGNING_SECRET`) currently hardcoded as `dev-only-change-me-in-real-deploys` literals directly in `docker-compose.yml`/`docker-compose.e2e.yml` get echoed into CI logs verbatim if a workflow step dumps env/config | Low risk today (values are explicitly dev-only placeholders, not real secrets) but establishes a bad habit if CI workflows print environment dumps for debugging | Keep using the existing dev-only placeholder convention for CI's throwaway stack (no real secret material belongs in CI at all for this internal-only, non-deployed-from-CI service), but avoid workflow steps that dump full `env` or full compose config to logs as a matter of hygiene |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Cross-format conversion (DOC-V2-01):** Often missing — target-format-aware output extension and validator (not hardcoded `.pdf`); verify by grepping `internal/convert/libreoffice.go` for any remaining literal `".pdf"` string.
-- [ ] **OLE-CFB pre-flight (DOC-V2-02):** Often missing — distinguishing legacy-binary from encrypted-modern via internal stream names, not just the outer CFB magic; verify by testing both a genuine legacy `.doc` and a password-protected `.docx` and confirming distinct error messages.
-- [ ] **PDF/A export (DOC-V2-03):** Often missing — `EmbedStandardFonts` forced alongside `SelectPdfVersion`, and a validator beyond bare `%PDF-` magic bytes; verify by opening a produced PDF/A file and checking font embedding, and grepping for the `/GTS_PDFA*` OutputIntent identifier.
-- [ ] **HTML→PDF engine (DOC-V2-04):** Often missing — protocol-level network blocking (not URL-string filtering), `tini`-as-PID-1, and explicit `/dev/shm` sizing; verify by attempting to render an HTML page containing `<img src="http://169.254.169.254/">` and a JS `fetch()` to an arbitrary internal address, and confirming both fail closed.
-- [ ] **Webhook decoupling (SEED-002):** Often missing — actual redundancy (≥2 independent consumers of the webhook queue) rather than a single relocated consumer, and a single surviving sweeper instance; verify with a rolling-deploy test that kills one webhook-consuming replica mid-traffic and confirms delivery continues, plus a check that only one sweeper instance is active fleet-wide.
+- [ ] **CI Docker image build tier:** Often missing disk-space mitigation — verify by running the exact same 5-image build sequence against a disk-constrained environment (or explicitly checking runner disk usage mid-build via `df -h`) before declaring the tier stable, not just confirming it passed once.
+- [ ] **CI live E2E tier:** Often missing `if: always()` teardown and `if: failure()` log capture — verify by deliberately breaking one assertion and confirming the workflow still cleans up the stack and produces a diagnosable log artifact.
+- [ ] **Presets resolution:** Often missing re-validation of stored `options` against the current allowlist — verify by manually inserting a preset row with a field the current `ParseXOpts` would reject (e.g., an out-of-range `margin_mm`) and confirming job creation rejects it, not silently accepts it.
+- [ ] **Presets cross-client isolation:** Often missing response-body-identical 404s — verify with a test comparing full response bytes (not just status code) between "preset name doesn't exist" and "preset exists for a different client."
+- [ ] **`-race` CI gate:** Often missing explicit `-timeout` override — verify the workflow file's `go test` invocation includes `-timeout` explicitly rather than relying on the 10-minute default, and that it was chosen with headroom above the tier's actual measured duration under `-race`.
+- [ ] **GHA build cache:** Often "wired up" but never verified to actually hit — verify by running the same workflow twice in a row with no changes and confirming build time drops substantially and `CACHED` layers appear in the log on the second run.
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
-|---------|-----------------|------------------|
-| Hardcoded `.pdf` assumptions shipped and broke non-PDF targets | LOW | Generalize `producedPath`/`validatePDF` to be target-format-aware; existing test suite (`libreoffice_test.go`) already has infrastructure to extend per-pair |
-| PDF/A export shipped without font embedding forced | LOW | Add `EmbedStandardFonts: true` to the hardcoded PDF/A filter-options constant; no schema/API change needed since this is a server-side-only constant, not client-controlled |
-| `opts` naively pass-through into filter-options JSON, discovered post-merge | MEDIUM | Requires a follow-up PR introducing the closed struct + allow-list validation, plus an audit of any already-issued jobs that may have exercised the unguarded path |
-| Webhook decoupling shipped as a single non-redundant consumer | MEDIUM | Add replica count / a second consumer path without needing to re-architect the queue itself, since asynq already supports N consumers natively — this is a deployment-topology fix, not a code rewrite |
-| Double-sweeper race discovered in production after webhook decoupling | HIGH | Requires coordinated fix across whichever processes run the sweeper (removing it from N-1 of them, or extracting to a dedicated singleton process) plus an audit of `job_events`/`webhook_deliveries` for any duplicate recovery actions that occurred in the interim |
+|---------|----------------|------------------|
+| Disk exhaustion discovered only after CI ships | LOW | Add a disk-cleanup step (`docker system prune -af` or a free-disk-space marketplace action) before the build tier; no code changes needed, just workflow-file edits |
+| Cache backend not actually being used | LOW-MEDIUM | Switch `docker compose build` calls to `docker buildx bake`/`docker/build-push-action` with explicit `cache-from`/`cache-to`; re-run twice to confirm hit rate before considering it fixed |
+| Preset resolution shipped without re-validation (Pitfall 9) | MEDIUM | Add the missing `ParseXOpts` call at the resolution chokepoint; audit any presets created in the interim for now-invalid fields via a one-off `cmd/manage-presets validate`-style pass before they're used by a real job |
+| Scope-precedence bug shipped backwards (system-before-user) | MEDIUM | Fix the lookup order; audit `job_events`/job history for any jobs that silently resolved to the wrong scope's preset during the bug window, since this affects already-completed jobs' actual behavior retroactively, not just future ones |
+| Cross-client preset existence leak shipped (403 or distinguishable message) | LOW | Fix the SQL filter/error-message unification; this is an information-disclosure issue with internal-only clients as the blast radius, not a data-loss issue — no data recovery needed, just a code fix and a follow-up audit of whether the leaked information was actually observed/logged anywhere |
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
-|---------|--------------------|----------------|
-| Hardcoded `.pdf` output assumptions | DOC-V2-01 phase | Grep for literal `.pdf` in `internal/convert/libreoffice.go`; test all 6 cross-format pairs end-to-end |
-| LibreOffice fidelity loss (silent, not a bug) | DOC-V2-01 phase | Documentation review, not code — confirm API docs state best-effort conversion |
-| Filter-name matrix correctness | DOC-V2-01 phase | Live E2E test of all cross-format pairs against the actual deployed LibreOffice version |
-| Cheap ZIP-based output validity check | DOC-V2-01 phase | Confirm `SniffContainer` (or equivalent) is called on the *output*, asserting expected target format |
-| CFB legacy-vs-encrypted distinction | DOC-V2-02 phase | Test both a genuine legacy `.doc` and a password-protected `.docx`, confirm distinct 422 messages |
-| Zero-new-deps vs. hand-rolled CFB parser decision | DOC-V2-02 phase | Explicit Key Decision logged in PROJECT.md before implementation, not discovered mid-PR |
-| Font embedding for PDF/A | DOC-V2-03 phase | Inspect produced PDF/A file's embedded font list |
-| PDF/A conformance validation honesty | DOC-V2-03 phase | Confirm validator scope (OutputIntent grep, not full veraPDF) is documented as a residual-risk decision |
-| `opts` injection surface | DOC-V2-03 phase | Security review gate before merge; confirm no client bytes reach the filter-options string directly |
-| Chromium sandbox/container hardening | DOC-V2-04 phase | Container capability/network audit as part of phase review |
-| Chromium network blocking (SSRF-equivalent) | DOC-V2-04 phase | Test rendering HTML with an `<img src>` to a private/metadata IP literal and a JS `fetch()` to an internal address; confirm both fail closed |
-| Chromium zombie processes / `/dev/shm` sizing | DOC-V2-04 phase | Load test with concurrent conversions; confirm no orphaned processes accumulate and no shm-related crashes occur |
-| Webhook decoupling redundancy | SEED-002 phase | Rolling-deploy test killing one webhook-consuming replica mid-traffic; confirm delivery continues |
-| Reconciler sweeper singleton constraint | SEED-002 phase | Confirm exactly one active sweeper instance fleet-wide after the new topology lands |
+|---------|-------------------|----------------|
+| fakeEnqueuer data race (v1.3 tech debt, prerequisite for `-race` CI gate) | Tech-debt cleanup phase (must land before the `-race` CI phase, per the milestone's own stated dependency ordering) | `go test -race ./internal/reconciler/...` passes clean with zero race detector reports |
+| Runner disk exhaustion (5-image build) | CI phase: Docker image build tier | Build tier passes on a fresh/cold-cache CI run with disk-mitigation step present; re-run without the mitigation step once to confirm it actually reproduces the local failure mode from 13-03-SUMMARY.md, then keep it fixed |
+| Healthcheck-vs-readiness gap | CI phase: live E2E tier | E2E tier passes on 5+ consecutive cold-start CI runs (not just warm/cached ones) with no `connection refused` flakes |
+| `docker compose build` bypassing gha cache | CI phase: Docker image build tier | Two consecutive runs with no Dockerfile changes show substantially reduced build time and `CACHED` layers in logs on the second run |
+| 10GB cache budget thrashing across 5 images | CI phase: Docker image build tier | Cache usage dashboard checked after first several CI runs; per-image cache scopes confirmed non-colliding |
+| Zombie stacks / lost diagnostics on failure | CI phase: live E2E tier | Deliberately-failing test run still produces a teardown and a compose-logs artifact |
+| Superseded runs piling up | CI phase: workflow-file introduction | Pushing two commits in quick succession to the same branch shows the first run auto-cancelled |
+| `-race` + default 10-minute timeout | CI phase: `-race` gate | Workflow's `go test` invocations all carry an explicit `-timeout` flag; `-race` tier duration measured and confirmed with headroom below that timeout |
+| Preset resolution TOCTOU | Presets phase: resolution + job creation | Explicit written decision recorded (accept the narrow race, protect the job-row snapshot instead) plus a test confirming already-created jobs are unaffected by later preset edits |
+| Preset opts trust boundary (never trust stored opts) | Presets phase: resolution + job creation | Test inserting a preset with a since-invalidated field and confirming job creation rejects it via the same `ParseXOpts` path used for ad-hoc opts |
+| Scope precedence (system vs. user) | Presets phase: resolution logic | Test covering both shadowing (user overrides system) and fallback (no user override, system resolves) directions |
+| Version resolution ambiguity | Presets phase: resolution logic | Written decision on version-resolution semantics recorded before implementation; test with two versions of one preset confirming deterministic resolution |
+| Cross-client preset existence leak | Presets phase: `preset=<name>` wiring into `POST /v1/jobs` | Test asserting byte-identical response bodies for "preset not found" vs. "preset belongs to another client" |
 
 ## Sources
 
-- `internal/convert/libreoffice.go`, `internal/convert/docsniff.go`, `internal/convert/sniff.go`, `internal/convert/exec.go` (this codebase — current LibreOffice converter, ZIP-based office-format sniffing, hardened process exec)
-- `internal/api/handlers.go`, `internal/api/callbackurl.go` (this codebase — existing content-detection dispatch flow and SSRF-guard pattern for `callback_url`)
-- `internal/queue/queue.go`, `internal/reconciler/reconciler.go`, `internal/webhook/deliver.go` (this codebase — asynq queue/task topology, reconciler sweeper singleton behavior, webhook delivery HTTP client)
-- `cmd/worker/main.go`, `cmd/document-worker/main.go` (this codebase — current webhook-queue consumer wiring and the explicit "sole webhook consumer" / "no sweeper here" comments)
-- `.planning/PROJECT.md` (milestone v1.3 scope, prior accepted-risk decisions, DOC-V2-05 residual risk pattern)
-- [LibreOffice Help: PDF Export Command Line Parameters](https://help.libreoffice.org/latest/en-US/text/shared/guide/pdf_params.html) — `SelectPdfVersion` value mapping to PDF/A-1b/2b/3b, `EmbedStandardFonts` default `false`
-- [LibreOffice Help: File Conversion Filter Names](https://help.libreoffice.org/latest/en-US/text/shared/guide/convertfilters.html) — `writer8`/`calc8`/`impress8` and "MS ... 2007 XML" filter name families
-- [Didier Stevens: Encrypted OOXML Documents](https://blog.didierstevens.com/2018/06/07/encrypted-ooxml-documents/) — CFB header shared between legacy binary and encrypted OOXML; `EncryptedPackage`/`EncryptionInfo` stream structure
-- [SANS ISC: Encrypted Office Documents](https://isc.sans.edu/diary/Encrypted+Office+Documents/23774) — CFB `D0 CF 11 E0 A1 B1 1A E1` header vs. ZIP `50 4B 03 04` header
-- [Aspose: Detect File Format of Encrypted OOXML](https://docs.aspose.com/cells/java/detect-file-format-of-encrypted-office-open-xml-ooxml-files/) — corroborating CFB-wrapped-encrypted-OOXML detection approach
-- [veraPDF](https://verapdf.org/) and [veraPDF CLI Validation docs](https://docs.verapdf.org/cli/validation/) — authoritative PDF/A conformance checking vs. metadata-claim-only checks
-- [chromedp/docker-headless-shell](https://github.com/chromedp/docker-headless-shell), [Baeldung: Run Google Chrome headless in Docker](https://www.baeldung.com/ops/docker-google-chrome-headless) — `--disable-dev-shm-usage`, `--no-sandbox`, zombie-process/`tini` guidance for headless Chromium in Docker
-- [chromedp/chromedp GitHub issue #207](https://github.com/chromedp/chromedp/issues/207) — Docker sandboxing considerations for chromedp specifically
-- [hibiken/asynq Wiki: Queue Priority](https://github.com/hibiken/asynq/wiki/Queue-Priority) — weighted queue semantics, `StrictPriority`, multi-server same-queue consumption behavior (community-verified, matches this project's existing weighted-queue usage in `cmd/worker/main.go`)
-- Community bug reports (GitHub `Euro-Office/DocumentServer#114`, bugs.documentfoundation.org, ask.libreoffice.org, forum.openoffice.org threads) — LibreOffice docx↔odt and xlsx↔ods fidelity-loss specifics (MEDIUM confidence, not official LO guarantees)
+- `.planning/milestones/v1.3-phases/13-cross-format-conversion-input-safety/13-03-SUMMARY.md` — direct project evidence of Docker Desktop VM disk exhaustion during this exact multi-image build sequence, resolved via `docker builder prune -a`/`docker image prune -a`. HIGH confidence (primary source, this repo's own history).
+- `docker-compose.yml`, `docker-compose.e2e.yml` — healthcheck timing, resource limits (`chromium-worker` shm_size/2g, `document-worker`/`worker` 1g), existing `host.docker.internal:host-gateway` pattern, E2E-only SSRF-guard relaxation scope. HIGH confidence (primary source).
+- `internal/db/migrations/0001_init.sql` — presets/jobs DDL: scope model (`system`/`user`), uniqueness constraints, `is_active`/`version` columns, `jobs.preset_name`/`preset_version`/`options` snapshot columns. HIGH confidence (primary source).
+- `internal/reconciler/reconciler_soak_test.go`, `internal/reconciler/reconciler_test.go` (fakeEnqueuer) — real-wall-clock soak test pattern, `DATABASE_URL`-gated skip guard, existing unguarded-race tech debt referenced in `PROJECT.md`. HIGH confidence (primary source).
+- [GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) — 14GB usable disk / ~22GB free on standard `ubuntu-latest` runners. MEDIUM-HIGH confidence (official docs, current).
+- [`ubuntu-latest` runner disk space reduced — discussion #9329](https://github.com/actions/runner-images/discussions/9329) — confirms disk headroom on standard runners is tighter than commonly assumed and has trended smaller over time. MEDIUM confidence (official repo discussion, not formal docs, but authoritative source).
+- [Docker Docs — GitHub Actions cache backend](https://docs.docker.com/build/cache/backends/gha/) — `type=gha` cache backend behavior, `mode=max` vs `mode=min`, and that it must be wired explicitly (not automatic under `docker compose build`). HIGH confidence (official Docker docs).
+- [GitHub Changelog — Actions cache size can now exceed 10GB per repository (2025-11-20)](https://github.blog/changelog/2025-11-20-github-actions-cache-size-can-now-exceed-10-gb-per-repository/) — confirms 10GB is the *default*, configurable but not automatically raised; teams must not assume extra headroom without checking repo settings. MEDIUM-HIGH confidence (official changelog).
+- Go standard toolchain behavior: `go test`'s default `-timeout` is 10 minutes when unspecified — well-established stdlib/tooling behavior (`go help testflag`). HIGH confidence (documented Go tooling behavior).
 
 ---
-*Pitfalls research for: OctoConv v1.3 Document Class v2 (cross-format LibreOffice conversion, OLE-CFB detection, PDF/A export, chromium HTML→PDF engine, decoupled webhook delivery)*
-*Researched: 2026-07-10*
+*Pitfalls research for: OctoConv v1.4 (GitHub Actions CI + live E2E, presets mechanism)*
+*Researched: 2026-07-12*
