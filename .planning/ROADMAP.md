@@ -98,7 +98,11 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
   3. A client-scoped preset shadows a system preset of the same name for its owning client (scope-precedence lookup), and system presets remain usable by any client.
   4. Supplying `preset` together with explicit `target_format`/`opts` returns 422 (mutually exclusive); a nonexistent, inactive, or cross-client preset returns the same 422 with no existence leak (SQL `WHERE client_id` filter, not a post-lookup Go branch).
   5. Opts resolved from a preset are re-run through the same fail-closed `ParseDocOpts`/`ParseHTMLOpts` validation on every use — stored opts are never trusted, with no bypass branch.
-**Plans**: TBD
+**Plans**: 4 plans
+- [ ] 18-01-PLAN.md — internal/presets package (resolution query, CRUD) + jobs provenance columns [wave 1]
+- [ ] 18-02-PLAN.md — cmd/manage-presets CLI + write-time opts validation [wave 2]
+- [ ] 18-03-PLAN.md — handleCreateJob preset resolution (XOR, no-leak, re-validation, provenance) + PresetRepo interface [wave 2]
+- [ ] 18-04-PLAN.md — live compose acceptance hard gate (SC2/SC3/SC4/SC5) [wave 3]
 
 ### Phase 19: CI Pipeline
 **Goal**: Every push/PR is validated automatically, escalating from a cheap gate up to a live compose E2E, so the full v1.4 codebase (presets included) is exercised green from the pipeline's first run.
