@@ -11,6 +11,7 @@ import (
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/presets"
 )
 
 // Repo is the subset of the jobs repository the API depends on.
@@ -18,6 +19,14 @@ type Repo interface {
 	Create(ctx context.Context, p jobs.CreateParams) (uuid.UUID, error)
 	Get(ctx context.Context, id uuid.UUID) (*jobs.Job, error)
 	Outputs(ctx context.Context, id uuid.UUID) ([]jobs.Output, error)
+}
+
+// PresetRepo is the narrow, interface-segregated subset of the presets
+// repository handleCreateJob depends on (D-09): resolution only. The
+// pre-Create active re-check (Pitfall 8) re-uses this SAME Resolve method
+// rather than adding a second method to the interface.
+type PresetRepo interface {
+	Resolve(ctx context.Context, clientID uuid.UUID, name string) (*presets.Preset, error)
 }
 
 // Storage is the subset of the storage client the API depends on.
@@ -53,6 +62,7 @@ type Server struct {
 	repo          Repo
 	storage       Storage
 	queue         Enqueuer
+	presets       PresetRepo
 	resolver      auth.ClientResolver
 	health        HealthDeps
 	maxUploadByte int64
@@ -84,8 +94,9 @@ type Config struct {
 // NewServer builds an API server. resolver authenticates every /v1 request
 // (see routes.go); it is a narrow interface, keeping interfaces positional
 // and Config reserved for tunables only. health carries the three
-// dependency pingers /healthz probes (OBS-02).
-func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientResolver, health HealthDeps, cfg Config) *Server {
+// dependency pingers /healthz probes (OBS-02). presets is the narrow
+// PresetRepo used by handleCreateJob to resolve preset=<name> (D-09).
+func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, resolver auth.ClientResolver, health HealthDeps, cfg Config) *Server {
 	if cfg.PresignTTL == 0 {
 		cfg.PresignTTL = 15 * time.Minute
 	}
@@ -108,6 +119,7 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, resolver auth.ClientR
 		repo:                         repo,
 		storage:                      storage,
 		queue:                        queue,
+		presets:                      presets,
 		resolver:                     resolver,
 		health:                       health,
 		maxUploadByte:                cfg.MaxUploadBytes,
