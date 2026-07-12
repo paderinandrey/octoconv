@@ -72,7 +72,7 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 
 - [x] **Phase 17: Tech Debt Cleanup** — dead webhook wiring removed, fakeEnqueuer race-safe, image E2E test added (unblocks CI tiers 2 & 4) — completed 2026-07-12
 - [x] **Phase 18: Presets** — named server-side presets: `cmd/manage-presets` CLI + `preset=<name>` job creation, activating the dormant `presets` DDL — completed 2026-07-12
-- [ ] **Phase 19: CI Pipeline** — 4-tier GitHub Actions (gate → `-race` → 5-image Docker build → live compose E2E), validating the full v1.4 codebase on first run
+- [x] **Phase 19: CI Pipeline** — 4-tier GitHub Actions (gate → `-race` → 5-image Docker build → live compose E2E), validating the full v1.4 codebase on first run
 
 #### Phase Details
 
