@@ -23,9 +23,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Tech Debt
 
-- [ ] **DEBT-06**: Мёртвая webhook-обвязка (webhook.NewRepo/NewDeliverer + чтение WEBHOOK_SIGNING_SECRET) удалена из cmd/document-worker и cmd/chromium-worker
-- [ ] **DEBT-07**: fakeEnqueuer race-safe (mutex/atomic на счётчиках вызовов) — `go test ./internal/reconciler/... -race` чистый
-- [ ] **DEBT-08**: Image (libvips) E2E-тест в internal/e2e — полный цикл upload → convert → download → webhook для image-движка
+- [x] **DEBT-06**: Мёртвая webhook-обвязка (webhook.NewRepo/NewDeliverer + чтение WEBHOOK_SIGNING_SECRET) удалена из cmd/document-worker и cmd/chromium-worker
+- [x] **DEBT-07**: fakeEnqueuer race-safe (mutex/atomic на счётчиках вызовов) — `go test ./internal/reconciler/... -race` чистый
+- [x] **DEBT-08**: Image (libvips) E2E-тест в internal/e2e — полный цикл upload → convert → download → webhook для image-движка
 
 ## v2 Requirements
 
@@ -60,9 +60,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DEBT-06 | Phase 17 | Pending |
-| DEBT-07 | Phase 17 | Pending |
-| DEBT-08 | Phase 17 | Pending |
+| DEBT-06 | Phase 17 | Complete |
+| DEBT-07 | Phase 17 | Complete |
+| DEBT-08 | Phase 17 | Complete |
 | PRST-01 | Phase 18 | Pending |
 | PRST-02 | Phase 18 | Pending |
 | PRST-03 | Phase 18 | Pending |
