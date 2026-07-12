@@ -23,7 +23,6 @@ import (
 	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
-	"github.com/apaderin/octoconv/internal/webhook"
 	"github.com/apaderin/octoconv/internal/worker"
 )
 
@@ -47,13 +46,6 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 
-	// document-worker neither delivers nor signs webhooks — webhook delivery
-	// now lives solely in cmd/webhook-worker (D-03/D-07, Phase 16), so a
-	// missing signing secret here is non-fatal; it is passed through to
-	// worker.NewHandler only to satisfy its shared signature and is inert for
-	// HandleDocumentConvert.
-	signingSecret := []byte(os.Getenv("WEBHOOK_SIGNING_SECRET"))
-
 	qc, err := queue.NewClient()
 	if err != nil {
 		log.Fatalf("queue client: %v", err)
@@ -67,11 +59,11 @@ func main() {
 		store,
 		convert.Default,
 		envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second),
-		webhook.NewRepo(pool),
-		webhook.NewDeliverer(),
+		nil, // webhookRepo — webhook-only; HandleDocumentConvert never reads it
+		nil, // deliverer — webhook-only; HandleDocumentConvert never reads it
 		qc,
-		signingSecret,
-		envDuration("WEBHOOK_PRESIGN_TTL", 6*time.Hour),
+		nil, // signingSecret — webhook-only; HandleDocumentConvert never reads it
+		0,   // presignTTL — webhook-only; HandleDocumentConvert never reads it
 	)
 
 	// D-04/D-05: the stale-job sweep loop runs solely in cmd/webhook-worker
