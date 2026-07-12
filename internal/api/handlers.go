@@ -17,6 +17,7 @@ import (
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/presets"
 	"github.com/apaderin/octoconv/internal/storage"
 )
 
@@ -25,11 +26,21 @@ const (
 	formFieldTarget      = "target"
 	formFieldCallbackURL = "callback_url"
 	formFieldOpts        = "opts"
+	formFieldPreset      = "preset"
 	operationConv        = "convert"
 	// maxOptsBytes bounds the opts JSON field before it is even parsed
 	// (T-14-02): a conservative 4 KiB comfortably fits the closed DocOpts
 	// schema while bounding the DoS surface of an oversized field.
 	maxOptsBytes = 4096
+	// maxPresetNameBytes bounds the client-supplied preset name before any DB
+	// lookup (T-18-09) -- an opaque-string DoS guard, request-independent of
+	// preset existence, so a 400 here leaks nothing about the presets table.
+	maxPresetNameBytes = 128
+	// errUnknownPreset is the SINGLE non-leaking 422 text for every preset
+	// resolution miss -- nonexistent, inactive, or cross-client (D-03). No
+	// other branch in handleCreateJob may return a distinguishable message
+	// for a preset lookup failure.
+	errUnknownPreset = "unknown or inactive preset"
 )
 
 // handleHealth probes Postgres, Redis, and S3/MinIO reachability under a
@@ -90,8 +101,29 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := convert.NormalizeFormat(r.FormValue(formFieldTarget))
-	if target == "" {
+	// preset, target, and opts are read up front so the D-01 mutual-
+	// exclusivity gate can run before any other field validation -- this is a
+	// pure request-shape check, independent of client/content/DB state.
+	presetName := r.FormValue(formFieldPreset)
+	rawTarget := r.FormValue(formFieldTarget)
+	rawOpts := r.FormValue(formFieldOpts)
+	usingPreset := presetName != ""
+
+	if usingPreset && (rawTarget != "" || (rawOpts != "" && rawOpts != "{}")) {
+		// D-01: preset and an explicit target/opts are mutually exclusive --
+		// no merge, no precedence guessing.
+		writeError(w, http.StatusUnprocessableEntity, "specify either preset or target/opts, not both")
+		return
+	}
+	if usingPreset && len(presetName) > maxPresetNameBytes {
+		// Length is request-independent of DB state, so a 400 here leaks
+		// nothing about preset existence (T-18-09).
+		writeError(w, http.StatusBadRequest, "invalid preset name")
+		return
+	}
+
+	target := convert.NormalizeFormat(rawTarget)
+	if !usingPreset && target == "" {
 		writeError(w, http.StatusBadRequest, "missing target format")
 		return
 	}
@@ -117,6 +149,37 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// runs. Resolved BEFORE content detection because a mismatch/unrecognized
 	// rejection below must log the client id (D-08).
 	client, _ := auth.ClientFromContext(ctx)
+
+	// Preset resolution (D-07): resolved AFTER client auth but BEFORE content
+	// detection / EngineFor, so a preset supplies target_format (and opts,
+	// below) exactly as if the client had sent them directly. presetID/
+	// presetVer are stashed for the pre-Create active re-check (Pitfall 8);
+	// presetOptsMap feeds the SAME opts validation pipeline as ad-hoc opts
+	// (D-06, below) -- no bypass branch.
+	var presetOptsMap map[string]any
+	var presetNameProv string
+	var presetVerProv int
+	var presetID uuid.UUID
+	var presetVer int
+	if usingPreset {
+		p, err := s.presets.Resolve(ctx, client.ID, presetName)
+		if err != nil {
+			if errors.Is(err, presets.ErrNotFound) {
+				// D-03: nonexistent, inactive, and cross-client all collapse
+				// to ErrNotFound inside Resolve -- no ownership branch here.
+				writeError(w, http.StatusUnprocessableEntity, errUnknownPreset)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to resolve preset")
+			return
+		}
+		target = convert.NormalizeFormat(p.TargetFormat)
+		presetOptsMap = p.Options
+		presetNameProv = p.Name
+		presetVerProv = p.Version
+		presetID = p.ID
+		presetVer = p.Version
+	}
 
 	// Detect the actual content format by magic bytes BEFORE anything else
 	// touches storage or Postgres (D-01/D-02/D-05). rest re-stitches the
@@ -263,8 +326,28 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// unconditional call (HTML-03). The API never duplicates
 	// internal/convert's validation logic; it only calls it (single
 	// validation authority, D-04/D-10).
+	//
+	// D-06: when a preset was used, rawOpts is re-sourced from the preset's
+	// resolved options map (re-marshaled to JSON) INSTEAD of the client's
+	// opts form field (which the D-01 mutual-exclusivity gate above already
+	// guaranteed is empty). The validators below are completely unaware of
+	// this substitution -- stored preset opts flow through the identical
+	// fail-closed ParseDocOpts/ParseHTMLOpts + ValidateApplicability path as
+	// ad-hoc opts, with no bypass branch. A stored preset whose opts fail
+	// current validation fails job creation here, exactly like bad ad-hoc opts.
 	var normalizedOpts map[string]any
-	rawOpts := r.FormValue(formFieldOpts)
+	if usingPreset {
+		if len(presetOptsMap) > 0 {
+			presetOptsJSON, err := json.Marshal(presetOptsMap)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
+			rawOpts = string(presetOptsJSON)
+		} else {
+			rawOpts = ""
+		}
+	}
 	if rawOpts != "" && rawOpts != "{}" {
 		if len(rawOpts) > maxOptsBytes {
 			log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_too_large size=%d limit=%d", client.ID, filename, len(rawOpts), maxOptsBytes)
@@ -331,17 +414,43 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pitfall 8 (TOCTOU): a preset can be deactivated or bumped to a new
+	// version in the window between the resolution above and this job-row
+	// insert. Immediately before repo.Create, re-run the SAME cheap
+	// non-locking Resolve; ErrNotFound or a changed id/version means the
+	// preset is no longer the one that was resolved, so the job must NOT be
+	// created. Mirrors the existing repo.Create-failure path exactly: the
+	// just-uploaded object is left in place for TTL cleanup, never deleted
+	// here. No preset row is ever locked.
+	if usingPreset {
+		p2, err := s.presets.Resolve(ctx, client.ID, presetName)
+		if err != nil {
+			if errors.Is(err, presets.ErrNotFound) {
+				writeError(w, http.StatusUnprocessableEntity, errUnknownPreset)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to resolve preset")
+			return
+		}
+		if p2.ID != presetID || p2.Version != presetVer {
+			writeError(w, http.StatusUnprocessableEntity, errUnknownPreset)
+			return
+		}
+	}
+
 	// Postgres-first double write: record the job, then enqueue. The job id is
 	// the one already embedded in the storage key above so they stay aligned.
 	createdID, err := s.repo.Create(ctx, jobs.CreateParams{
-		ID:           jobID,
-		ClientID:     client.ID,
-		Operation:    operationConv,
-		Engine:       engine,
-		SourceFormat: detected,
-		TargetFormat: target,
-		CallbackURL:  callbackURL,
-		Opts:         normalizedOpts,
+		ID:            jobID,
+		ClientID:      client.ID,
+		Operation:     operationConv,
+		Engine:        engine,
+		SourceFormat:  detected,
+		TargetFormat:  target,
+		CallbackURL:   callbackURL,
+		Opts:          normalizedOpts,
+		PresetName:    presetNameProv,
+		PresetVersion: presetVerProv,
 		Input: jobs.Input{
 			Ordinal:     0,
 			ObjectKey:   key,
