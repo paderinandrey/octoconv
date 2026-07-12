@@ -16,10 +16,10 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Presets
 
-- [ ] **PRST-01**: Оператор управляет пресетами через `cmd/manage-presets` CLI (create / update / list / show / deactivate; scope system и client; без hard delete — зеркало manage-clients)
-- [ ] **PRST-02**: Клиент может создать задачу с `preset=<name>` вместо `target_format`/`opts`; клиентский пресет затеняет системный с тем же именем
-- [ ] **PRST-03**: `preset` и явные `target_format`/`opts` взаимоисключающи — оба сразу → 422; несуществующий/неактивный/чужой пресет → одинаковый 422 без утечки существования
-- [ ] **PRST-04**: Резолвнутые из пресета opts проходят ту же fail-closed валидацию (ParseDocOpts/ParseHTMLOpts) при каждом использовании — сохранённым opts не доверяем; job фиксирует provenance в уже существующих колонках `jobs.preset_name`/`preset_version`
+- [x] **PRST-01**: Оператор управляет пресетами через `cmd/manage-presets` CLI (create / update / list / show / deactivate; scope system и client; без hard delete — зеркало manage-clients)
+- [x] **PRST-02**: Клиент может создать задачу с `preset=<name>` вместо `target_format`/`opts`; клиентский пресет затеняет системный с тем же именем
+- [x] **PRST-03**: `preset` и явные `target_format`/`opts` взаимоисключающи — оба сразу → 422; несуществующий/неактивный/чужой пресет → одинаковый 422 без утечки существования
+- [x] **PRST-04**: Резолвнутые из пресета opts проходят ту же fail-closed валидацию (ParseDocOpts/ParseHTMLOpts) при каждом использовании — сохранённым opts не доверяем; job фиксирует provenance в уже существующих колонках `jobs.preset_name`/`preset_version`
 
 ### Tech Debt
 
@@ -63,10 +63,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DEBT-06 | Phase 17 | Complete |
 | DEBT-07 | Phase 17 | Complete |
 | DEBT-08 | Phase 17 | Complete |
-| PRST-01 | Phase 18 | Pending |
-| PRST-02 | Phase 18 | Pending |
-| PRST-03 | Phase 18 | Pending |
-| PRST-04 | Phase 18 | Pending |
+| PRST-01 | Phase 18 | Complete |
+| PRST-02 | Phase 18 | Complete |
+| PRST-03 | Phase 18 | Complete |
+| PRST-04 | Phase 18 | Complete |
 | CI-01 | Phase 19 | Pending |
 | CI-02 | Phase 19 | Pending |
 | CI-03 | Phase 19 | Pending |

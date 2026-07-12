@@ -71,7 +71,7 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 **Granularity:** coarse — 3 phases, one per requirement cluster (debt / presets / CI). Ordering enforces the two hard sequencing constraints from research: the fakeEnqueuer race fix (DEBT-07) must precede the `-race` CI tier, and the image E2E test (DEBT-08) must precede the live-E2E CI tier.
 
 - [x] **Phase 17: Tech Debt Cleanup** — dead webhook wiring removed, fakeEnqueuer race-safe, image E2E test added (unblocks CI tiers 2 & 4) — completed 2026-07-12
-- [x] **Phase 18: Presets** — named server-side presets: `cmd/manage-presets` CLI + `preset=<name>` job creation, activating the dormant `presets` DDL
+- [x] **Phase 18: Presets** — named server-side presets: `cmd/manage-presets` CLI + `preset=<name>` job creation, activating the dormant `presets` DDL — completed 2026-07-12
 - [ ] **Phase 19: CI Pipeline** — 4-tier GitHub Actions (gate → `-race` → 5-image Docker build → live compose E2E), validating the full v1.4 codebase on first run
 
 #### Phase Details
@@ -137,8 +137,8 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
 | 14. Validated Conversion Options & PDF/A Export | v1.3 | 3/3 | Complete    | 2026-07-10 |
 | 15. HTML→PDF Chromium Engine | v1.3 | 5/5 | Complete    | 2026-07-11 |
 | 16. Webhook Delivery Decoupling | v1.3 | 5/5 | Complete | 2026-07-12 |
-| 17. Tech Debt Cleanup | v1.4 | 0/? | Not started | - |
-| 18. Presets | v1.4 | 0/? | Not started | - |
+| 17. Tech Debt Cleanup | v1.4 | 2/2 | Complete | 2026-07-12 |
+| 18. Presets | v1.4 | 4/4 | Complete | 2026-07-12 |
 | 19. CI Pipeline | v1.4 | 0/? | Not started | - |
 
 ---
