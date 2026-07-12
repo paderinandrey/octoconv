@@ -84,7 +84,9 @@ Full details: `.planning/milestones/v1.3-ROADMAP.md`
   1. `cmd/document-worker` and `cmd/chromium-worker` no longer construct `webhook.NewRepo`/`NewDeliverer` nor read `WEBHOOK_SIGNING_SECRET`; both binaries still build and start cleanly (dead wiring gone, not just unused).
   2. `go test ./internal/reconciler/... -race` runs (not skips) and reports clean — `fakeEnqueuer`'s call counters are mutex/atomic-guarded.
   3. A new image-engine E2E test in `internal/e2e` drives a full upload → convert (libvips) → download → HMAC-verified webhook cycle against a live compose stack and passes — closing the last gap in the E2E matrix.
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 17-01-PLAN.md — Remove dead webhook wiring from document/chromium workers (DEBT-06) + make fakeEnqueuer race-safe (DEBT-07)
+- [ ] 17-02-PLAN.md — Add image-engine (libvips) E2E test with PNG fixture (DEBT-08)
 
 ### Phase 18: Presets
 **Goal**: Clients create conversion jobs by named preset instead of hand-supplying `target_format`/`opts`, and operators manage those presets through a CLI — reusing the existing validated-opts pipeline with zero new validation logic and zero new migration.
