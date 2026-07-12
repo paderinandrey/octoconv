@@ -4,6 +4,7 @@ package convert
 
 import (
 	"context"
+	"sort"
 	"strings"
 )
 
@@ -95,6 +96,30 @@ func (r *Registry) EngineFor(from, to string) (string, bool) {
 		return "", false
 	}
 	return c.Engine(), true
+}
+
+// Classes returns every registered (from, to) pair grouped by engine class
+// (D-06) -- the single registry-derived source GET /v1/formats walks. Each
+// class's pairs are sorted deterministically (by From then To) so repeated
+// calls and JSON encoding order stay stable; no engine/pair string literal
+// exists anywhere else in the codebase (this is the only walk of r.m).
+func (r *Registry) Classes() map[string][]Pair {
+	out := make(map[string][]Pair)
+	for pair, c := range r.m {
+		class := c.Engine()
+		out[class] = append(out[class], pair)
+	}
+	for class := range out {
+		pairs := out[class]
+		sort.Slice(pairs, func(i, j int) bool {
+			if pairs[i].From != pairs[j].From {
+				return pairs[i].From < pairs[j].From
+			}
+			return pairs[i].To < pairs[j].To
+		})
+		out[class] = pairs
+	}
+	return out
 }
 
 // Default is the process-wide registry populated by converters.go.

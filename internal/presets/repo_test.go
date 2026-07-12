@@ -357,3 +357,111 @@ func TestGetFoundAndMisses(t *testing.T) {
 		t.Fatalf("Get cross-client = %v, want ErrNotFound", err)
 	}
 }
+
+// TestListForClientShadowing covers D-09/D-10: a client with a same-name
+// user override sees ONLY its user row in ListForClient (the system row is
+// shadowed); a second client with no override sees the system row, marked
+// read-only via its scope field.
+func TestListForClientShadowing(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+	clientA := createTestClient(t, r)
+	clientB := createTestClient(t, r)
+	name := uniqueName(t, "listshadow")
+
+	if _, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeSystem, TargetFormat: "webp"}); err != nil {
+		t.Fatalf("Create system preset: %v", err)
+	}
+	if _, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeUser, ClientID: &clientA, TargetFormat: "png"}); err != nil {
+		t.Fatalf("Create user preset for clientA: %v", err)
+	}
+
+	listA, err := r.ListForClient(ctx, &clientA, false)
+	if err != nil {
+		t.Fatalf("ListForClient clientA: %v", err)
+	}
+	var matchesA int
+	for _, p := range listA {
+		if p.Name == name {
+			matchesA++
+			if p.Scope != ScopeUser || p.TargetFormat != "png" {
+				t.Errorf("clientA row = %+v, want user-scope png (shadowing system)", p)
+			}
+		}
+	}
+	if matchesA != 1 {
+		t.Fatalf("clientA saw %d rows named %q, want exactly 1 (system row shadowed)", matchesA, name)
+	}
+
+	listB, err := r.ListForClient(ctx, &clientB, false)
+	if err != nil {
+		t.Fatalf("ListForClient clientB: %v", err)
+	}
+	var matchesB int
+	for _, p := range listB {
+		if p.Name == name {
+			matchesB++
+			if p.Scope != ScopeSystem || p.TargetFormat != "webp" {
+				t.Errorf("clientB row = %+v, want read-only system-scope webp", p)
+			}
+		}
+	}
+	if matchesB != 1 {
+		t.Fatalf("clientB saw %d rows named %q, want exactly 1 (system row visible, read-only)", matchesB, name)
+	}
+}
+
+// TestGetForClientShadowing covers D-09/D-10: GetForClient returns the user
+// row for the overriding client and the system row for a different client.
+func TestGetForClientShadowing(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+	clientA := createTestClient(t, r)
+	clientB := createTestClient(t, r)
+	name := uniqueName(t, "getforclient")
+
+	if _, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeSystem, TargetFormat: "avif"}); err != nil {
+		t.Fatalf("Create system preset: %v", err)
+	}
+	if _, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeUser, ClientID: &clientA, TargetFormat: "png"}); err != nil {
+		t.Fatalf("Create user preset for clientA: %v", err)
+	}
+
+	gotA, err := r.GetForClient(ctx, &clientA, name)
+	if err != nil {
+		t.Fatalf("GetForClient clientA: %v", err)
+	}
+	if gotA.Scope != ScopeUser || gotA.TargetFormat != "png" {
+		t.Fatalf("GetForClient clientA = %+v, want user-scope png", gotA)
+	}
+
+	gotB, err := r.GetForClient(ctx, &clientB, name)
+	if err != nil {
+		t.Fatalf("GetForClient clientB: %v", err)
+	}
+	if gotB.Scope != ScopeSystem || gotB.TargetFormat != "avif" {
+		t.Fatalf("GetForClient clientB = %+v, want system-scope avif", gotB)
+	}
+
+	if _, err := r.GetForClient(ctx, &clientB, uniqueName(t, "no-such-name")); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetForClient nonexistent = %v, want ErrNotFound", err)
+	}
+}
+
+// TestCreateDuplicateReturnsErrAlreadyExists covers D-03/D-09: Create twice
+// on the same active (scope, client, name) yields errors.Is(err,
+// ErrAlreadyExists) on the second call.
+func TestCreateDuplicateReturnsErrAlreadyExists(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+	clientA := createTestClient(t, r)
+	name := uniqueName(t, "dupcheck")
+
+	if _, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeUser, ClientID: &clientA, TargetFormat: "png"}); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+	_, _, err := r.Create(ctx, CreateParams{Name: name, Scope: ScopeUser, ClientID: &clientA, TargetFormat: "webp"})
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("second Create = %v, want errors.Is(err, ErrAlreadyExists)", err)
+	}
+}
