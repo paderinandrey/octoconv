@@ -50,7 +50,7 @@ func TestCreatePreset_OK(t *testing.T) {
 	admin := &fakePresetAdmin{
 		getForClientResult: &presets.Preset{
 			ID: uuid.New(), Name: "thumb", Version: 1, Scope: presets.ScopeUser,
-			ClientID: func() *uuid.UUID { id := uuid.New(); return &id }(),
+			ClientID:  func() *uuid.UUID { id := uuid.New(); return &id }(),
 			Operation: presets.OperationConvert, TargetFormat: "webp",
 			IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
