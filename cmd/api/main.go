@@ -98,7 +98,7 @@ func main() {
 		Redis:    redisPinger{client: rdb},
 		S3:       store,
 	}
-	srv := api.NewServer(jobs.NewRepo(pool), store, qc, presetRepo, resolver, health, api.Config{
+	srv := api.NewServer(jobs.NewRepo(pool), store, qc, presetRepo, presetRepo, resolver, health, api.Config{
 		MaxUploadBytes:               envInt64("MAX_UPLOAD_BYTES", 100<<20),
 		MaxImagePixels:               uint64(envInt64("MAX_IMAGE_PIXELS", 100_000_000)),            // D-05: 100 megapixels default
 		MaxDocumentUncompressedBytes: uint64(envInt64("MAX_DOCUMENT_UNCOMPRESSED_BYTES", 500<<20)), // D-04: 500 MiB default

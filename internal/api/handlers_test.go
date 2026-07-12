@@ -122,6 +122,79 @@ func defaultFakePresetRepo() *fakePresetRepo {
 	return &fakePresetRepo{resolveErr: presets.ErrNotFound}
 }
 
+// fakePresetAdmin implements api.PresetAdmin (D-08/Task 2). It supports
+// settable return values per method plus a captured lastCreateParams so
+// tests can assert the mass-assignment guard (T-20-01): a request body
+// attempting to smuggle scope/client_id never reaches the repo layer with
+// anything other than the ctx-derived values.
+type fakePresetAdmin struct {
+	createErr error
+
+	updateVersion int
+	updateErr     error
+
+	deactivateErr error
+
+	getResult *presets.Preset
+	getErr    error
+
+	listResult []presets.Preset
+	listErr    error
+
+	getForClientResult *presets.Preset
+	getForClientErr    error
+
+	listForClientResult []presets.Preset
+	listForClientErr    error
+
+	lastCreateParams *presets.CreateParams
+}
+
+func (f *fakePresetAdmin) Create(_ context.Context, p presets.CreateParams) (uuid.UUID, int, error) {
+	f.lastCreateParams = &p
+	if f.createErr != nil {
+		return uuid.Nil, 0, f.createErr
+	}
+	return uuid.New(), 1, nil
+}
+
+func (f *fakePresetAdmin) Update(_ context.Context, _ string, _ *uuid.UUID, _, _ string, _ map[string]any, _ string) (int, error) {
+	if f.updateErr != nil {
+		return 0, f.updateErr
+	}
+	if f.updateVersion == 0 {
+		return 2, nil
+	}
+	return f.updateVersion, nil
+}
+
+func (f *fakePresetAdmin) Deactivate(_ context.Context, _ string, _ *uuid.UUID, _ string) error {
+	return f.deactivateErr
+}
+
+func (f *fakePresetAdmin) Get(_ context.Context, _ string, _ *uuid.UUID, _ string) (*presets.Preset, error) {
+	return f.getResult, f.getErr
+}
+
+func (f *fakePresetAdmin) List(_ context.Context, _ string, _ *uuid.UUID, _ bool) ([]presets.Preset, error) {
+	return f.listResult, f.listErr
+}
+
+func (f *fakePresetAdmin) ListForClient(_ context.Context, _ *uuid.UUID, _ bool) ([]presets.Preset, error) {
+	return f.listForClientResult, f.listForClientErr
+}
+
+func (f *fakePresetAdmin) GetForClient(_ context.Context, _ *uuid.UUID, _ string) (*presets.Preset, error) {
+	return f.getForClientResult, f.getForClientErr
+}
+
+// defaultFakePresetAdmin returns presets.ErrNotFound on every read -- the
+// no-op default used by every existing (pre-20-01) test so their behavior is
+// unaffected by the new NewServer positional argument.
+func defaultFakePresetAdmin() *fakePresetAdmin {
+	return &fakePresetAdmin{getErr: presets.ErrNotFound, getForClientErr: presets.ErrNotFound}
+}
+
 // fakePinger implements api.Pinger: returns err (nil = healthy) from Ping.
 type fakePinger struct{ err error }
 
@@ -380,7 +453,7 @@ func multipartBodyWithPreset(t *testing.T, filename, preset, target string, data
 // so existing non-preset tests are unaffected (D-09/Task 3).
 func newTestServer(repo Repo, store Storage, q Enqueuer) (*Server, *fakeResolver) {
 	resolver := newFakeResolver()
-	return NewServer(repo, store, q, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20}), resolver
+	return NewServer(repo, store, q, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20}), resolver
 }
 
 // authed sets the Authorization header requests need to pass auth.Middleware.
@@ -566,7 +639,7 @@ func TestCreateJob_DimensionLimitExceeded(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1_000_000})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1_000_000})
 
 	body, ct := multipartBody(t, "in.png", "webp", oversizedPNGFixture())
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -710,7 +783,7 @@ func TestCreateJob_DocumentSkipsDimensionCheck(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20, MaxImagePixels: 1})
 
 	body, ct := multipartBody(t, "in.docx", "pdf", docxFixture(t))
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -732,7 +805,7 @@ func TestCreateJob_ZipBombRejected(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{
 		MaxUploadBytes:               1 << 20,
 		MaxDocumentUncompressedBytes: 1 << 20, // 1 MiB test limit
 	})
@@ -889,7 +962,7 @@ func TestHealthz_Degraded(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resolver := newFakeResolver()
-			srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, tc.health, Config{MaxUploadBytes: 1 << 20})
+			srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, tc.health, Config{MaxUploadBytes: 1 << 20})
 
 			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 			rec := httptest.NewRecorder()
@@ -926,7 +999,7 @@ func TestGetJob_DonePresigned(t *testing.T) {
 		outputs: []jobs.Output{{Ordinal: 0, ObjectKey: "results/x/0-out.webp"}},
 	}
 	store := &fakeStorage{presigned: "https://example/download"}
-	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1206,7 +1279,7 @@ func TestGetJob_OptsEcho(t *testing.T) {
 		Status:   jobs.StatusQueued,
 		Opts:     map[string]any{"pdf_profile": "pdf/a-2b"},
 	}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1229,7 +1302,7 @@ func TestGetJob_NoOptsOmitted(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
 	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1249,7 +1322,7 @@ func TestGetJob_SameClient_OK(t *testing.T) {
 	id := uuid.New()
 	resolver := newFakeResolver()
 	repo := &fakeRepo{getJob: &jobs.Job{ID: id, ClientID: resolver.client.ID, Status: jobs.StatusQueued}}
-	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	req := authed(httptest.NewRequest(http.MethodGet, "/v1/jobs/"+id.String(), nil))
 	rec := httptest.NewRecorder()
@@ -1488,7 +1561,7 @@ func TestCreateJob_PresetResolvedImage(t *testing.T) {
 	presetRepo := &fakePresetRepo{resolve: &presets.Preset{
 		ID: uuid.New(), Name: "thumb", Version: 2, TargetFormat: "webp",
 	}}
-	srv := NewServer(repo, store, q, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, q, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), "")
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1522,7 +1595,7 @@ func TestCreateJob_PresetAndTargetMutuallyExclusive(t *testing.T) {
 	store := &fakeStorage{}
 	presetRepo := &fakePresetRepo{resolve: &presets.Preset{ID: uuid.New(), Name: "thumb", Version: 1, TargetFormat: "webp"}}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "webp", pngBytesFixture(), "")
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1557,7 +1630,7 @@ func TestCreateJob_PresetAndOptsMutuallyExclusive(t *testing.T) {
 	store := &fakeStorage{}
 	presetRepo := &fakePresetRepo{resolve: &presets.Preset{ID: uuid.New(), Name: "thumb", Version: 1, TargetFormat: "webp"}}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), `{"pdf_profile":"pdf/a-2b"}`)
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1595,7 +1668,7 @@ func TestCreateJob_UnknownPreset422NoLeak(t *testing.T) {
 		repo := &fakeRepo{}
 		store := &fakeStorage{}
 		resolver := newFakeResolver()
-		srv := NewServer(repo, store, &fakeQueue{}, tc.presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+		srv := NewServer(repo, store, &fakeQueue{}, tc.presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 		body, ct := multipartBodyWithPreset(t, "in.png", "ghost", "", pngBytesFixture(), "")
 		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1633,7 +1706,7 @@ func TestCreateJob_PresetOptsRevalidated(t *testing.T) {
 		Options: map[string]any{"EncryptFile": true}, // unknown key, since-invalidated
 	}}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.docx", "stale", "", docxFixture(t), "")
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1669,7 +1742,7 @@ func TestCreateJob_PresetDeactivatedDuringCreate(t *testing.T) {
 		recheckErr: presets.ErrNotFound,
 	}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, &fakeQueue{}, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.png", "thumb", "", pngBytesFixture(), "")
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
@@ -1708,7 +1781,7 @@ func TestCreateJob_PresetHTMLOptsResolved(t *testing.T) {
 		Options: map[string]any{"page_size": "a4"},
 	}}
 	resolver := newFakeResolver()
-	srv := NewServer(repo, store, q, presetRepo, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+	srv := NewServer(repo, store, q, presetRepo, defaultFakePresetAdmin(), resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
 
 	body, ct := multipartBodyWithPreset(t, "in.html", "a4pdf", "", htmlFixture(), "")
 	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))

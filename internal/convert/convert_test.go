@@ -78,6 +78,41 @@ func TestRegistryEngineFor(t *testing.T) {
 	}
 }
 
+// TestRegistryClasses verifies D-06: Classes() groups every registered pair
+// under its engine class, a known libvips pair (png->webp) surfaces under
+// "image", and repeated calls return a stable (deterministically sorted)
+// result.
+func TestRegistryClasses(t *testing.T) {
+	classes := Default.Classes()
+
+	imagePairs, ok := classes["image"]
+	if !ok {
+		t.Fatal(`Classes() missing "image" class`)
+	}
+	found := false
+	for _, p := range imagePairs {
+		if p.From == "png" && p.To == "webp" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf(`Classes()["image"] = %+v, want it to contain {png webp}`, imagePairs)
+	}
+
+	// Stability: a second call must return the identical grouping/order.
+	again := Default.Classes()
+	againPairs, ok := again["image"]
+	if !ok || len(againPairs) != len(imagePairs) {
+		t.Fatalf("Classes() not stable across calls: first=%+v second=%+v", imagePairs, againPairs)
+	}
+	for i := range imagePairs {
+		if imagePairs[i] != againPairs[i] {
+			t.Errorf("Classes() order not stable at index %d: first=%+v second=%+v", i, imagePairs[i], againPairs[i])
+		}
+	}
+}
+
 // TestRunCommandTimeout verifies the hardened exec kills a long-running child
 // when the context deadline fires, and returns the context error.
 func TestRunCommandTimeout(t *testing.T) {

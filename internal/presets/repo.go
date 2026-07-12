@@ -95,7 +95,7 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, int, erro
 		return uuid.Nil, 0, fmt.Errorf("check existing preset: %w", err)
 	}
 	if exists {
-		return uuid.Nil, 0, fmt.Errorf("active preset %q already exists for scope %q; use Update instead", p.Name, p.Scope)
+		return uuid.Nil, 0, fmt.Errorf("active preset %q already exists for scope %q; use Update instead: %w", p.Name, p.Scope, ErrAlreadyExists)
 	}
 
 	const version = 1
@@ -256,6 +256,90 @@ func (r *Repo) Get(ctx context.Context, scope string, clientID *uuid.UUID, name 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get preset %q: %w", name, err)
+	}
+	p.TargetFormat = deref(targetFormat)
+	p.Description = deref(description)
+	if err := json.Unmarshal(optsJSON, &p.Options); err != nil {
+		return nil, fmt.Errorf("unmarshal preset options: %w", err)
+	}
+	return &p, nil
+}
+
+// ListForClient returns the merged effective view for clientID (D-09/D-10):
+// the client's own user-scope rows PLUS every system-scope row whose name is
+// NOT shadowed by an active user-scope row of the same name for that client
+// -- mirroring Resolve's user-shadows-system precedence, entirely in SQL (no
+// post-query Go ownership/shadow branch). includeInactive=false returns
+// active-only rows (on both sides of the union); the shadow check itself
+// always considers only ACTIVE user rows, since an inactive override must
+// not suppress a system preset. Ordered by name, then scope (user before
+// system), then version descending.
+func (r *Repo) ListForClient(ctx context.Context, clientID *uuid.UUID, includeInactive bool) ([]Preset, error) {
+	query := `
+		SELECT p.id, p.name, p.version, p.scope, p.client_id, p.operation, p.target_format, p.options, p.description, p.is_active, p.created_at, p.updated_at
+		FROM presets p
+		WHERE (
+			(p.scope = 'user' AND p.client_id = $1)
+			OR (p.scope = 'system' AND p.client_id IS NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM presets u
+					WHERE u.scope = 'user' AND u.client_id = $1 AND u.name = p.name AND u.is_active
+				))
+		)`
+	if !includeInactive {
+		query += ` AND p.is_active`
+	}
+	query += ` ORDER BY p.name, (p.scope = 'user') DESC, p.version DESC`
+
+	rows, err := r.pool.Query(ctx, query, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("list presets for client: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Preset
+	for rows.Next() {
+		var p Preset
+		var targetFormat, description *string
+		var optsJSON []byte
+		if err := rows.Scan(&p.ID, &p.Name, &p.Version, &p.Scope, &p.ClientID, &p.Operation,
+			&targetFormat, &optsJSON, &description, &p.IsActive, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan preset: %w", err)
+		}
+		p.TargetFormat = deref(targetFormat)
+		p.Description = deref(description)
+		if err := json.Unmarshal(optsJSON, &p.Options); err != nil {
+			return nil, fmt.Errorf("unmarshal preset options: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// GetForClient returns the single effective active preset for name applying
+// the same shadow precedence as Resolve/ListForClient (user version wins
+// over a same-name system preset), but returns the FULL column set (D-09)
+// so the REST DTO has description/is_active/timestamps. ErrNotFound when
+// neither a user nor a system row exists (or the only match is inactive).
+func (r *Repo) GetForClient(ctx context.Context, clientID *uuid.UUID, name string) (*Preset, error) {
+	var p Preset
+	var targetFormat, description *string
+	var optsJSON []byte
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, name, version, scope, client_id, operation, target_format, options, description, is_active, created_at, updated_at
+		FROM presets
+		WHERE name = $2 AND is_active AND operation = 'convert'
+		  AND ((scope='system' AND client_id IS NULL) OR (scope='user' AND client_id = $1))
+		ORDER BY (scope='user') DESC, version DESC
+		LIMIT 1`,
+		clientID, name,
+	).Scan(&p.ID, &p.Name, &p.Version, &p.Scope, &p.ClientID, &p.Operation,
+		&targetFormat, &optsJSON, &description, &p.IsActive, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get preset for client %q: %w", name, err)
 	}
 	p.TargetFormat = deref(targetFormat)
 	p.Description = deref(description)
