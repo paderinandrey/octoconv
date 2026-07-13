@@ -123,7 +123,7 @@ func TestRunCommandTimeout(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := runCommand(ctx, "sleep", "10")
+	_, err := runCommand(ctx, "sleep", "10")
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -142,7 +142,7 @@ func TestRunCommandFailure(t *testing.T) {
 	if _, err := exec.LookPath("false"); err != nil {
 		t.Skip("false not available")
 	}
-	if err := runCommand(context.Background(), "false"); err == nil {
+	if _, err := runCommand(context.Background(), "false"); err == nil {
 		t.Fatal("expected error from `false`, got nil")
 	}
 }

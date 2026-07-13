@@ -28,7 +28,7 @@ func (LibvipsConverter) Pairs() []Pair {
 // Convert runs `vips copy <in> <out>`; libvips infers both codecs from the file
 // extensions. ctx must carry the engine timeout.
 func (LibvipsConverter) Convert(ctx context.Context, inPath, outPath string, _ map[string]any) error {
-	if err := runCommand(ctx, "vips", "copy", inPath, outPath); err != nil {
+	if _, err := runCommand(ctx, "vips", "copy", inPath, outPath); err != nil {
 		return fmt.Errorf("libvips: %w", err)
 	}
 	return nil

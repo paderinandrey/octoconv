@@ -184,7 +184,7 @@ func (ChromiumConverter) Convert(ctx context.Context, inPath, outPath string, op
 		"--print-to-pdf=" + outPath,
 		"file://" + renderedPath, // NOT inPath -- renderedPath carries the injected print CSS + CSP
 	}
-	if err := runCommand(ctx, "chromium-headless-shell", args...); err != nil {
+	if _, err := runCommand(ctx, "chromium-headless-shell", args...); err != nil {
 		return fmt.Errorf("chromium: %w", err)
 	}
 

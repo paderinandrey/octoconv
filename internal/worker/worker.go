@@ -91,6 +91,26 @@ var terminalChromiumSignatures = []string{
 	"stat output",
 }
 
+// terminalVeraPDFSignatures are lowercased error-message substrings that
+// classify a real ISO 19005-2b PDF/A validation failure as deterministically
+// unrecoverable (D-06, phase 23): "pdf/a non-compliant" is emitted by
+// ValidatePDFA (internal/convert/verapdf.go) when veraPDF's machine-readable
+// report says isCompliant=false; "pdf/a validation error" is emitted for ANY
+// veraPDF invocation/parse failure (unparseable report, batchSummary failure
+// counters, process start failure) -- fail-closed per D-06: an unverifiable
+// archival claim is a failed archival claim, never silently retried into a
+// false "done". A VERAPDF_TIMEOUT expiry needs no signature here --
+// isDocumentTerminal already classifies a wrapped context.DeadlineExceeded as
+// terminal before this substring loop is ever reached. Coupling both
+// substrings into this slice in the SAME commit that introduces them
+// (verapdf.go) is what keeps a non-compliant/unverifiable PDF/A output from
+// being silently retried up to DOCUMENT_MAX_RETRY times before finally
+// failing.
+var terminalVeraPDFSignatures = []string{
+	"pdf/a non-compliant",
+	"pdf/a validation error",
+}
+
 // isTerminal classifies a process() error as terminal (no retry can help:
 // bad input, unsupported pair, missing storage object) vs. transient
 // (network/S3/engine-timeout/Postgres blip — broad-retry default, D-01).
@@ -136,6 +156,13 @@ func isTerminal(err error) bool {
 		if strings.Contains(msg, sig) {
 			// D-01 (html analog): chromium-headless-shell reports a
 			// deterministically bad/unrenderable input.
+			return true
+		}
+	}
+	for _, sig := range terminalVeraPDFSignatures {
+		if strings.Contains(msg, sig) {
+			// D-06 (phase 23): veraPDF reports a non-compliant or
+			// unverifiable PDF/A archival claim -- fail-closed, no retry.
 			return true
 		}
 	}
