@@ -237,16 +237,32 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		detected = "html"
 	}
 	if detected == "" && convert.IsOLECFB(file) {
-		// D-05/D-06: legacy binary Office (.doc/.xls/.ppt) and password-
-		// protected OOXML ("Agile Encryption") share the identical 8-byte
-		// OLE-CFB header — this milestone rejects both as one fail-closed
-		// branch rather than attempting to distinguish them (v2 DOCV3-02).
-		// A distinct log reason keeps this diagnosable from the generic
-		// unrecognized-content 422 below.
-		log.Printf("content validation rejected: client_id=%s filename=%q reason=legacy_or_encrypted_document", client.ID, filename)
-		writeError(w, http.StatusUnprocessableEntity,
-			"legacy binary or password-protected Office format is not supported; convert to docx/xlsx/pptx or remove the password")
-		return
+		// D-06 (22-cfb-classification): legacy binary Office (.doc/.xls/.ppt)
+		// and password-protected OOXML ("Agile Encryption") share the
+		// identical 8-byte OLE-CFB header, so IsOLECFB stays the cheap
+		// pre-filter (D-01) — but ClassifyCFB (internal/convert/cfb.go, Plan
+		// 22-01) now reads the directory entry names to tell them apart and
+		// give each case its own accurate 422. CFBUnknown (unrecognized/
+		// corrupt CFB) falls through to the original combined message
+		// unchanged — fail-closed compat (Pitfall 11): it must never be
+		// treated as anything other than a rejection.
+		switch convert.ClassifyCFB(file, header.Size) {
+		case convert.CFBEncrypted:
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=encrypted_document", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity,
+				"password-protected Office file is not supported; remove the password and re-upload")
+			return
+		case convert.CFBLegacy:
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=legacy_document", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity,
+				"legacy binary Office format (.doc/.xls/.ppt) is not supported; convert to docx/xlsx/pptx")
+			return
+		default: // convert.CFBUnknown
+			log.Printf("content validation rejected: client_id=%s filename=%q reason=legacy_or_encrypted_document", client.ID, filename)
+			writeError(w, http.StatusUnprocessableEntity,
+				"legacy binary or password-protected Office format is not supported; convert to docx/xlsx/pptx or remove the password")
+			return
+		}
 	}
 	if detected == "" {
 		// D-02: no known signature matches — reject rather than let the

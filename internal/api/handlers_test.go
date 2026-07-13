@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -557,11 +558,13 @@ func TestCreateJob_UnrecognizedContent(t *testing.T) {
 	}
 }
 
-// TestCreateJob_OLECFBRejected verifies SAFE-01/D-05/D-06: a file whose
-// content begins with the OLE-CFB magic (legacy binary .doc/.xls/.ppt or a
-// password-protected OOXML document — both share the identical header) is
-// rejected 422 before any storage write, with a message naming both
-// sub-cases and a remedy.
+// TestCreateJob_OLECFBRejected verifies SAFE-01/D-05/Pitfall 11: a
+// synthetic OLE-CFB-magic file whose directory does not decode to any known
+// stream name classifies as convert.CFBUnknown and therefore still falls
+// through to the ORIGINAL combined 422 message unchanged (fail-closed
+// compat) — this is the CFBUnknown case of the 22-cfb-classification D-06
+// three-way split; see TestCreateJob_CFB below for the CFBEncrypted/
+// CFBLegacy cases over real fixtures.
 func TestCreateJob_OLECFBRejected(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
@@ -586,6 +589,77 @@ func TestCreateJob_OLECFBRejected(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "password") {
 		t.Errorf("body = %s, want a message mentioning password/remedy", rec.Body.String())
+	}
+}
+
+// TestCreateJob_CFB verifies the 22-cfb-classification D-06 three-way split
+// over the real fixtures (internal/api/testdata/, copied from
+// internal/e2e/testdata/): a password-protected OOXML .docx classifies
+// CFBEncrypted and gets its own distinct 422, and a legacy binary .doc
+// classifies CFBLegacy and gets a DIFFERENT distinct 422 that must not
+// mention "password" -- proving the two messages are actually
+// distinguishable, not just both non-empty. Both must reject before any
+// storage write or job creation (Pitfall 11 fail-closed).
+func TestCreateJob_CFB(t *testing.T) {
+	tests := []struct {
+		name       string
+		fixture    string
+		wantSubstr []string
+		wantAbsent []string
+	}{
+		{
+			name:       "CFBEncrypted",
+			fixture:    "encrypted.docx",
+			wantSubstr: []string{"remove the password", "password-protected"},
+		},
+		{
+			name:       "CFBLegacy",
+			fixture:    "legacy.doc",
+			wantSubstr: []string{"legacy binary", ".doc/.xls/.ppt"},
+			wantAbsent: []string{"password"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := os.ReadFile("testdata/" + tc.fixture)
+			if err != nil {
+				t.Fatalf("read fixture %s: %v", tc.fixture, err)
+			}
+
+			repo := &fakeRepo{}
+			store := &fakeStorage{}
+			srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+			ext := tc.fixture[strings.LastIndex(tc.fixture, "."):]
+			body, ct := multipartBody(t, "in"+ext, "pdf", data)
+			req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+			req.Header.Set("Content-Type", ct)
+			rec := httptest.NewRecorder()
+
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+			}
+			if store.uploaded {
+				t.Errorf("must not upload %s before rejection", tc.fixture)
+			}
+			if repo.created != nil {
+				t.Errorf("must not create job for %s", tc.fixture)
+			}
+			got := rec.Body.String()
+			for _, want := range tc.wantSubstr {
+				if !strings.Contains(got, want) {
+					t.Errorf("body = %s, want substring %q", got, want)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("body = %s, must NOT contain %q (distinct-message proof)", got, absent)
+				}
+			}
+		})
 	}
 }
 

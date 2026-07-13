@@ -518,34 +518,47 @@ func assertDownloadIsFormat(t *testing.T, downloadURL, expectedFormat string) {
 // oleCFBFixtures is the two SAFE-01 sub-cases (SC#3): a genuine legacy
 // binary Word97 .doc and a genuine password-protected (Agile-encrypted)
 // OOXML .docx. Both begin with the 8-byte OLE-CFB magic and must be rejected
-// 422 before any conversion is attempted (D-05/D-06).
-var oleCFBFixtures = []string{
-	"legacy.doc",
-	"encrypted.docx",
+// 422 before any conversion is attempted, but 22-cfb-classification's D-06
+// split now gives each its own DISTINCT 422 message via convert.ClassifyCFB
+// (Plan 22-01/22-02) rather than the historical single combined message.
+var oleCFBFixtures = []struct {
+	filename   string
+	wantSubstr string // case-insensitive substring expected in the 422 body
+	wantAbsent string // case-insensitive substring that must NOT appear (proves distinctness)
+}{
+	{filename: "legacy.doc", wantSubstr: "legacy binary", wantAbsent: "password"},
+	{filename: "encrypted.docx", wantSubstr: "remove the password"},
 }
 
 // TestOLECFBRejectionE2E proves live (against real fixtures, not synthetic
 // magic bytes) that both OLE-CFB sub-cases are rejected 422 before any job
 // is ever created -- unlike the postJob/pollUntilDone tables above, no job
-// ID is produced here at all.
+// ID is produced here at all. D-07 (unconditional hard gate): this asserts
+// the two DISTINCT messages, not a shared loose "password" substring --
+// legacy.doc's body must NOT mention "password" at all, proving the split
+// actually distinguishes the two cases end-to-end through the live API. The
+// 422 status returning promptly (never a hang, bounded by e2eHTTP's 30s
+// per-request timeout and this test's -timeout 5m) is success-criterion 3's
+// live proof that ClassifyCFB is DoS-safe against real fixture bytes.
 func TestOLECFBRejectionE2E(t *testing.T) {
 	cfg := e2eSetup(t)
 	apiKey := provisionClient(t)
 
-	for _, filename := range oleCFBFixtures {
-		t.Run(filename, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("testdata", filename))
+	for _, tc := range oleCFBFixtures {
+		t.Run(tc.filename, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", tc.filename))
 			if err != nil {
-				t.Fatalf("read fixture %s: %v", filename, err)
+				t.Fatalf("read fixture %s: %v", tc.filename, err)
 			}
 
-			body := postJobExpectStatus(t, cfg.baseURL, apiKey, filename, data, "pdf", "", http.StatusUnprocessableEntity)
+			body := postJobExpectStatus(t, cfg.baseURL, apiKey, tc.filename, data, "pdf", "", http.StatusUnprocessableEntity)
+			lower := bytes.ToLower(body)
 
-			// Loose substring check (not exact-string) so a reworded D-06
-			// message doesn't brittle-fail this live test; the 422 status
-			// above is the load-bearing assertion.
-			if !bytes.Contains(bytes.ToLower(body), []byte("password")) {
-				t.Errorf("422 body for %s does not mention the remedy; body=%s", filename, body)
+			if !bytes.Contains(lower, []byte(tc.wantSubstr)) {
+				t.Errorf("422 body for %s does not contain %q; body=%s", tc.filename, tc.wantSubstr, body)
+			}
+			if tc.wantAbsent != "" && bytes.Contains(lower, []byte(tc.wantAbsent)) {
+				t.Errorf("422 body for %s must NOT contain %q (distinct-message proof); body=%s", tc.filename, tc.wantAbsent, body)
 			}
 		})
 	}
