@@ -42,13 +42,13 @@ completed: 2026-07-13
 
 # Phase 21 Plan 03: MCP Server Binary + Live Stdio Gate Summary
 
-**cmd/mcp-server ships as a thin, fail-fast, stderr-only-logging stdio binary; README documents client wiring; a hand-rolled JSON-RPC-over-stdio test harness drives the real binary for D-13 -- but the live run itself could not be executed in this session because the local Docker/OrbStack daemon was unresponsive.**
+**cmd/mcp-server ships as a thin, fail-fast, stderr-only-logging stdio binary; README documents client wiring; and the D-13 live stdio JSON-RPC hard gate PASSED against the real compose stack -- five tools, a real png→jpg conversion (presigned_url + local JPEG-magic file via the child binary's OCTOCONV_S3_DIAL_ADDR dial-redirect), list round-trips, bad-input isError, and full stdout purity.**
 
 ## Performance
 
-- **Duration:** ~55 min
+- **Duration:** ~75 min (including a Docker-daemon outage window mid-session)
 - **Completed:** 2026-07-13
-- **Tasks:** 2/2 code-complete; live human-check portion of Task 2 blocked by environment (see below)
+- **Tasks:** 2/2 complete, including the LIVE gate pass
 - **Files modified:** 3 (1 created binary entrypoint, 1 created test file, 1 modified README)
 
 ## Accomplishments
