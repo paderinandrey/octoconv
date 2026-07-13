@@ -212,6 +212,13 @@ services:
       METRICS_ADDR: "127.0.0.1:9090"
 
   document-worker:
+    # veraPDF (PDFA-02, D-03) is bundled into this image from the pinned
+    # verapdf/cli:v1.30.2 Docker Hub image, which is published amd64-only
+    # (verified live against the registry, 23-01) -- pin the whole service
+    # to linux/amd64 so the build (and any arm64 host, e.g. Apple Silicon
+    # dev machines) doesn't accidentally cross-copy incompatible
+    # architecture binaries into the runtime stage.
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.document-worker
@@ -243,6 +250,7 @@ services:
       DOCUMENT_MAX_RETRY: "3"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      VERAPDF_TIMEOUT: "60s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
