@@ -86,7 +86,7 @@ veraPDF are independent document-track deepenings, with veraPDF (highest uncerta
 
 - [x] **Phase 20: Presets REST CRUD & Format Discovery** — Clients self-service manage client-scope presets and discover supported formats over authenticated REST
 - [x] **Phase 21: MCP Server** — Agents convert files and discover capabilities through a stdio MCP server that is a zero-privilege HTTP client of the API
-- [ ] **Phase 22: CFB Encrypted-vs-Legacy Classification** — OLE-CFB uploads get distinct, bounded 422s (password-protected vs legacy binary)
+- [x] **Phase 22: CFB Encrypted-vs-Legacy Classification** — OLE-CFB uploads get distinct, bounded 422s (password-protected vs legacy binary)
 - [ ] **Phase 23: veraPDF ISO 19005 Validation** — PDF/A-2b outputs validated for real conformance; non-compliant exports fail terminally
 
 ## Phase Details
@@ -133,8 +133,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 22-01-PLAN.md — internal/convert/cfb.go ClassifyCFB bounded directory parser + unit table over real fixtures + FuzzClassifyCFB 30s exit-gate
-- [ ] 22-02-PLAN.md — handleCreateJob three-way ClassifyCFB split (distinct/legacy/unknown 422s) + handler tests + live TestOLECFBRejectionE2E distinct-message gate
+- [x] 22-01-PLAN.md — internal/convert/cfb.go ClassifyCFB bounded directory parser + unit table over real fixtures + FuzzClassifyCFB 30s exit-gate
+- [x] 22-02-PLAN.md — handleCreateJob three-way ClassifyCFB split (distinct/legacy/unknown 422s) + handler tests + live TestOLECFBRejectionE2E distinct-message gate
 
 ### Phase 23: veraPDF ISO 19005 Validation
 **Goal**: PDF/A-2b outputs are validated for real ISO 19005 conformance, replacing the v1.3 OutputIntent heuristic, so a non-compliant export fails the job terminally with the veraPDF reason recorded.
@@ -173,7 +173,7 @@ Plans:
 | 19. CI Pipeline | v1.4 | 2/2 | Complete | 2026-07-13 |
 | 20. Presets REST CRUD & Format Discovery | v1.5 | 0/? | Not started | - |
 | 21. MCP Server | v1.5 | 0/? | Not started | - |
-| 22. CFB Encrypted-vs-Legacy Classification | v1.5 | 0/2 | Planned | - |
+| 22. CFB Classification | v1.5 | 2/2 | Complete | 2026-07-13 |
 | 23. veraPDF ISO 19005 Validation | v1.5 | 0/? | Not started | - |
 
 ---
