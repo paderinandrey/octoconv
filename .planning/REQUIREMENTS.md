@@ -23,8 +23,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### CFB Classification
 
-- [ ] **CFB-01**: OLE-CFB входы получают различённые 422 — «файл запаролен» (EncryptionInfo/EncryptedPackage стримы) vs «устаревший бинарный формат» (WordDocument/Workbook/PowerPoint Document) — через собственный bounded-парсер CFB-директории (ноль новых зависимостей; visited-set cycle-guard; неопознанная структура → прежний generic 422, fail-closed)
-- [ ] **CFB-02**: CFB-парсер выдерживает Go native fuzzing (crash-free, bounded) — exit-gate фазы
+- [x] **CFB-01**: OLE-CFB входы получают различённые 422 — «файл запаролен» (EncryptionInfo/EncryptedPackage стримы) vs «устаревший бинарный формат» (WordDocument/Workbook/PowerPoint Document) — через собственный bounded-парсер CFB-директории (ноль новых зависимостей; visited-set cycle-guard; неопознанная структура → прежний generic 422, fail-closed)
+- [x] **CFB-02**: CFB-парсер выдерживает Go native fuzzing (crash-free, bounded) — exit-gate фазы
 
 ### veraPDF Validation
 
@@ -67,8 +67,8 @@ Deferred to future release.
 | MCP-03 | Phase 21 | Complete |
 | MCP-04 | Phase 21 | Complete |
 | MCP-05 | Phase 21 | Complete |
-| CFB-01 | Phase 22 | Pending |
-| CFB-02 | Phase 22 | Pending |
+| CFB-01 | Phase 22 | Complete |
+| CFB-02 | Phase 22 | Complete |
 | PDFA-01 | Phase 23 | Pending |
 | PDFA-02 | Phase 23 | Pending |
 
