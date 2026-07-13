@@ -145,8 +145,13 @@ Plans:
   2. A genuinely compliant PDF/A-2b export still passes validation against the existing v1.3 PDF/A fixtures — no regression from the stricter check, per the decided severity policy (Warning vs Error rule violations).
   3. veraPDF is bundled into `Dockerfile.document-worker` (multi-stage `COPY` from `verapdf/cli`, glibc-compat verified live) and invoked through the hardened `runCommand` with its own bounded timeout; `terminalVeraPDFSignatures` are added same-commit (D-04 discipline).
   4. The measured JVM cold-start cost is captured against `DOCUMENT_ENGINE_TIMEOUT` and the CI e2e budget before wiring veraPDF into the job path; if the cost proves prohibitive, the daemon/server-mode (`verapdf/rest`) fallback is documented as the decided alternative.
-**Plans**: TBD
+**Plans**: 3 plans
 **Cost gate**: JVM-per-invocation cost must be measured live before veraPDF is placed on the job path; the CLI-vs-daemon shape is an explicit, measured decision (not assumed), and the daemon fallback is documented either way. Verify veraPDF's exact non-conformance report format/exit codes live before hardcoding terminal signatures.
+
+Plans:
+- [ ] 23-01-PLAN.md — Dockerfile packaging (pinned verapdf/cli:1.30.2, glibc verified live) + JVM cold-start MEASUREMENT GATE (p95 <= 10s go/no-go, blocking operator checkpoint)
+- [ ] 23-02-PLAN.md — Go wiring: internal/convert/verapdf.go (runCommand + machine-report parser, fail-closed) + wantPDFA hook in validateDocumentOutput + terminalVeraPDFSignatures same-commit + fixture-driven unit tests
+- [ ] 23-03-PLAN.md — LIVE HARD GATE: compliant PDF/A-2b passes e2e under real veraPDF; deliberately non-compliant marker-bearing PDF fails terminally with reason in job_events; build-time delta recorded
 
 ## Progress
 
