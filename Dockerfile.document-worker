@@ -6,6 +6,16 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /out/document-worker ./cmd/document-worker
 
+# veraPDF stage: reuse the official jlink-trimmed JRE + app, don't rebuild it
+# (PDFA-02, D-03). Pinned tag is `v1.30.2` (NOT `1.30.2` -- the Docker Hub tag
+# carries a leading "v"; verified live against the registry during 23-01
+# execution, the bare "1.30.2" tag does not exist). This image is published
+# amd64-only (no arm64 manifest as of 2026-07-13, verified via Docker Hub
+# API) -- the whole document-worker image must therefore be built with
+# `--platform linux/amd64` on arm64 hosts (see docker-compose.yml `platform:`
+# pin on this service).
+FROM verapdf/cli:v1.30.2 AS verapdf
+
 # Runtime stage: document engine needs LibreOffice (soffice) headless conversion.
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -18,8 +28,24 @@ RUN apt-get update \
       fonts-crosextra-carlito \
       fonts-crosextra-caladea \
       fonts-liberation2 \
+      openjdk-17-jre-headless \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/document-worker /usr/local/bin/document-worker
+# veraPDF (PDFA-02): PATH B (Debian JRE) was used, not path A. Verified LIVE
+# (23-01) that copying the jlink-trimmed JRE from verapdf/cli straight across
+# the musl (Alpine, source) -> glibc (Debian bookworm, this image) boundary
+# does NOT load -- `ldd` on the copied java binary reported
+# `libc.musl-x86_64.so.1 => not found`; the jlink JRE's native libs are
+# musl-linked and cannot resolve against bookworm's glibc dynamic loader
+# (see 23-01-SUMMARY.md for the recorded failure). Per the documented
+# fallback (D-03): install openjdk-17-jre-headless from Debian (java on
+# PATH) and copy ONLY veraPDF's app tree (/opt/verapdf -- the launch script
+# there auto-detects `java` via PATH/JAVA_HOME, so no JAVA_HOME env is
+# needed). This keeps the pinned CLASSPATH/app jars (cli-1.30.2.jar) from
+# the pinned verapdf/cli:v1.30.2 image while running them on a glibc-native
+# JRE.
+COPY --from=verapdf /opt/verapdf /opt/verapdf
+ENV PATH="/opt/verapdf:${PATH}"
 # Run unprivileged: the worker shells out to untrusted-input engines.
 USER nobody
 # tini is PID 1 so orphaned grandchildren (e.g. LibreOffice's oosplash forking
