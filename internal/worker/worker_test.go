@@ -133,6 +133,42 @@ func TestIsTerminalChromiumSignatures(t *testing.T) {
 	}
 }
 
+// TestIsTerminalVeraPDFSignatures proves D-06 (phase 23): both terminal
+// veraPDF error strings ("pdf/a non-compliant" for a clean non-compliant
+// report, "pdf/a validation error" for any invocation/parse failure --
+// fail-closed) classify terminal via the shared isTerminal, regardless of
+// how they arrive wrapped (validateDocumentOutput wraps with "libreoffice:
+// %w", process() wraps with "convert: %w").
+func TestIsTerminalVeraPDFSignatures(t *testing.T) {
+	cases := []string{
+		"convert: libreoffice: verapdf: pdf/a non-compliant: 6.6.2.1: the document catalog dictionary doesn't contain metadata key",
+		"convert: libreoffice: verapdf: pdf/a validation error: parse machine-readable report: EOF",
+	}
+	for _, msg := range cases {
+		if !isTerminal(errors.New(msg)) {
+			t.Fatalf("expected isTerminal(%q) = true", msg)
+		}
+	}
+}
+
+// TestIsDocumentTerminalVeraPDFSignatures proves both veraPDF terminal
+// signatures also classify terminal through isDocumentTerminal (the
+// document engine's engine-scoped classifier that HandleDocumentConvert
+// actually calls) -- fail-closed reaches MarkFailed+SkipRetry, not an asynq
+// retry loop, and (per D-07) rides the existing
+// {"engine_stderr": err.Error()} MarkFailed detail path with no new logging.
+func TestIsDocumentTerminalVeraPDFSignatures(t *testing.T) {
+	cases := []error{
+		errors.New("convert: libreoffice: verapdf: pdf/a non-compliant: 6.2.4.3: DeviceRGB colour space is used without RGB output intent profile"),
+		errors.New("convert: libreoffice: verapdf: pdf/a validation error: start verapdf: exec: \"verapdf\": executable file not found in $PATH"),
+	}
+	for _, err := range cases {
+		if !isDocumentTerminal(err) {
+			t.Fatalf("expected isDocumentTerminal(%v) = true", err)
+		}
+	}
+}
+
 func TestIsHTMLTerminal(t *testing.T) {
 	// An HTML_ENGINE_TIMEOUT expiry (exec.go's process-group-kill shape,
 	// preserved through chromium.go and process()'s %w wrapping) IS terminal

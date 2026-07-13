@@ -106,7 +106,7 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		"--outdir", workDir,
 		inPath,
 	}
-	if err := runCommand(ctx, "soffice", args...); err != nil {
+	if _, err := runCommand(ctx, "soffice", args...); err != nil {
 		return fmt.Errorf("libreoffice: %w", err)
 	}
 
@@ -127,7 +127,7 @@ func (LibreOfficeConverter) Convert(ctx context.Context, inPath, outPath string,
 		return fmt.Errorf("libreoffice: rename output: %w", err)
 	}
 
-	return validateDocumentOutput(outPath, targetFormat, isPDFA)
+	return validateDocumentOutput(ctx, outPath, targetFormat, isPDFA)
 }
 
 // Engine reports the document engine class (D-01).
@@ -222,8 +222,14 @@ var gtsPDFAMarker = []byte("/GTS_PDFA")
 // (T-13-01). When wantPDFA is set (a pdf_profile was requested, D-05), a pdf
 // target additionally requires the /GTS_PDFA OutputIntent marker to be
 // present -- a regressed LibreOffice that silently returns a plain PDF under
-// a PDF/A request must never be reported as a successful archival export.
-func validateDocumentOutput(path, targetFormat string, wantPDFA bool) error {
+// a PDF/A request must never be reported as a successful archival export
+// (the cheap pre-filter, D-05) -- and, once that marker passes, real ISO
+// 19005-2b conformance is verified via ValidatePDFA (phase 23, D-05/D-06):
+// the marker alone was always a non-authoritative sanity check (Pitfall 8),
+// never a substitute for full veraPDF validation. ctx carries the
+// DOCUMENT_ENGINE_TIMEOUT budget the caller (Convert) already holds;
+// ValidatePDFA derives its own bounded sub-context from it (D-04).
+func validateDocumentOutput(ctx context.Context, path, targetFormat string, wantPDFA bool) error {
 	target := NormalizeFormat(targetFormat)
 	if target == "pdf" {
 		if err := validatePDF(path); err != nil {
@@ -238,6 +244,16 @@ func validateDocumentOutput(path, targetFormat string, wantPDFA bool) error {
 		}
 		if !bytes.Contains(data, gtsPDFAMarker) {
 			return fmt.Errorf("libreoffice: output missing PDF/A OutputIntent marker")
+		}
+		// D-05: veraPDF only ever runs AFTER the cheap marker pre-filter
+		// above passes -- a plain PDF fast-fails on the marker without
+		// paying the JVM cold-start cost. D-06: a non-compliant or
+		// unverifiable veraPDF verdict is fail-closed here; its two terminal
+		// signatures ("pdf/a non-compliant", "pdf/a validation error") are
+		// coupled into terminalVeraPDFSignatures (internal/worker/worker.go)
+		// in this SAME commit.
+		if err := ValidatePDFA(ctx, path); err != nil {
+			return fmt.Errorf("libreoffice: %w", err)
 		}
 		return nil
 	}

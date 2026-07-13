@@ -115,7 +115,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(odtPath, odtData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(odtPath, "odt", false); err != nil {
+	if err := validateDocumentOutput(context.Background(), odtPath, "odt", false); err != nil {
 		t.Errorf("validateDocumentOutput(valid odt, %q) = %v, want nil", "odt", err)
 	}
 
@@ -124,7 +124,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(emptyPath, []byte{}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(emptyPath, "odt", false); err == nil {
+	if err := validateDocumentOutput(context.Background(), emptyPath, "odt", false); err == nil {
 		t.Error("validateDocumentOutput(empty, \"odt\") = nil, want error")
 	} else if !strings.Contains(err.Error(), "output is empty") {
 		t.Errorf("validateDocumentOutput(empty) error = %v, want substring \"output is empty\"", err)
@@ -138,7 +138,7 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(wrongPath, docxData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(wrongPath, "odt", false); err == nil {
+	if err := validateDocumentOutput(context.Background(), wrongPath, "odt", false); err == nil {
 		t.Error("validateDocumentOutput(docx-as-odt) = nil, want error")
 	} else if !strings.Contains(err.Error(), "output does not match expected container format") {
 		t.Errorf("validateDocumentOutput(mismatch) error = %v, want substring \"output does not match expected container format\"", err)
@@ -149,14 +149,14 @@ func TestValidateDocumentOutput(t *testing.T) {
 	if err := os.WriteFile(pdfValidPath, []byte("%PDF-1.6\n%rest of content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(pdfValidPath, "pdf", false); err != nil {
+	if err := validateDocumentOutput(context.Background(), pdfValidPath, "pdf", false); err != nil {
 		t.Errorf("validateDocumentOutput(valid pdf, \"pdf\") = %v, want nil", err)
 	}
 	pdfInvalidPath := filepath.Join(dir, "invalid.pdf")
 	if err := os.WriteFile(pdfInvalidPath, []byte("not a pdf"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(pdfInvalidPath, "pdf", false); err == nil {
+	if err := validateDocumentOutput(context.Background(), pdfInvalidPath, "pdf", false); err == nil {
 		t.Error("validateDocumentOutput(non-pdf content, \"pdf\") = nil, want error")
 	}
 }
@@ -308,12 +308,27 @@ func TestParseDocOptsStrictness(t *testing.T) {
 	}
 }
 
-// TestValidatePDFAOutputIntent proves D-05/D-06: a produced PDF that carries
-// the /GTS_PDFA OutputIntent marker passes validateDocumentOutput when PDF/A
-// was requested; one that lacks it fails with an "OutputIntent"-substring
-// error (the terminal signature worker.go matches on); and when PDF/A was
-// NOT requested (wantPDFA=false), the marker's presence/absence is ignored
-// entirely (regression safety for plain document->pdf conversions).
+// TestValidatePDFAOutputIntent proves D-05/D-06 across the marker pre-filter
+// AND the real veraPDF validation it now gates into.
+//
+// Two of the three legs stay fully offline (they fail/pass at the marker
+// pre-filter BEFORE ValidatePDFA is ever reached, so no veraPDF binary is
+// needed): marker-absent+wantPDFA=true fails with an "OutputIntent"-substring
+// error, and marker-absent+wantPDFA=false returns nil (both marker and
+// veraPDF skipped).
+//
+// The third leg (marker-PRESENT+wantPDFA=true) now flows PAST the marker
+// gate into a real ValidatePDFA call, since the synthetic "/GTS_PDFA1" bytes
+// below are not a genuine PDF/A document -- it can no longer assert
+// err==nil. This leg is gated behind exec.LookPath("verapdf") (mirroring the
+// soffice-skip precedent elsewhere in this file): when veraPDF IS present,
+// it asserts the marker-bearing-but-non-PDF/A file is REJECTED with a
+// terminal veraPDF signature ("pdf/a non-compliant" or "pdf/a validation
+// error"), proving control passed the marker gate into real validation
+// rather than short-circuiting on the (by-then-irrelevant) "OutputIntent"
+// pre-filter error. The genuine compliant->nil path is proven offline by the
+// parser fixture tests in verapdf_test.go (D-08) and by the live e2e gate
+// (Plan 03, D-09), not here.
 func TestValidatePDFAOutputIntent(t *testing.T) {
 	dir := t.TempDir()
 
@@ -322,16 +337,14 @@ func TestValidatePDFAOutputIntent(t *testing.T) {
 	if err := os.WriteFile(withMarker, pdfWithMarker, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentOutput(withMarker, "pdf", true); err != nil {
-		t.Errorf("validateDocumentOutput(marker present, wantPDFA=true) = %v, want nil", err)
-	}
 
 	withoutMarker := filepath.Join(dir, "without-marker.pdf")
 	pdfWithoutMarker := []byte("%PDF-1.6\n%plain pdf bytes, no marker\n%%EOF")
 	if err := os.WriteFile(withoutMarker, pdfWithoutMarker, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validateDocumentOutput(withoutMarker, "pdf", true)
+
+	err := validateDocumentOutput(context.Background(), withoutMarker, "pdf", true)
 	if err == nil {
 		t.Fatal("validateDocumentOutput(marker absent, wantPDFA=true) = nil, want error")
 	}
@@ -339,8 +352,22 @@ func TestValidatePDFAOutputIntent(t *testing.T) {
 		t.Errorf("validateDocumentOutput(marker absent, wantPDFA=true) error = %v, want substring \"OutputIntent\"", err)
 	}
 
-	if err := validateDocumentOutput(withoutMarker, "pdf", false); err != nil {
+	if err := validateDocumentOutput(context.Background(), withoutMarker, "pdf", false); err != nil {
 		t.Errorf("validateDocumentOutput(marker absent, wantPDFA=false) = %v, want nil (marker ignored)", err)
+	}
+
+	if _, err := exec.LookPath("verapdf"); err != nil {
+		t.Skip("verapdf not on PATH; run inside the document-worker image to exercise the real ValidatePDFA leg")
+	}
+	markerErr := validateDocumentOutput(context.Background(), withMarker, "pdf", true)
+	if markerErr == nil {
+		t.Fatal("validateDocumentOutput(marker present, wantPDFA=true) = nil, want a real veraPDF rejection (synthetic marker bytes are not a genuine PDF/A document)")
+	}
+	if strings.Contains(markerErr.Error(), "OutputIntent") {
+		t.Errorf("validateDocumentOutput(marker present, wantPDFA=true) error = %v, still failed at the OutputIntent pre-filter -- expected control to pass the marker gate into ValidatePDFA", markerErr)
+	}
+	if !strings.Contains(markerErr.Error(), "pdf/a non-compliant") && !strings.Contains(markerErr.Error(), "pdf/a validation error") {
+		t.Errorf("validateDocumentOutput(marker present, wantPDFA=true) error = %v, want a terminal veraPDF signature (\"pdf/a non-compliant\" or \"pdf/a validation error\")", markerErr)
 	}
 }
 
@@ -458,7 +485,10 @@ func TestLibreOfficeConverter_TimeoutKillsRealProcess(t *testing.T) {
 	defer killCancel()
 
 	runDone := make(chan error, 1)
-	go func() { runDone <- runCommand(ctx, "soffice", args...) }()
+	go func() {
+		_, err := runCommand(ctx, "soffice", args...)
+		runDone <- err
+	}()
 
 	// Poll for soffice.bin actually running before triggering the kill —
 	// this is the probe-and-kill methodology RESEARCH.md verified live
@@ -512,7 +542,7 @@ func TestLibreOfficeConverter_ConvertProducesValidPDF(t *testing.T) {
 
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer seedCancel()
-	if err := runCommand(seedCtx, "soffice", "--headless", "--convert-to", "odt", "--outdir", dir, seedPath); err != nil {
+	if _, err := runCommand(seedCtx, "soffice", "--headless", "--convert-to", "odt", "--outdir", dir, seedPath); err != nil {
 		t.Fatalf("seed conversion (txt->odt) failed: %v", err)
 	}
 

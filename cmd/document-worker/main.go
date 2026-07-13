@@ -71,6 +71,15 @@ func main() {
 	// constructed or run here, avoiding a double-sweep race between
 	// independent sweep loops recovering the same stranded job.
 
+	// Phase 23 (veraPDF validation) D-04/WARNING-3: VERAPDF_TIMEOUT is read
+	// ONLY here (env-only-in-main, mirroring engineTimeout's threading into
+	// NewHandler above) and injected into internal/convert via a setter --
+	// internal/convert never calls os.Getenv directly. This MUST run before
+	// srv.Start(mux) below: that is the point asynq's worker goroutines
+	// begin concurrently reading verapdfTimeout, so this single write must
+	// happen-before every concurrent read (no mutex needed).
+	convert.SetVeraPDFTimeout(envDuration("VERAPDF_TIMEOUT", 60*time.Second))
+
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeDocumentConvert, h.HandleDocumentConvert)
 
