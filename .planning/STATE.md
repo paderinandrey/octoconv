@@ -4,14 +4,14 @@ milestone: v1.5
 milestone_name: MCP Access & Document Fidelity
 status: executing
 stopped_at: Roadmap complete (Phases 20-23), ready to plan Phase 20
-last_updated: "2026-07-13T02:01:33.867Z"
-last_activity: 2026-07-13 -- Phase 21 execution started
+last_updated: "2026-07-13T09:26:10.172Z"
+last_activity: 2026-07-13 -- Phase 22 execution started
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 5
+  total_plans: 7
   completed_plans: 5
-  percent: 25
+  percent: 50
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-13 after v1.5 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 21 — mcp-server
+**Current focus:** Phase 22 — cfb-classification
 
 ## Current Position
 
-Phase: 21 (mcp-server) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 21
-Last activity: 2026-07-13 -- Phase 21 execution started
+Phase: 22 (cfb-classification) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 22
+Last activity: 2026-07-13 -- Phase 22 execution started
 
 ## Performance Metrics
 
