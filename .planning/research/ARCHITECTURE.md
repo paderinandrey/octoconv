@@ -1,329 +1,373 @@
 # Architecture Research
 
-**Domain:** Internal async file-conversion service — milestone v1.5 integration design (MCP server, presets REST CRUD, veraPDF validation, CFB directory classification)
-**Researched:** 2026-07-13
-**Confidence:** HIGH for patterns directly extending existing, live-verified code (presets REST, CFB classification); MEDIUM for MCP SDK specifics and veraPDF CLI packaging (verified via WebSearch against official sources, not yet live-tested in this repo); LOW/flagged where a genuinely new integration surface is proposed (capabilities endpoint, veraPDF error-signature set)
+**Domain:** Kubernetes + KEDA deployment of an existing Go/asynq/Postgres/Redis/MinIO conversion service (OctoConv v1.6)
+**Researched:** 2026-07-14
+**Confidence:** HIGH (all findings grounded in direct reads of `cmd/*/main.go`, `docker-compose*.yml`, `internal/e2e/e2e_test.go`, `internal/mcpserver/*.go`, `internal/api/presets_handlers.go`, migrations, `.github/workflows/ci.yml`); MEDIUM for OrbStack-specific networking claims (verified via one WebSearch against OrbStack's own docs, not independently tested against this repo's actual chart)
+
+This is **integration-design** research, not generic "how do Kubernetes apps look" research: every finding below is anchored to a real file in this repository. Where the four SEED-004 "landmines" have a code-verified zero-code-change fix, that is stated as fact, not inferred.
 
 ## Standard Architecture
 
 ### System Overview
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  NEW: Agent / developer machine (outside docker-compose)             │
-│  ┌──────────────────┐                                                │
-│  │  cmd/mcp-server   │  stdio transport (modelcontextprotocol/go-sdk)│
-│  │  (thin binary)    │  reads OCTOCONV_BASE_URL / OCTOCONV_API_KEY   │
-│  └────────┬──────────┘                                                │
-│           │ internal/mcpserver: convert_file/get_job_status/          │
-│           │ download_result/list_supported_formats/list_presets       │
-│           │ (pure HTTP client, ApiKey header — no internal/* imports  │
-│           │  besides mcpserver's own client)                          │
-└───────────┼────────────────────────────────────────────────────────────┘
-            │ HTTPS/HTTP — same wire contract as any client
-            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                          internal/api (existing)                      │
-│  routes.go: /healthz (public) · /v1 group (ByIP → auth → PerClient)    │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────────────┐  │
-│  │ /v1/jobs     │ │ NEW          │ │ NEW                          │  │
-│  │ POST,GET/{id}│ │ /v1/presets  │ │ /v1/formats (or /capabilities)│  │
-│  │ (existing)   │ │ CRUD group   │ │ GET, read-only, registry dump │  │
-│  └──────┬───────┘ └──────┬───────┘ └──────────────┬────────────────┘  │
-└─────────┼────────────────┼────────────────────────┼───────────────────┘
-          │                │                        │
-          ▼                ▼                        ▼
-   internal/jobs    internal/presets.Repo    convert.Default (registry)
-   (Postgres)        (List/Get/Create/         .Pairs()/.Engine() walk
-                      Update/Deactivate,        — read-only introspection
-                      client-scope only          only, no storage/DB
-                      via auth.ClientFromContext)
-
-┌──────────────────────────────────────────────────────────────────────┐
-│           document-worker container (existing, extended)             │
-│  Dockerfile.document-worker: debian:bookworm-slim + LibreOffice        │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │ LibreOfficeConverter.Convert → validateDocumentOutput            │  │
-│  │   target==pdf && wantPDFA:                                       │  │
-│  │     [existing] /GTS_PDFA substring pre-filter (cheap, kept)      │  │
-│  │     [NEW] internal/convert/verapdf.go: runVeraPDFCheck(ctx,path) │  │
-│  │           os/exec via SAME hardened runCommand (exec.go)         │  │
-│  │           requires JRE + verapdf CLI ADDED to this image          │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────┐
-│                   internal/convert/olecfb.go (extended)               │
-│  IsOLECFB(r) [unchanged, cheap 8-byte magic gate]                      │
-│  NEW: ClassifyCFB(r) → {encrypted|legacy|unknown}                      │
-│    hand-rolled CFB directory-sector reader (no new dependency),        │
-│    looks for top-level stream names:                                  │
-│      EncryptionInfo + EncryptedPackage  → encrypted                   │
-│      WordDocument / Workbook|Book / PowerPoint Document → legacy       │
-│      neither recognized                → unknown (fail-closed 422)    │
-│  Consumed by handleCreateJob's existing IsOLECFB branch (3-way split)  │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Namespace: octoconv (Helm release: octoconv, chart: deploy/chart/octoconv)│
+├──────────────────────────────────────────────────────────────────────────┤
+│  Deployments (existing binaries, one container image each)               │
+│  ┌────────┐ ┌────────┐ ┌──────────────┐ ┌────────────────┐ ┌───────────┐ │
+│  │  api   │ │ worker │ │document-worker│ │chromium-worker │ │webhook-wkr│ │
+│  │ (1..N) │ │ (KEDA) │ │    (KEDA)     │ │    (KEDA)      │ │ (fixed=2) │ │
+│  └───┬────┘ └───┬────┘ └──────┬───────┘ └───────┬────────┘ └─────┬─────┘ │
+│      │          │             │                 │                │       │
+│  ┌───┴──────────┴─────────────┴─────────────────┴────────────────┴────┐ │
+│  │        Service: octoconv-api (ClusterIP, LB via OrbStack)          │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+│  ┌────────────┐  ┌──────────────┐                                        │
+│  │ mcp-http   │  │ asynqmon      │  NEW (Phase D) / existing-but-relocated│
+│  │ (1 replica)│  │ (dashboard)   │                                        │
+│  └────────────┘  └──────────────┘                                        │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Jobs / Hooks                                                            │
+│  ┌──────────────────┐   ┌───────────────────┐   ┌──────────────────────┐ │
+│  │ migrate (Helm     │   │ createbucket (Helm │   │ e2e-test (manual Job,│ │
+│  │ pre-install/      │   │ pre-install/       │   │ NOT a hook — run     │ │
+│  │ pre-upgrade hook) │   │ pre-upgrade hook)  │   │ on demand)            │ │
+│  └──────────────────┘   └───────────────────┘   └──────────────────────┘ │
+├──────────────────────────────────────────────────────────────────────────┤
+│  KEDA (Active KEDA namespace, chart-conditional keda.enabled)             │
+│  ScaledObject×3 (image/document/html queues) → Prometheus scaler         │
+│  querying octoconv_queue_depth{queue=...,state="pending"}                │
+│  webhook-worker: fixed 2 replicas, NOT KEDA-managed (redundancy, not      │
+│  elasticity — matches the existing "≥2-consumer" design intent)          │
+├──────────────────────────────────────────────────────────────────────────┤
+│  Stateful dependencies (own templates, not subcharts — see rationale)     │
+│  ┌──────────┐  ┌───────┐  ┌───────┐                                     │
+│  │ postgres │  │ redis │  │ minio │  each: Deployment + PVC + ClusterIP │
+│  └──────────┘  └───────┘  └───────┘  Service with an FQDN-stable name   │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Component Responsibilities
 
-| Component | Responsibility | New or Modified |
-|-----------|----------------|-----------------|
-| `cmd/mcp-server` | Thin entrypoint: env config, wire `internal/mcpserver`, run stdio transport | NEW cmd |
-| `internal/mcpserver` | MCP tool handlers + minimal HTTP API client (multipart upload, poll, presigned download) | NEW package |
-| `internal/api` routes.go / new `presets_handlers.go` | `/v1/presets` CRUD group, mounted inside existing authenticated `/v1` group | MODIFIED (routes.go) + NEW file |
-| `internal/api` new `formats_handlers.go` | `/v1/formats` (or `/v1/capabilities`) read-only registry dump | NEW file (small) |
-| `internal/presets.Repo` | Already has List/Get/Create/Update/Deactivate — reused as-is | UNCHANGED (already shaped for this, per repo.go comment referencing SEED-003) |
-| `internal/convert/verapdf.go` | Hardened `os/exec` wrapper invoking the `verapdf` CLI, parses its report for ISO 19005 compliance | NEW file |
-| `Dockerfile.document-worker` | Adds JRE + veraPDF CLI alongside existing LibreOffice | MODIFIED |
-| `internal/worker/worker.go` | New `terminalVeraPDFSignatures` slice wired into `isTerminal`, same-commit discipline as D-04 | MODIFIED |
-| `internal/convert/olecfb.go` | `ClassifyCFB` added alongside existing `IsOLECFB` | MODIFIED |
-| `internal/api/handlers.go` | `handleCreateJob`'s single OLE-CFB 422 branch splits into 3 (encrypted/legacy/unknown), 3 distinct log reasons | MODIFIED |
-| `internal/e2e` | `TestOLECFBRejectionE2E` per-fixture message assertions; new MCP live-gate test file | MODIFIED + possible NEW file |
+| Component | Responsibility | File/Chart Location |
+|-----------|-----------------|----------------------|
+| `deploy/chart/octoconv/templates/deployment-{api,worker,document-worker,chromium-worker,webhook-worker}.yaml` | One Deployment template per existing binary, `{{ .Values.<svc>.replicas }}` (worker/document-worker/chromium-worker default low, overridden by KEDA once `keda.enabled`); env sourced from a shared `configmap.yaml` + `secret.yaml` | NEW |
+| `deploy/chart/octoconv/templates/job-migrate.yaml`, `job-createbucket.yaml` | Helm hooks (`pre-install,pre-upgrade`) running `cmd/migrate` and an `mc mb --ignore-existing` one-shot against the chart's own MinIO Service | NEW |
+| `deploy/chart/octoconv/templates/scaledobject-*.yaml` | KEDA `ScaledObject` per engine-class queue, `keda.enabled` gate | NEW |
+| `deploy/chart/octoconv/templates/deployment-mcp-http.yaml` | Runs `cmd/mcp-http` (new binary) behind a ClusterIP Service | NEW |
+| `deploy/chart/octoconv/templates/{postgres,redis,minio}.yaml` | Deployment + PVC + Service for each stateful dependency | NEW |
+| `cmd/mcp-http/main.go` | New thin entrypoint: identical wiring to `cmd/mcp-server/main.go` (`mcpserver.Load()` → `NewClient` → `NewServer`) but runs `mcp.NewStreamableHTTPHandler` over `net/http` instead of `&mcp.StdioTransport{}` | NEW |
+| `Dockerfile.mcp-http` | New image; `cmd/mcp-server` has never been containerized (no existing `Dockerfile.mcp-server`) | NEW |
+| `internal/api/system_presets_handlers.go` | New handlers reusing the **already scope-agnostic** `PresetAdmin` interface with `Scope: presets.ScopeSystem, ClientID: nil` | NEW |
+| `internal/api/middleware` (or inline in `routes.go`) | New `RequireOperator` gate checking `client.ID` against an env allowlist | NEW |
+| `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` | Add a real `/healthz` (Postgres/Redis/S3 ping) alongside the existing `promhttp.Handler()` on the metrics listener | MODIFIED (small) |
+| `internal/e2e/e2e_test.go` | **Zero changes** — `E2E_WEBHOOK_HOST` and `E2E_S3_DIAL_ADDR` are already env-driven escape hatches; only the Job manifest wiring them changes | UNCHANGED |
 
-## Recommended Project Structure
+## Recommended Chart Structure
 
 ```
-cmd/
-├── mcp-server/
-│   └── main.go              # env parsing only: OCTOCONV_BASE_URL, OCTOCONV_API_KEY,
-│                             # optional OCTOCONV_CONVERT_TIMEOUT; wires internal/mcpserver
-│                             # and calls server.Run(ctx, &mcp.StdioTransport{})
-internal/
-├── mcpserver/
-│   ├── mcpserver.go          # package doc + NewServer(client *Client) *mcp.Server wiring
-│   ├── client.go             # minimal hand-rolled HTTP client: CreateJob, GetJob,
-│   │                         # DownloadResult, ListFormats, ListPresets — NOT shared
-│   │                         # with internal/e2e (its helpers live in a _test.go file
-│   │                         # and are not importable by production code anyway)
-│   ├── tools.go              # MCP tool definitions: convert_file (blocking poll loop),
-│   │                         # get_job_status, download_result, list_supported_formats,
-│   │                         # list_presets
-│   ├── client_test.go        # httptest-based fake-API unit tests (offline, always runs)
-│   └── tools_test.go
-├── api/
-│   ├── routes.go             # MODIFIED: add r.Route("/v1/presets", ...) + GET /v1/formats
-│   │                         # inside the existing authenticated /v1 group
-│   ├── api.go                # MODIFIED: add PresetAdmin interface + Server field
-│   ├── handlers.go           # MODIFIED: split OLE-CFB 422 branch into 3
-│   ├── presets_handlers.go   # NEW: handlePresetList/Get/Create/Update/Deactivate
-│   └── formats_handlers.go   # NEW: handleListFormats (registry walk, no auth-sensitive data)
-├── convert/
-│   ├── olecfb.go             # MODIFIED: add ClassifyCFB
-│   ├── olecfb_test.go        # MODIFIED: 3-way classification cases
-│   ├── verapdf.go            # NEW: runVeraPDFCheck(ctx, path) via hardened exec.go's runCommand
-│   ├── verapdf_test.go       # NEW
-│   └── libreoffice.go        # MODIFIED: validateDocumentOutput calls runVeraPDFCheck
-│                             # instead of (or in addition to, as a fast pre-filter) the
-│                             # bare /GTS_PDFA substring check
-├── worker/
-│   └── worker.go             # MODIFIED: terminalVeraPDFSignatures slice, wired into isTerminal
-├── presets/
-│   └── repo.go               # UNCHANGED — List/Get/Create/Update/Deactivate already exist
-└── e2e/
-    ├── e2e_test.go            # MODIFIED: per-fixture OLE-CFB message assertions
-    └── mcp_e2e_test.go        # NEW (optional): E2E_BASE_URL-gated live round-trip through
-                                # internal/mcpserver's tool handlers directly (not through
-                                # stdio framing — that layer is the SDK's own tested concern)
-Dockerfile.document-worker      # MODIFIED: + JRE + verapdf CLI
-docker-compose.yml               # UNCHANGED for MCP (deliberately not added — see below);
-                                  # document-worker environment gets no new required var if
-                                  # veraPDF timeout is folded into DOCUMENT_ENGINE_TIMEOUT
+deploy/chart/octoconv/
+├── Chart.yaml                     # single chart, apiVersion v2, no chart deps (see rationale below)
+├── values.yaml                    # see shape below
+├── values-orbstack.yaml           # local-dev overrides (LoadBalancer type, image.pullPolicy=Never)
+├── templates/
+│   ├── _helpers.tpl               # fullname/labels helpers + shared env-block templates
+│   ├── configmap.yaml             # non-secret env: S3_BUCKET, METRICS_ADDR, *_MAX_RETRY, *_ENGINE_TIMEOUT...
+│   ├── secret.yaml                # DATABASE_URL, API_KEY_SALT, WEBHOOK_SIGNING_SECRET, S3 creds, OCTOCONV_API_KEY (mcp)
+│   ├── deployment-api.yaml
+│   ├── deployment-worker.yaml
+│   ├── deployment-document-worker.yaml
+│   ├── deployment-chromium-worker.yaml
+│   ├── deployment-webhook-worker.yaml   # replicas: 2 fixed, NOT templated by KEDA
+│   ├── deployment-mcp-http.yaml         # conditional: .Values.mcpHttp.enabled
+│   ├── deployment-asynqmon.yaml
+│   ├── service-*.yaml                   # one per component that needs one (api, mcp-http, asynqmon, postgres, redis, minio)
+│   ├── postgres.yaml                    # Deployment + PVC + Service (own template, not a subchart)
+│   ├── redis.yaml
+│   ├── minio.yaml
+│   ├── job-migrate.yaml                 # helm.sh/hook: pre-install,pre-upgrade
+│   ├── job-createbucket.yaml            # helm.sh/hook: pre-install,pre-upgrade, hook-weight after migrate
+│   ├── scaledobject-image.yaml          # {{ if .Values.keda.enabled }}
+│   ├── scaledobject-document.yaml
+│   ├── scaledobject-html.yaml
+│   ├── networkpolicy-metrics.yaml       # restrict :9090 ingress to the scraper's namespace/pod selector
+│   └── networkpolicy-mcp.yaml           # restrict mcp-http ingress to trusted in-cluster callers
+└── crds/                                # NOT needed — KEDA CRDs are installed by the KEDA operator itself,
+                                          # this chart only creates ScaledObject *instances*
+```
+
+### values.yaml shape
+
+```yaml
+global:
+  imageTag: "dev"          # single tag for all first-party images (built with the same commit)
+  namespace: octoconv
+
+image:
+  registry: ""              # empty for OrbStack local images (no push needed, see Pitfalls)
+  pullPolicy: Never          # OrbStack builds land directly in its containerd/moby store
+
+metrics:
+  addr: "0.0.0.0:9090"       # overrides compose's 127.0.0.1:9090 default — see Landmine 1
+
+s3:
+  # FQDN, not short Service name — resolvable from BOTH in-cluster pods AND the
+  # OrbStack host (see Landmine 4). Namespace must match .Release.Namespace.
+  endpoint: "octoconv-minio.octoconv.svc.cluster.local:9000"
+
+api:
+  replicas: 1
+  resources: {...}
+
+worker:
+  replicas: 1                # baseline before KEDA takes over; ignored once ScaledObject is active
+document-worker:
+  replicas: 1
+chromium-worker:
+  replicas: 1
+webhook-worker:
+  replicas: 2                 # fixed redundancy — NEVER templated by KEDA (see Component Responsibilities)
+
+keda:
+  enabled: false               # off by default; chart installs cleanly even without the KEDA operator present
+  image:
+    pollingInterval: 15
+    minReplicaCount: 0
+    maxReplicaCount: 8
+
+mcpHttp:
+  enabled: false               # Phase D ships this off-by-default until validated
+
+operator:
+  clientIds: []                # OPERATOR_CLIENT_IDS allowlist for system-presets REST (Q5)
 ```
 
 ### Structure Rationale
 
-- **`internal/mcpserver/` (not a self-contained `cmd/`-only package):** matches the existing project convention "`cmd/*` triggers, `internal/*` holds logic" (see `cmd/api/main.go`, `cmd/worker/main.go`, `cmd/document-worker/main.go` — all thin wiring over `internal/worker`, `internal/api`). Even though `internal/mcpserver` imports **no other** `internal/*` package (it is a pure HTTP client of the public API, matching the milestone context's "no internal package imports beyond maybe a shared api-client helper"), keeping it under `internal/` preserves the project's established unit-testing shape (package-scoped `_test.go` files, `httptest` fakes) rather than bloating `cmd/mcp-server/main.go` into an untested monolith.
-- **Hand-rolled client, not shared with `internal/e2e`:** `internal/e2e`'s `postJob`/`pollUntilDone`/`buildJobRequest` helpers live in `e2e_test.go` — a `_test.go` file. Go tooling makes these **structurally unimportable** by any non-test, non-`e2e`-package code; "share vs duplicate" is not actually a live choice without first extracting them into a new non-test package (e.g. `internal/httpclient`) used by both `internal/e2e` and `internal/mcpserver`. That refactor is a valid future consolidation but is deliberately **out of scope for v1.5**: the two call sites have different failure-handling shapes (e2e's helpers call `t.Fatalf`; MCP's client must return `error` for tool-call error mapping), the duplicated surface is small (~50-80 lines: build multipart request, poll loop, presigned download), and independent implementations act as a natural cross-check on wire-contract assumptions (mirroring the project's existing preference for independent input/output validation rather than trusting one code path — cf. `validateDocumentOutput` re-sniffing outputs with the same `SniffContainer` used for inputs, rather than trusting the conversion blindly).
-- **`internal/api/presets_handlers.go` and `formats_handlers.go` as separate files, not appended to `handlers.go`:** matches the established "one file per responsibility" convention (cf. `internal/convert/`'s `convert.go`/`exec.go`/`libvips.go` split). `handlers.go` is already the API's largest file; presets CRUD and format-discovery are each a distinct, independently-reviewable surface.
-- **`internal/convert/verapdf.go` as its own file:** mirrors `libvips.go`/`libreoffice.go`/`chromium.go`'s one-engine-integration-per-file pattern, even though veraPDF is a *validator*, not a `Converter` — it still shells out to an external CLI via the same hardened `exec.go` machinery, so it deserves the same isolation.
+- **Single chart, not per-service charts**: every component already deploys from one repo/one commit (`global.imageTag`), and the compose file's own structure (`docker-compose.yml`) is a single-file, single-stack description that this chart should mirror 1:1 for maintainability — a multi-chart umbrella would just re-add complexity the compose file never had.
+- **Postgres/Redis/MinIO as own templates, not Bitnami/official subcharts**: `docker-compose.yml` pins `postgres:18`, `redis:8`, `minio/minio:latest` directly with hand-rolled healthchecks and a single PVC each — no StatefulSet features (ordinal identity, headless Service) are actually used anywhere in the current architecture (single-instance stateful deps, not a Postgres/Redis cluster). Pulling in Bitnami subcharts would import a large surface of unused configurability (replication, TLS, metrics exporters) for zero benefit at this milestone's scope, and would fight the project's own "minimize new dependency surface" bias. Recommendation: three flat Deployment+PVC+Service templates, revisit subcharts only if genuine HA/replication requirements emerge (explicitly out of scope per `PROJECT.md`'s "Kubernetes + KEDA" framing as an infra-validation milestone, not a production-HA milestone).
+- **KEDA ScaledObjects live in the SAME chart**, gated by `keda.enabled`, not a separate chart: they are `ScaledObject` custom resources, not the KEDA operator itself (the operator is a cluster-wide prerequisite, installed once via its own Helm chart, exactly like `cert-manager` or an ingress controller — outside this chart's concern). Keeping the `ScaledObject` *instances* in this chart means `helm install octoconv` and `helm install octoconv --set keda.enabled=true` are the only two states an operator needs to reason about, matching SEED-004's framing ("KEDA: ScaledObjects per engine-class... на УЖЕ СУЩЕСТВУЮЩУЮ Prometheus-метрику").
+- **`webhook-worker` is a fixed-replica Deployment, deliberately NOT KEDA-managed**: its ×2 replication exists for delivery redundancy and singleton-sweeper failover (Postgres advisory lock — `PROJECT.md` Key Decision, Phase 16), not for elastic throughput scaling. A KEDA `ScaledObject` targeting it would risk scaling to 1 or 0 replicas under low webhook-queue depth, silently breaking the "≥2 consumers" redundancy guarantee the whole webhook architecture depends on. This is a genuine engine-class-vs-consumer-topology distinction worth flagging explicitly for the roadmap.
 
 ## Architectural Patterns
 
-### Pattern 1: Thin external-client `cmd/` binary wrapping the public HTTP API
+### Pattern 1: Zero-code-change env override for METRICS_ADDR (Landmine 1)
 
-**What:** A new binary that behaves exactly like any other authenticated internal client of OctoConv (multipart upload, poll `GET /v1/jobs/{id}`, fetch a presigned URL) — it holds **zero** privileged access (no DB, no S3 credentials, no Redis), identical to what `internal/e2e`'s helpers already prove is sufficient to drive the full pipeline.
-**When to use:** Any future access surface (CLI tool, Slack bot, MCP server) that only needs "submit + poll + download" — never grant it internal package access; auth/rate-limit/content-validation/fail-closed logic must stay in exactly one place (`internal/api`).
-**Trade-offs:** Duplicates a small amount of HTTP-plumbing code per new client; in exchange, every new access surface inherits every existing security property (API-key auth, rate limiting, magic-byte content validation, SSRF-guarded webhooks) for free, with zero risk of a second, subtly-different enforcement path.
+**What:** `os.Getenv("METRICS_ADDR")` is read identically in all five binaries — `cmd/api/main.go:129`, `cmd/worker/main.go:99`, `cmd/document-worker/main.go:104`, `cmd/chromium-worker/main.go:96`, `cmd/webhook-worker/main.go:125` — falling back to `"127.0.0.1:9090"` only when unset, then used directly as `http.Server{Addr: metricsAddr}`. There is no code path anywhere that hardcodes `127.0.0.1` beyond this single default string.
 
-**Example (convert_file's blocking poll shape, matching `internal/e2e.pollUntilDone`'s interval/pattern but budget-bounded rather than test-fatal):**
-```go
-func (c *Client) ConvertFileBlocking(ctx context.Context, path, target string, opts map[string]any) (*JobResult, error) {
-    jobID, err := c.CreateJob(ctx, path, target, opts) // multipart POST /v1/jobs
-    if err != nil {
-        return nil, err
-    }
-    deadline := time.Now().Add(c.convertTimeout) // OCTOCONV_CONVERT_TIMEOUT, default e.g. 300s
-    for time.Now().Before(deadline) {
-        job, err := c.GetJob(ctx, jobID) // GET /v1/jobs/{id}
-        if err != nil {
-            return nil, err
-        }
-        switch job.Status {
-        case "done":
-            return c.downloadToTemp(ctx, jobID, job.DownloadURL)
-        case "failed":
-            return nil, fmt.Errorf("job %s failed: %s", jobID, job.ErrorMessage)
-        }
-        time.Sleep(2 * time.Second) // same interval convention as e2e's pollUntilDone
-    }
-    // Budget exceeded: hand control back with the job id rather than hanging the
-    // calling agent turn — the agent can retry via get_job_status separately.
-    return nil, &JobStillRunningError{JobID: jobID}
-}
+**When to use:** Every k8s Deployment template sets `METRICS_ADDR=0.0.0.0:9090` via the shared ConfigMap. This is a **values.yaml-only change — verified zero Go code change required.**
+
+**Trade-off:** Binding `0.0.0.0` inside the pod removes the "unreachable outside the host" security boundary the compose deployment relies on for `/metrics` and `asynqmon` (`docker-compose.yml`'s own comment: "Bound to 127.0.0.1 only... no auth layer needed since it's unreachable outside the host"). In-cluster, ANY pod that can route to the metrics port can scrape it — there is no equivalent implicit isolation. **A `NetworkPolicy` restricting ingress on `:9090` to the Prometheus scraper's pod/namespace selector is not optional polish — it is the direct in-cluster replacement for the security property `127.0.0.1` used to provide.** Same reasoning applies to `asynqmon` (Deployment + ClusterIP Service + its own `NetworkPolicy`, since compose's `ports: - "127.0.0.1:8980:8080"` host-loopback restriction has no k8s equivalent — a ClusterIP Service alone is already reachable from every pod in the cluster by default).
+
+```yaml
+# networkpolicy-metrics.yaml (all Deployments carrying metrics:9090)
+podSelector:
+  matchExpressions:
+    - {key: app.kubernetes.io/part-of, operator: In, values: [octoconv]}
+ingress:
+  - from:
+      - namespaceSelector: {matchLabels: {name: monitoring}}   # or podSelector for a Prometheus Operator scrape target
+    ports: [{port: 9090, protocol: TCP}]
 ```
 
-### Pattern 2: Interface-segregated REST-admin surface reusing an already-complete repository
+### Pattern 2: In-cluster E2E as a self-addressing Job (Landmine 2)
 
-**What:** `internal/presets.Repo` already implements `List`/`Get`/`Create`/`Update`/`Deactivate` (built in Phase 18 explicitly "shaped for reuse by a future MCP list_presets tool"). The API layer needs a **second**, narrow interface alongside the existing `PresetRepo` (`Resolve`-only, used by `handleCreateJob`) — not a widened `PresetRepo` — so `handleCreateJob`'s dependency stays exactly what it uses (existing interface-segregation discipline: "Each interface declares only the subset of methods the consuming package actually calls").
-**When to use:** Any time an existing concrete repository already has more capability than one existing consumer needs, and a *new* consumer needs the rest.
-**Trade-offs:** Two interface-typed `Server` fields backed by the same concrete `*presets.Repo` value at wiring time (`NewServer(..., presetsRepo, presetsRepo, ...)`) — mildly redundant construction, but keeps both interfaces independently mockable in handler tests and preserves the documented "resolution only" contract on the hot job-creation path.
-
-**Example:**
-```go
-// internal/api/api.go — ADD alongside the existing PresetRepo (unchanged):
-type PresetAdmin interface {
-    List(ctx context.Context, scope string, clientID *uuid.UUID, includeInactive bool) ([]presets.Preset, error)
-    Get(ctx context.Context, scope string, clientID *uuid.UUID, name string) (*presets.Preset, error)
-    Create(ctx context.Context, p presets.CreateParams) (uuid.UUID, int, error)
-    Update(ctx context.Context, scope string, clientID *uuid.UUID, name, targetFormat string, options map[string]any, description string) (int, error)
-    Deactivate(ctx context.Context, scope string, clientID *uuid.UUID, name string) error
-}
-```
-
-Ownership is enforced identically to every other client-scoped resource in the codebase: `scope` is **hardcoded** to `presets.ScopeUser` and `clientID` is **always** `&client.ID` from `auth.ClientFromContext(ctx)` inside every REST preset handler — the request body/path never supplies scope or client_id, mirroring the job-ownership 404-not-403 no-leak convention already established in `handleGetJob`. A recommended query-param extension worth flagging explicitly: `GET /v1/presets?include_system=true` merges in read-only system-scope presets (name/target/options only, `client_id` always null, never marked editable) — this is what actually makes MCP's `list_presets` useful (the tool needs the *effective usable* preset set, i.e. what `handleCreateJob`'s shadow-resolution would honor, not just the client's own writable rows). Without this, `list_presets` would only ever show client-owned presets and silently omit every system preset a client is otherwise allowed to use via `preset=<name>`.
-
-### Pattern 3: Hardened external-process validation reusing the existing exec harness
-
-**What:** veraPDF ships as a Java CLI (`verapdf`, requires a JRE — confirmed via the official `veraPDF-apps` repo and the `ghcr.io/verapdf/cli` Docker image, which itself bundles a trimmed JRE specifically to control image size). Rather than introducing a new integration mechanism (HTTP sidecar), invoke it exactly like `soffice` is invoked today: through `internal/convert/exec.go`'s hardened `runCommand` (process-group `Setpgid` + SIGKILL-on-timeout), inside the **same** `attemptCtx` deadline `worker.go`'s `process()` already threads through the whole attempt.
-**When to use:** Any additional CLI-based engine or validator that needs the identical hardening (timeout, orphan-process cleanup) the project already built once.
-**Trade-offs:** JVM cold-start latency is a real, unverified-in-this-repo cost (LOW confidence — flag for live benchmarking during execution) — mitigate by only invoking veraPDF when `wantPDFA` is true (i.e., only jobs that actually requested `pdf_profile`), and by keeping the cheap `/GTS_PDFA` substring check as a fast pre-filter *before* paying for JVM startup on outputs that trivially lack the marker at all.
-
-**Example (mirrors `validateDocumentOutput`'s existing PDF/A branch):**
-```go
-// internal/convert/libreoffice.go — validateDocumentOutput, PDF/A branch:
-if !bytes.Contains(data, gtsPDFAMarker) {
-    return fmt.Errorf("libreoffice: output missing PDF/A OutputIntent marker")
-}
-// NEW: the marker alone is a non-authoritative sanity check (documented residual
-// risk, DOCV3-01) — invoke the real ISO 19005 validator for the authoritative result.
-if err := runVeraPDFCheck(ctx, path); err != nil {
-    return fmt.Errorf("verapdf: %w", err) // error text feeds terminalVeraPDFSignatures
-}
-return nil
-```
+**What:** `internal/e2e/e2e_test.go` does **not** use `httptest.NewServer`'s default loopback listener. It explicitly does:
 
 ```go
-// internal/worker/worker.go — same D-04 same-commit coupling discipline already
-// documented for terminalLibreOfficeSignatures:
-var terminalVeraPDFSignatures = []string{
-    "not compliant",       // veraPDF's own non-conformance report language (verify
-                            // exact wording live during execution — LOW confidence,
-                            // training-data-only until confirmed against a real run)
-    "verapdf: ",           // any wrapped error from runVeraPDFCheck itself (missing
-                            // binary, malformed invocation) — deterministic, not
-                            // retry-fixable, since the SAME document produces the
-                            // SAME failure on the SAME immutable output file.
-}
+ln, err := net.Listen("tcp", "0.0.0.0:0")   // e2e_test.go:348, :1010
+...
+srv.Listener.Close()
+srv.Listener = ln
 ```
 
-### Pattern 4: Fail-closed, magic-byte-then-structural two-stage content classification
+— i.e., the webhook/canary receiver is deliberately bound to all interfaces on an OS-assigned ephemeral port, precisely so it is reachable from outside the test process's own network namespace. The receiver's address is then read back from `ln.Addr()` and combined with the already-overridable `E2E_WEBHOOK_HOST` env var (`e2eSetup`, `e2e_test.go:78-85`, default `"host.docker.internal"`).
 
-**What:** `IsOLECFB` (cheap 8-byte magic check) stays exactly as-is as the fast pre-flight gate; `ClassifyCFB` is a **second**, deeper parse invoked only when `IsOLECFB` already matched — mirroring the existing `Sniff` → `SniffContainer` two-stage pattern for ZIP-based office formats (bare magic bytes can't disambiguate `docx`/`odt`/plain `.zip`; a structural directory walk is needed either way).
-**When to use:** Any format family sharing a magic-byte prefix across multiple sub-cases that need different handling.
-**Trade-offs:** CFB directory-sector parsing (header + FAT + directory-sector chain to enumerate top-level stream names) is real, bounded complexity — comparable in scope to `SniffContainer`'s ZIP central-directory walk, but for a format with no Go standard-library support. Recommend a **hand-rolled minimal reader** (only enough of MS-CFB to enumerate root-storage entry names — no full stream-content reading, no mini-FAT needed for this classification), consistent with the project's stated zero-new-dependency philosophy (explicitly cited for the decompression-bomb guards) rather than adopting a third-party CFB library.
+**Two in-cluster options compared:**
 
-**Example:**
-```go
-// internal/convert/olecfb.go — NEW
-type CFBClass string
+| | Run e2e suite AS a k8s Job (test binary in-cluster) | Receiver-pod + host-run tests via port-forward |
+|---|---|---|
+| Webhook reachability | **Trivial.** Pod IP is directly routable from every other pod by default (flat k8s pod network, no NAT) — inject the Job's own pod IP via the Downward API (`fieldRef: status.podIP`) into `E2E_WEBHOOK_HOST`. **No code change** — `E2E_WEBHOOK_HOST` already exists as an override knob. | **Structurally hard.** In-cluster `webhook-worker` pods would need to dial back OUT of the cluster to a process on the developer's host. There is no k8s equivalent of Docker's `host-gateway` — this is exactly the landmine SEED-004 names ("host.docker.internal:host-gateway трюк... в k8s не существует"). Only works at all if OrbStack's specific host-bridging behavior happens to route it, which is undocumented and non-portable to kind/k3d (the stated fallback). |
+| S3 presigned-download reachability | **Trivial**, if `S3_ENDPOINT` is set to MinIO's FQDN (`octoconv-minio.<ns>.svc.cluster.local:9000`, see Landmine 4) — the in-cluster Job resolves it exactly like any other pod. `E2E_S3_DIAL_ADDR` becomes **unnecessary** entirely (it exists only to bridge the host-vs-container DNS gap; running the suite in-cluster eliminates that gap). | Host-run tests need `E2E_S3_DIAL_ADDR` (or OrbStack's `cluster.local` host resolution, see Landmine 4) regardless — no advantage over the Job approach here. |
+| Portability beyond OrbStack | Fully portable — Downward API pod IP + Service DNS work identically on kind/k3d/any real cluster (the stated SEED-004 fallback). | Depends on host-to-pod ingress specifics of the chosen local cluster; not guaranteed on kind/k3d. |
+| CI reuse | The Job manifest can be driven by the exact same `go test ./internal/e2e/...` invocation `ci.yml`'s `e2e` tier already runs — only the environment differs (Downward API env vars vs `localhost`/`E2E_S3_DIAL_ADDR`). | Requires a materially different harness (port-forward setup, receiver-pod lifecycle) with no CI-tier reuse. |
 
-const (
-    CFBEncrypted CFBClass = "encrypted" // EncryptionInfo + EncryptedPackage streams present
-    CFBLegacy    CFBClass = "legacy"    // WordDocument | Workbook/Book | PowerPoint Document
-    CFBUnknown   CFBClass = "unknown"   // magic matched, directory unrecognized — fail closed
-)
+**Recommendation: run the e2e suite as an in-cluster Kubernetes `Job`.** It is the only option that (a) requires zero changes to `internal/e2e/e2e_test.go`, (b) removes two landmines simultaneously (webhook host-gateway AND S3 dial-redirect, since both existing escape hatches become no-ops in-cluster), and (c) is portable to the kind/k3d fallback SEED-004 explicitly names, unlike the port-forward option which leans on undocumented OrbStack-specific host networking.
 
-// ClassifyCFB parses r's CFB directory-sector chain and returns the first
-// recognized bucket; IsOLECFB(r) MUST already be true before calling this
-// (this function does not itself re-check the magic bytes).
-func ClassifyCFB(r io.ReaderAt) (CFBClass, error) { /* ... */ }
+```yaml
+# job-e2e.yaml (manual, NOT a Helm hook — run on demand: `helm template ... | kubectl apply -f -` or `helm test`)
+spec:
+  template:
+    spec:
+      containers:
+        - name: e2e
+          image: "{{ .Values.image.registry }}/octoconv-e2e:{{ .Values.global.imageTag }}"
+          env:
+            - {name: E2E_BASE_URL, value: "http://octoconv-api:8090"}
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: octoconv-secret, key: database-url}}}
+            - {name: API_KEY_SALT, valueFrom: {secretKeyRef: {name: octoconv-secret, key: api-key-salt}}}
+            - {name: WEBHOOK_SIGNING_SECRET, valueFrom: {secretKeyRef: {name: octoconv-secret, key: webhook-signing-secret}}}
+            - name: E2E_WEBHOOK_HOST
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}   # replaces host.docker.internal entirely
+            # E2E_S3_DIAL_ADDR: intentionally OMITTED — S3_ENDPOINT is already the
+            # in-cluster-resolvable MinIO FQDN, no redirect needed.
+      restartPolicy: Never
 ```
 
-`handleCreateJob`'s existing single OLE-CFB branch splits into three, each with its own log `reason=` tag and remedy-specific 422 message (`reason=encrypted_document`, `reason=legacy_document`, `reason=cfb_unknown` — replacing the current single `reason=legacy_or_encrypted_document`), and `internal/e2e`'s existing loose `"password"`-substring assertion (deliberately shared across both `legacy.doc` and `encrypted.docx` today, per its own comment) becomes two distinct, fixture-specific assertions using the **already-existing** `testdata/legacy.doc` and `testdata/encrypted.docx` fixtures from Phase 13 — no new fixture work required.
+This needs a **new** `Dockerfile.e2e` (multi-stage: build the test binary with `go test -c ./internal/e2e/...`, copy fixtures under `internal/e2e/testdata/`) — a new image, not a new chart concept.
 
-## Data Flow
+### Pattern 3: migrate/createbucket as Helm hooks, not initContainers
 
-### Key Data Flows
+**What:** `docker-compose.yml`'s ordering today is `depends_on: {condition: service_healthy}` (postgres/redis/minio) plus a dedicated one-shot `createbucket` service. Two idiomatic k8s translations exist: (a) Helm `pre-install,pre-upgrade` hook Jobs, or (b) `initContainers` on every consuming Deployment.
 
-1. **MCP `convert_file`:** agent → `mcp-server` (stdio) → `internal/mcpserver.Client.CreateJob` (multipart `POST /v1/jobs`, `Authorization: ApiKey ...`) → poll `GET /v1/jobs/{id}` on a 2s interval, bounded by `OCTOCONV_CONVERT_TIMEOUT` → on `done`, GET the presigned `download_url` (self-authorizing, no API key needed — identical to `internal/e2e.assertDownloadIsPDF`'s pattern) → write to a per-call `os.MkdirTemp` directory, preserving the output filename → return the **file path** (not embedded bytes) as the tool result. On budget exhaustion, return the `job_id` so the agent can retry via `get_job_status` later — the job itself keeps running server-side regardless of whether the MCP client is still polling.
-2. **MCP `list_presets` / `list_supported_formats`:** both are **read-only GETs against the new REST surfaces** (`GET /v1/presets[?include_system=true]`, `GET /v1/formats`) — this is the hard dependency the milestone context flags: since `internal/mcpserver` has no `internal/convert`/`internal/presets` import, these tools cannot exist before the corresponding REST endpoints ship.
-3. **Presets self-service CRUD:** client → `POST/GET/PUT/DELETE /v1/presets[/{name}]` (same `/v1` auth+rate-limit middleware chain as `/v1/jobs`) → handler hardcodes `scope=presets.ScopeUser`, `clientID=&client.ID` from `auth.ClientFromContext` → delegates to `internal/presets.Repo`'s existing methods, unmodified. Write-time opts feedback reuses `presets.ValidateOptsJSON` (the **same** function `cmd/manage-presets`'s `runCreate`/`runUpdate` already call) — this is a UX nicety only; the real safety boundary remains `handleCreateJob`'s existing TOCTOU re-check + full `ValidateApplicability` re-validation at use time (D-06/Pitfall 8), unchanged and untouched by this milestone.
-4. **veraPDF validation:** `LibreOfficeConverter.Convert` (document-worker) → `validateDocumentOutput` (only when `wantPDFA`) → cheap `/GTS_PDFA` substring pre-filter → `runVeraPDFCheck(ctx, path)` via `exec.go`'s hardened `runCommand` → non-zero/non-compliant result returns an error whose text is coupled, same-commit, into a new `terminalVeraPDFSignatures` slice consumed by `isTerminal`/`isDocumentTerminal` — a non-compliant PDF/A output is a deterministic, non-retryable failure exactly like every other `terminalLibreOfficeSignatures` entry.
-5. **CFB classification:** `handleCreateJob`'s existing pre-storage content-validation chain → `IsOLECFB(file)` (unchanged fast gate) → **new** `ClassifyCFB(file)` → one of 3 distinct 422s, still entirely before any S3/Postgres write (preserves the existing fail-closed-before-any-write discipline).
+**Recommendation: Helm hooks, not initContainers**, for both `migrate` and `createbucket`:
+- **Migrate** is a single logical operation that must run exactly once per deploy, before ANY consumer starts — an `initContainer` model would re-run `cmd/migrate` on every single Deployment's every single pod restart (api, worker, document-worker, chromium-worker, webhook-worker ×2 = 6+ redundant migration attempts per rollout). `cmd/migrate`'s embedded-SQL runner (`internal/db/db.go`) is presumably idempotent (`CREATE TABLE IF NOT EXISTS`-style), but repeating it N times per deploy for no benefit is pure waste and a needless race-surface (N pods racing to apply the same migration concurrently) versus a single Job with `hook-weight` ordering guaranteeing exactly one execution.
+- **createbucket** has the same "logically once" shape (`mc mb --ignore-existing`) — a `pre-install,pre-upgrade` hook with a higher (later) `hook-weight` than migrate's Job, so ordering is: `migrate` → `createbucket` → main release resources. Helm guarantees hook Jobs complete (or fail, blocking the release) before the main manifests are applied, replicating compose's `depends_on: condition: service_healthy` guarantee declaratively.
+- **initContainers remain the right tool** only for genuinely PER-POD readiness gating (e.g., "wait for Postgres/Redis/MinIO to be reachable before this pod's main container starts" — but even that is largely redundant here since `cmd/*/main.go` already calls `log.Fatalf` on connect failure, causing k8s's own container restart/backoff to retry, which is arguably sufficient without an initContainer at all, given the existing fail-fast startup discipline in this codebase).
 
-## Anti-Patterns to Avoid
+```yaml
+# job-migrate.yaml
+metadata:
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+# job-createbucket.yaml
+metadata:
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "1"       # runs strictly after migrate
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+```
 
-### Anti-Pattern 1: Granting the MCP server internal package access "for convenience"
+### Pattern 4: FQDN S3_ENDPOINT closes the presigned-URL landmine for BOTH consumer classes (Landmine 4)
 
-**What people might do:** Import `internal/jobs`/`internal/storage`/`internal/presets` directly into `cmd/mcp-server` to skip HTTP round-trips (faster, "it's all one Go module anyway").
-**Why it's wrong:** Every safety property this project has spent 19 phases building (auth, rate limiting, magic-byte content validation, SSRF-guarded callbacks, guarded status transitions) lives in `internal/api`'s HTTP handlers, not in the underlying repositories. A direct-DB MCP server would be a second, unauthenticated, unvalidated write path into the exact same tables — precisely the kind of dual-enforcement-path risk the project has consistently avoided (cf. the single-validation-authority discipline already documented for opts).
-**Instead:** `internal/mcpserver` talks **only** HTTP to the same public API surface every other internal client uses, holding a real client API key exactly like `internal/e2e`'s `provisionClient` helper proves is sufficient.
+**What:** Presigned URLs bake `S3_ENDPOINT`'s host directly into the signed URL (`internal/storage/storage.go`, mirroring compose's `minio:9000`). Two consumer classes exist in the k8s scenario:
 
-### Anti-Pattern 2: Running the MCP server as a docker-compose service
+1. **In-cluster consumers** (worker pods redownloading, the in-cluster e2e Job, `mcp-http`'s server-side `Download`) — resolve any Service DNS name (short or FQDN) fine, since kube-dns configures a search path (`<ns>.svc.cluster.local`) for every pod.
+2. **Host consumers** (a developer's `curl`/browser hitting a returned `download_url`, or a locally-run `cmd/mcp-server` in stdio mode pointed at the in-cluster API) — do **not** have that search path; a short Service name like `octoconv-minio:9000` will NOT resolve from macOS.
 
-**What people might do:** Add an `mcp-server` service to `docker-compose.yml` for consistency with `api`/`worker`/`document-worker`.
-**Why it's wrong:** stdio transport has no network-addressable listening port, no health-check surface, and no "always running" daemon state — it is a per-invocation subprocess spawned directly by the calling agent's own MCP client configuration (e.g. `claude mcp add`), typically on a developer's or agent runtime's local machine, not inside the shared compose network. `docker compose up -d` daemonizes services; a stdio binary inside that model would need an unusual interactive-attach invocation that defeats compose's entire usage pattern, and nothing else in the compose network is an MCP client that would consume it anyway.
-**Instead:** Ship `cmd/mcp-server` as a plain Go binary, documented for local/agent-runtime invocation. If a shared, network-facing internal MCP access point is ever needed (SEED-003 explicitly floats this as a *future* streamable-HTTP variant), **that** variant would legitimately belong in `docker-compose.yml` as an ordinary service — but it is out of scope for this milestone's stdio-only build.
+**Verified (WebSearch against OrbStack's own docs, MEDIUM-HIGH confidence):** OrbStack resolves standard `<service>.<namespace>.svc.cluster.local` domains directly from the macOS host — no port-forward, no `/etc/hosts` edits required — and additionally exposes `LoadBalancer`-type Services at `*.k8s.orb.local`. This means setting `S3_ENDPOINT` to the **fully-qualified** MinIO Service name (`octoconv-minio.octoconv.svc.cluster.local:9000`), not the short name, makes presigned URLs dialable identically from in-cluster pods AND the OrbStack host — closing the landmine for both consumer classes **without** needing `E2E_S3_DIAL_ADDR`, an Ingress, or a `LoadBalancer` for MinIO specifically, on OrbStack. This is an OrbStack-specific convenience, not a general k8s guarantee — flag explicitly that a real multi-node cluster (beyond this milestone's stated OrbStack/local scope) would need an Ingress or a MinIO `LoadBalancer`/`NodePort` for host-external presigned-URL access instead.
 
-### Anti-Pattern 3: Widening `PresetRepo` instead of adding `PresetAdmin`
+**Consumer map for this milestone's scenario:**
 
-**What people might do:** Add `List`/`Get`/`Create`/`Update`/`Deactivate` directly onto the existing `PresetRepo` interface since the concrete `*presets.Repo` already implements all of them, avoiding a second interface/field.
-**Why it's wrong:** `handleCreateJob` genuinely only needs `Resolve` — the existing doc comment is explicit about this ("the narrow, interface-segregated subset ... resolution only"). Widening the interface it depends on for the sake of a *different* consumer (the new REST handlers) breaks that documented invariant and makes `handleCreateJob`'s test doubles need to implement methods they never call.
-**Instead:** A second, separately-named interface (`PresetAdmin`), a second `Server` field, both backed by the same concrete `*presets.Repo` value at wiring time.
+| Consumer | Reaches API via | Reaches presigned MinIO URL via |
+|---|---|---|
+| In-cluster workers (image/document/chromium/webhook) | ClusterIP Service DNS | FQDN Service DNS (same cluster) |
+| In-cluster e2e Job (Pattern 2) | ClusterIP Service DNS | FQDN Service DNS (same cluster) |
+| `mcp-http` pod (server-side `Download` in `convert_file`/`download_result`) | ClusterIP Service DNS (calls its own cluster's API) | FQDN Service DNS (same cluster) |
+| Developer's Mac (`curl`, browser, a locally-run stdio `cmd/mcp-server` pointed at the cluster) | `*.k8s.orb.local` (LoadBalancer Service for `octoconv-api`) | FQDN `octoconv-minio.octoconv.svc.cluster.local:9000` (OrbStack host-side resolution) |
 
-### Anti-Pattern 4: Introducing an HTTP sidecar for veraPDF "for isolation"
+## Worker Probes (Q3)
 
-**What people might do:** Package veraPDF as its own container with a thin HTTP wrapper, called by document-worker over the network, reasoning that keeping the JVM out of the LibreOffice container is cleaner.
-**Why it's a genuine trade-off (not a clear anti-pattern, but flagged):** This *would* isolate the JVM's resource/failure domain from `soffice`'s, matching the project's existing philosophy of per-engine-class container isolation (`Dockerfile.worker` vs `Dockerfile.document-worker` vs `Dockerfile.chromium-worker`). However, engine-class separation in this codebase has always been about **horizontal worker types** (separate asynq consumers, separate scaling knobs), never about decomposing a *single job's* pipeline into cross-container HTTP calls — every existing engine invocation (`vips`, `soffice`, `chromium-headless-shell`) is a same-container `os/exec` call through the shared hardened `runCommand`. A sidecar introduces a new integration pattern (HTTP call + its own timeout/retry/transient-vs-terminal classification) for a single validation step, which is disproportionate complexity for this milestone. **Recommendation:** bundle veraPDF into `Dockerfile.document-worker` via `os/exec`, matching every other engine integration; revisit a sidecar only if live JVM startup cost or image bloat prove prohibitive during execution.
+**Current state, verified:** `worker`, `document-worker`, `chromium-worker`, `webhook-worker` expose exactly one HTTP listener — `promhttp.Handler()` on `METRICS_ADDR` — and nothing else. asynq itself exposes no health endpoint (confirmed: no health-check method exists on `asynq.Server`/`asynq.Client` in this codebase's usage, matching the prompt's own framing). The Postgres pool, Redis connection, and S3 client are all established once at startup and never actively re-checked.
 
-## Integration Points
+**Assessment: a bare TCP probe against the metrics port is a weak but non-zero liveness signal** — it proves the Go process is alive and its own goroutines are scheduling (the metrics `http.Server` is started in a `go func()` well after `asynq.Server.Start(mux)`, which is itself non-blocking — see `cmd/worker/main.go:81-92` — so a listening metrics port implies the asynq processing loop was successfully constructed). It proves **nothing** about ongoing Redis/Postgres connectivity, since a dropped Redis connection mid-run does not close the independent metrics listener goroutine.
 
-### External Services
+**Two options:**
 
-| Service | Integration Pattern | Notes |
-|---------|---------------------|-------|
-| MCP client (agent/IDE) | stdio subprocess, JSON-RPC per `modelcontextprotocol/go-sdk` | Confirmed HIGH confidence: official Go SDK exists, maintained with Google, supports `mcp.StdioTransport` (`github.com/modelcontextprotocol/go-sdk`, https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp). Exact tool-registration API surface should be re-verified against the SDK version pinned in `go.mod` at execution time (SDK is actively evolving). |
-| veraPDF CLI | `os/exec` via existing `runCommand` (`internal/convert/exec.go`) | MEDIUM confidence: official CLI + Docker image confirmed (`veraPDF/veraPDF-apps`, `ghcr.io/verapdf/cli`), requires a JRE. Exact non-conformance report format/exit codes to parse into `terminalVeraPDFSignatures` need live verification during execution — do not hardcode signature strings from training data alone without confirming against a real invocation. |
+1. **Zero-code-change**: `livenessProbe`/`readinessProbe` both as `tcpSocket` on port 9090. Cheapest path; catches only "process crashed/deadlocked," not "lost its dependencies."
+2. **Recommended small addition**: give each worker binary a real `/healthz` on the metrics listener (switch `metricsSrv.Handler` from a bare `promhttp.Handler()` to an `http.ServeMux` with `/metrics` and `/healthz` registered), pinging `pool.Ping(ctx)` (pgxpool's native method), `store.Ping(ctx)` (already exists on `storage.Client`, reused verbatim from the API's `HealthDeps.S3`), and a small dedicated Redis ping client (mirrors `cmd/api/main.go`'s existing `redisPinger` — ~10 lines, duplicated per the codebase's established per-binary-duplication convention for small helpers). Use this for **readiness only** (`livenessProbe` stays `tcpSocket` — a transient Redis blip should not trigger a restart-loop policy); readiness failing here has limited practical effect since nothing routes Service traffic TO worker pods (they pull from Redis, they don't serve requests), but it gives `kubectl get pods` and any future HPA/monitoring genuine signal instead of a process-liveness-only proxy, and is directly consistent with the project's own established principle that `/healthz` must ping real dependencies, not just report "process up" (`internal/api/handlers.go`'s `handleHealth` doc comment: "It is read-only: it only pings, never writes" — extend the same discipline here rather than introduce an inconsistent, weaker health model for workers).
 
-### Internal Boundaries
+**Recommendation: do the small addition (option 2).** Given "Deployments/probes" is explicitly named as in-scope chart work in `SEED-004`, and the marginal code cost is genuinely small (three already-available ping primitives, no new packages), settling for a TCP-only proxy here would be an inconsistency the project's own conventions argue against.
 
-| Boundary | Communication | Notes |
-|----------|---------------|-------|
-| `cmd/mcp-server` ↔ `internal/api` | Plain HTTPS, `Authorization: ApiKey`, identical wire contract to any other client | No shared code with `internal/e2e` (test-only file, not importable) — deliberate, low-risk duplication |
-| `internal/api` (new preset/format handlers) ↔ `internal/presets.Repo` | Direct method calls through new `PresetAdmin` interface | Repo already complete; zero repo changes needed |
-| `internal/convert/libreoffice.go` ↔ `internal/convert/verapdf.go` | In-process function call, same `attemptCtx` deadline | No new timeout knob; reuses `DOCUMENT_ENGINE_TIMEOUT` budget |
-| `internal/api/handlers.go` (CFB branch) ↔ `internal/convert/olecfb.go` | Direct function call, `ClassifyCFB` gated behind existing `IsOLECFB` | Still entirely pre-storage-write, no new integration surface |
+## MCP HTTP Architecture (Q4)
 
-## Build Order (dependency-justified)
+**Verified:** `internal/mcpserver/mcpserver.go`'s `NewServer(cfg Config, c *Client) *mcp.Server` is genuinely transport-agnostic — it only builds an `*mcp.Server` and registers five tools against a `*Client`; the ONLY transport-specific line in the entire MCP stack is `cmd/mcp-server/main.go:46`: `srv.Run(ctx, &mcp.StdioTransport{})`. The SDK (`github.com/modelcontextprotocol/go-sdk` v1.6.1, confirmed installed) ships `mcp.NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *mcp.StreamableHTTPOptions) *mcp.StreamableHTTPHandler` (`mcp/streamable.go:194`), which implements `http.Handler` — a drop-in target for a `net/http.Server`, exactly mirroring the existing `promhttp.Handler()` pattern already used for `/metrics` in every `cmd/*/main.go`.
 
-1. **Presets REST CRUD (`/v1/presets` + minimal `/v1/formats`)** — build first. Fully independent of the other 3 clusters (touches only `internal/api` + already-complete `internal/presets.Repo`). **Hard prerequisite for MCP's `list_presets` and `list_supported_formats` tools** — the milestone context is explicit that MCP wraps the HTTP API only, with no `internal/convert`/`internal/presets` imports, so those two tools **cannot** be implemented before these endpoints exist. Note: `/v1/formats` is a **newly-identified small gap** — no format-discovery endpoint exists on `main` today; it was not separately called out in the milestone's 4 named clusters but is a hard dependency for `list_supported_formats` and should be bundled into this phase (same theme: expose read-only self-service capability over REST, trivial to implement as a `convert.Default` registry walk).
-2. **MCP server (`cmd/mcp-server` + `internal/mcpserver`)** — build second, after step 1's endpoints exist. `convert_file`/`get_job_status`/`download_result` have no dependency on step 1 and could theoretically ship earlier, but shipping the full tool set (including `list_presets`/`list_supported_formats`) in one phase avoids a half-shipped MCP surface and matches the milestone's stated framing of MCP as "new territory — research first," where the REST endpoints from step 1 are a natural, already-scheduled warm-up.
-3. **CFB classification (`ClassifyCFB` + 3-way 422 split)** — independent of steps 1-2 and of step 4; touches only `internal/convert/olecfb.go` + `internal/api/handlers.go`'s existing branch + `internal/e2e`'s existing test. Recommended **before** veraPDF: smaller, self-contained, well-precedented (mirrors `SniffContainer`'s existing structural-parse pattern), fixtures already exist from Phase 13 (`legacy.doc`, `encrypted.docx`) — lower execution risk, good to de-risk first.
-4. **veraPDF validation** — independent of steps 1-3; touches `internal/convert/{libreoffice,verapdf}.go`, `internal/worker/worker.go`'s terminal-signature slice, and `Dockerfile.document-worker`. Recommended **last**: it is the highest-uncertainty item in the milestone (new JVM runtime dependency, unverified image-size/build-time impact, unverified exact CLI report format needed for terminal-error classification) — sequencing it last means any schedule slip from live-testing surprises doesn't block the other 3, independent clusters.
+**cmd/mcp-server gains `--http` vs new `cmd/mcp-http`:** the project's own established convention is **one binary per deployment unit**, explicitly justified for the analogous document/image engine split (`PROJECT.md` Key Decision: "Отдельный `cmd/document-worker` бинарник/контейнер вместо второго `asynq.Server` внутри image-воркера — ... ресурсная изоляция по классам движков"). A stdio MCP server is exec'd on-demand by a local MCP host (Claude Code, etc.) with a completely different lifecycle than a long-running, resource-limited, probed Kubernetes Deployment. **Recommendation: new `cmd/mcp-http/main.go`** (near-identical wiring to `cmd/mcp-server/main.go`: `mcpserver.Load()` → `mcpserver.NewClient(cfg)` → `mcpserver.NewServer(cfg, client)`, but the tail swaps `srv.Run(ctx, &mcp.StdioTransport{})` for an `http.Server` wrapping `mcp.NewStreamableHTTPHandler(...)`, bound to an env-configurable `MCP_HTTP_ADDR` mirroring the `METRICS_ADDR` pattern, with the same graceful-shutdown shape already used in `cmd/api/main.go`). **`internal/mcpserver` needs zero changes** for this. A new `Dockerfile.mcp-http` is required — no `Dockerfile.mcp-server` exists today (stdio has never been containerized).
 
-**Parallelization option:** clusters 1+2 (self-service/agent-access, files under `internal/api`, `internal/presets`, `cmd/mcp-server`) and clusters 3+4 (document-fidelity, files under `internal/convert`, `internal/worker`, `Dockerfile.document-worker`) touch **entirely disjoint files** and could run as two concurrent phases if resourcing allows — the only cross-cluster coupling is conceptual (both improve "document class" quality), not a code dependency.
+**Auth pass-through — two options:**
+
+1. **Pod holds ONE key (recommended)**: the `getServer` closure ignores the incoming `*http.Request` and always returns the single `*mcp.Server` built once at process start from the pod's `OCTOCONV_API_KEY` env var — an exact transport-swap of today's stdio model, with **zero changes** to `internal/mcpserver/client.go`'s `NewClient(cfg Config) (*Client, error)` (confirmed: it already bakes `apiKey` into the `Client` struct at construction, one key per process). Every caller that reaches the `mcp-http` Service acts as this one designated OctoConv client. This is architecturally consistent with the ALREADY-SHIPPED v1.5 design principle ("zero-privilege HTTP-клиент с редакцией ключа" — Phase 21): the MCP layer has never claimed per-end-user identity, only per-service identity, matching OctoConv's actual trust model where `clients` rows represent internal SERVICES, not individual humans. Gate WHO can reach this identity via a `NetworkPolicy` restricting ingress to specific trusted namespaces/pods — this is the in-cluster analog of "one developer, one locally-exec'd stdio process, one key" scaled to "one shared internal automation surface, one key, network-scoped."
+2. **Per-caller pass-through** (caller supplies its own API key in a header, MCP pod holds none): requires a new `getServer(r *http.Request)` closure that extracts a caller-supplied key, a new `mcpserver.NewClientWithKey`-style constructor, and per-key `*mcp.Server`/`*Client` caching to avoid rebuilding on every request. This is the "more correct" multi-tenant answer (every caller's actions map to its own `clients` row for rate-limiting/audit) but is a **materially bigger change** not requested by this milestone's stated goal ("MCP получает in-cluster HTTP-эндпоинт" — a transport change, not a multi-tenancy redesign).
+
+**Recommendation: Option 1 for v1.6.** Flag Option 2 explicitly as a documented future Key Decision if/when multiple distinct internal services need to share one `mcp-http` endpoint under their own separate identities — do not silently default into it.
+
+**Integration gap worth flagging (not a blocker, but a real finding):** every MCP tool response includes a `local_path` field (`internal/mcpserver/tools.go:39,153` — JSON schema description: *"local filesystem path (inside the server's OUTPUT_DIR) where the converted file was already downloaded"*), and `convertFileHandler`/`downloadResultHandler` both actually write the result to `cfg.OutputDir` on the server's own filesystem (`internal/mcpserver/client.go:284` `Download`) before returning that path. In the stdio model this is correct (the calling MCP host and the server share a filesystem — same machine). **Once `mcp-http` runs as a remote pod, `local_path` refers to the pod's own ephemeral filesystem and is meaningless/unusable to any remote HTTP caller** — the `PresignedURL`/`DownloadURL` field remains the only usable part of the response for that transport. This is not a code-breaking bug (nothing crashes; the field is simply inert for remote callers), but it is a real, user-facing contract mismatch worth a documented note (or a follow-on `Config.SkipLocalDownload` knob) rather than silently shipping a misleading tool description under the HTTP transport.
+
+## system-presets REST Operator Gate (Q5)
+
+**Verified — the domain layer needs ZERO changes.** `internal/api/api.go`'s `PresetAdmin` interface (already used by the existing client-scope `/v1/presets` handlers) is already scope-agnostic: `Create(ctx, presets.CreateParams{Scope: ..., ClientID: ...})`, `Update/Deactivate/Get/List(ctx, scope string, clientID *uuid.UUID, ...)`. Today's handlers (`internal/api/presets_handlers.go`) simply always hardcode `Scope: presets.ScopeUser, ClientID: &client.ID`. **System-presets REST is therefore purely a new set of REST handlers + a new route group + a new authorization gate — not a domain/repo change.**
+
+**Operator identity source — verified via schema:** `clients` table (`internal/db/migrations/0001_init.sql` + `0002_client_api_keys.sql`) has exactly `id, name, created_at, api_key_hash, api_key_hash_secondary, primary_revoked_at, secondary_revoked_at, updated_at` — **no spare role/flag column**, and `internal/clients/clients.go`'s `Client` struct mirrors this minimally (`ID uuid.UUID`, `Name string` only).
+
+**Two options:**
+
+1. **`OPERATOR_CLIENT_IDS` env allowlist (recommended)**: comma-separated UUID list, read once at API startup (mirrors the existing `envInt64`/`firstField` env-parsing idiom already in `cmd/api/main.go`), stored on `api.Config`, checked by a new gate — e.g. `middleware.RequireOperator(allowlist map[uuid.UUID]bool)` mounted only on a new `/v1/system/presets` route group, running AFTER `auth.Middleware` (client identity already resolved) and BEFORE the new handlers. **Zero schema migration.** Matches this project's own strict "environment-variable configuration only" architectural constraint (*"No config file support; every runtime setting... read from `os.Getenv`"*) and its precedent for exactly this shape of allowlist gate (`WEBHOOK_ALLOW_PRIVATE_IPS`, rate-limit env vars). Trade-off: changing the operator set requires a redeploy/restart (acceptable — internal-only, small, slow-changing operator population); no built-in per-operator audit trail beyond whatever `job_events`-style logging is added alongside.
+2. **`is_operator boolean` column on `clients`** (new migration `0006_client_operator_flag.sql`): more scalable (change without redeploy, via `manage-clients`), supports a future per-operator audit trail naturally. Genuinely the better long-term answer, but is unjustified schema churn for this milestone's stated scope (a handful of internal operators, not a growing/self-service operator population).
+
+**Recommendation: `OPERATOR_CLIENT_IDS` env allowlist for v1.6.** Document the DB-column alternative as an explicit future Key Decision, to be revisited if/when the operator set needs to change without a redeploy or per-operator audit becomes a real requirement.
+
+**No-leak consistency finding**: this codebase's presets handlers (`internal/api/presets_handlers.go`) are unusually disciplined about **never returning 403** — cross-client and system-scope-write attempts all collapse into the identical `noSuchPreset` 404 (explicit `D-03` comment in the file). The new operator gate should follow the SAME discipline: a non-operator client hitting `/v1/system/presets/*` should receive the same uniform 404, not a 403 that would confirm "this endpoint exists and requires elevated privilege you don't have" — consistent with the Phase 1 Key Decision ("cross-client доступ → 404, никогда 403") extended one level further to operator-vs-non-operator.
+
+## Build Order (Q6)
+
+Five clusters of work, sequenced by real dependency, not just milestone-listing order:
+
+1. **Phase A — Chart Core** (foundational, must go first): Helm chart skeleton for all five existing binaries + postgres/redis/minio + migrate/createbucket Helm hooks + the four landmine closures (METRICS_ADDR override + NetworkPolicy, in-cluster e2e-as-Job, hook ordering, FQDN S3_ENDPOINT) + worker `/healthz` probes. Every other phase either deploys through this chart or benefits from its conventions (Secrets/ConfigMap shape, namespace, probe pattern).
+2. **Phase B — KEDA Autoscaling**: `ScaledObject`×3 (image/document/html) against `octoconv_queue_depth`, `keda.enabled` gate. **Depends on Phase A** (needs the Deployments to scale and a reachable, NetworkPolicy-scoped `/metrics`).
+3. **Phase C — Load Test / Autoscale Validation**: synthetic load (or a higher-volume e2e run) proving 0→N→0 with observable criteria (replica count over time, KEDA/HPA events, queue-depth graph). **Depends on Phase B.** This closes the milestone's actual stated Core Value ("воркеры автоскейлятся KEDA... доказано") — Phases A→B→C form the primary, sequential arc.
+4. **Phase D — MCP HTTP**: `cmd/mcp-http` + `Dockerfile.mcp-http` + chart template + NetworkPolicy. **No code/architecture dependency on B or C** — only a soft dependency on Phase A for a clean deployment target (Secret/ConfigMap conventions, probe pattern). Can run in parallel with B/C if capacity allows, or immediately after A.
+5. **Phase E — system-presets REST**: new handlers + operator-gate middleware + `OPERATOR_CLIENT_IDS` env var. **Fully independent of all k8s work** — pure `internal/api` change, no chart dependency at all (the only chart touch is eventually adding `OPERATOR_CLIENT_IDS` to the ConfigMap, trivial whenever it lands).
+
+**Recommended sequencing: A → D → E → B → C.** Rationale: A is the highest-risk, most novel, SEED-004-flagged work and must be first. D and E have zero dependency on the harder KEDA arc and are small/independent — sequencing them right after A gives two quick, low-risk wins and validates the chart's Secret/ConfigMap/probe conventions on smaller surfaces before the higher-stakes KEDA work. B→C then close the milestone's primary, hardest, most novel goal as a contiguous arc, minimizing context-switching mid-validation. **D and E have no ordering constraint relative to each other or to B/C** — a roadmap author may freely interleave or reorder them (e.g., run E first since it needs zero k8s context at all, or defer D/E to the very end as a closing cluster) without breaking any real dependency; the A→B→C spine is the only hard-ordered sequence.
+
+## New vs Modified Files Summary
+
+| File | Status | Purpose |
+|------|--------|---------|
+| `deploy/chart/octoconv/**` (full chart) | NEW | Helm chart — Deployments, Services, Jobs, ScaledObjects, NetworkPolicies |
+| `Dockerfile.e2e` | NEW | In-cluster e2e test-binary image (Pattern 2) |
+| `Dockerfile.mcp-http` | NEW | `cmd/mcp-http` container image (Q4) |
+| `cmd/mcp-http/main.go` | NEW | HTTP-transport MCP entrypoint (thin, mirrors `cmd/mcp-server`) |
+| `internal/api/system_presets_handlers.go` | NEW | System-scope preset REST handlers, reusing existing `PresetAdmin` |
+| `internal/api/routes.go` | MODIFIED | Mount `/v1/system/presets` group + operator-gate middleware |
+| `cmd/api/main.go` | MODIFIED | Parse `OPERATOR_CLIENT_IDS`, thread into `api.Config` |
+| `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` | MODIFIED | Add `/healthz` alongside `/metrics` (Q3) |
+| `internal/mcpserver/**` | UNCHANGED | Already transport-agnostic |
+| `internal/e2e/e2e_test.go` | UNCHANGED | `E2E_WEBHOOK_HOST`/`E2E_S3_DIAL_ADDR` already env-driven |
+| `.github/workflows/ci.yml` | UNCHANGED (this milestone) | CI stays entirely compose-based; see note below |
+
+**CI note (explicitly checked):** `.github/workflows/ci.yml`'s 4 tiers (`gate` → `race` → `docker-build` → `e2e`) are 100% docker-compose-based — no `kind`/`k3d`/`helm lint`/`helm template` step exists anywhere, and nothing in this milestone's scope (per `PROJECT.md`'s Active requirements) calls for adding one. **A k8s validation CI tier is out of scope for v1.6** and should be treated as a candidate seed for a future milestone, not silently folded into this one.
+
+## Anti-Patterns
+
+### Anti-Pattern 1: Binding `0.0.0.0:9090` without a NetworkPolicy
+
+**What people do:** Fix the METRICS_ADDR landmine by only changing the env var, treating it as "done" because the pod now starts and Prometheus can scrape it.
+**Why it's wrong:** This silently removes the security boundary `docker-compose.yml` relied on (`127.0.0.1`-only binding, explicitly documented there as "no auth layer needed since it's unreachable outside the host") — in k8s, `0.0.0.0` on any port is reachable from every pod in the cluster by default, with zero implicit isolation.
+**Do this instead:** Ship the `METRICS_ADDR` change and a `NetworkPolicy` restricting `:9090` ingress in the SAME phase/plan — never as a follow-up.
+
+### Anti-Pattern 2: KEDA-scaling the webhook-worker Deployment
+
+**What people do:** Apply the same "ScaledObject per queue" pattern uniformly to all five queue-backed binaries, including `webhook-worker`.
+**Why it's wrong:** `webhook-worker`'s ×2 replication exists specifically for delivery redundancy and Postgres-advisory-lock sweeper failover (a documented Key Decision), not throughput elasticity. Scaling it to 0 or 1 under low webhook-queue depth would silently break the "no single point of failure" guarantee the whole reconciler/webhook architecture depends on.
+**Do this instead:** KEDA only for `worker`/`document-worker`/`chromium-worker` (genuine engine-class elastic scaling); `webhook-worker` stays a fixed-replica (2) Deployment, explicitly excluded from `keda.enabled`'s scope.
+
+### Anti-Pattern 3: Short MinIO Service name in `S3_ENDPOINT`
+
+**What people do:** Set `S3_ENDPOINT=octoconv-minio:9000` (mirroring compose's `minio:9000`), reasoning "it's just the compose hostname → k8s Service name translation."
+**Why it's wrong:** A short Service name only resolves for consumers inside the same namespace with kube-dns's search-path configured (in-cluster pods) — it does NOT resolve from the OrbStack host, re-creating the exact "compose-DNS-in-presigned-URL" landmine SEED-004 names, just with a different literal hostname.
+**Do this instead:** Use the fully-qualified `<service>.<namespace>.svc.cluster.local` form, verified resolvable from both in-cluster pods and the OrbStack host (Pattern 4).
 
 ## Sources
 
-- [modelcontextprotocol/go-sdk (GitHub)](https://github.com/modelcontextprotocol/go-sdk) — official Go SDK, maintained with Google, stdio + streamable-HTTP transports, `mcp.StdioTransport` confirmed (MEDIUM-HIGH confidence, re-verify exact tool-registration API against the pinned SDK version at execution time)
-- [mcp package docs (pkg.go.dev)](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp)
-- [MCP Go SDK overview](https://go.sdk.modelcontextprotocol.io/)
-- [veraPDF/veraPDF-apps (GitHub)](https://github.com/veraPDF/veraPDF-apps) — CLI/GUI/installer source, confirms Java/JRE requirement
-- [verapdf/cli (Docker Hub)](https://hub.docker.com/r/verapdf/cli) — official image, ~JRE-trimmed Alpine base, confirms CLI-invocation shape (`docker run ... verapdf/cli a.pdf`)
-- [veraPDF CLI Quick Start (docs.verapdf.org)](https://docs.verapdf.org/cli/)
-- Direct repository reads: `internal/api/{routes.go,api.go,handlers.go}`, `internal/presets/repo.go`, `internal/convert/{olecfb.go,libreoffice.go,convert.go,docsniff.go}`, `internal/worker/worker.go`, `internal/e2e/e2e_test.go`, `Dockerfile.document-worker`, `docker-compose.yml`, `cmd/{manage-presets,document-worker}/main.go`, `.planning/PROJECT.md`, `.planning/seeds/SEED-003.md`
+- `cmd/api/main.go`, `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` — direct read, confirms `METRICS_ADDR`/`os.Getenv` pattern is identical and code-change-free to override — HIGH confidence
+- `docker-compose.yml`, `docker-compose.e2e.yml` — direct read, confirms current port bindings, `extra_hosts` host-gateway usage, `createbucket`/`asynqmon` trust-model comments — HIGH confidence
+- `internal/e2e/e2e_test.go` (lines 1-140, 340-370, 1000-1021) — direct read, confirms `0.0.0.0:0` explicit listener bind and the already-env-driven `E2E_WEBHOOK_HOST`/`E2E_S3_DIAL_ADDR` knobs — HIGH confidence
+- `.github/workflows/ci.yml` — direct read, confirms 4-tier compose-only pipeline, no k8s step — HIGH confidence
+- `internal/mcpserver/mcpserver.go`, `config.go`, `client.go`, `tools.go`, `cmd/mcp-server/main.go` — direct read, confirms transport-agnostic `NewServer`, one-key-per-process `Client`, and the `local_path`/`OUTPUT_DIR` contract — HIGH confidence
+- `/Users/apaderin/go/pkg/mod/github.com/modelcontextprotocol/go-sdk@v1.6.1/mcp/streamable.go` — direct read of the installed module, confirms `NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *StreamableHTTPOptions) *StreamableHTTPHandler` exists and implements `http.Handler` — HIGH confidence
+- `internal/api/presets_handlers.go`, `internal/api/api.go`, `internal/api/routes.go` — direct read, confirms `PresetAdmin` is already scope-agnostic and the existing no-leak-404 discipline — HIGH confidence
+- `internal/db/migrations/0001_init.sql`, `0002_client_api_keys.sql` — direct read, confirms `clients` table has no spare role/flag column — HIGH confidence
+- `internal/metrics/queue_collector.go` — direct read, confirms the `octoconv_queue_depth{queue,state}` Prometheus gauge KEDA's Prometheus scaler would query — HIGH confidence
+- `internal/storage/storage.go` (`Client.Ping`) — direct read, confirms a reusable ping primitive for worker `/healthz` — HIGH confidence
+- `.planning/PROJECT.md`, `.planning/seeds/SEED-004.md` — direct read, milestone goal framing and the four named landmines — HIGH confidence
+- WebSearch: "OrbStack Kubernetes service domain resolvable from macOS host LoadBalancer" (docs.orbstack.dev/kubernetes) — confirms `cluster.local` domains and `*.k8s.orb.local` LoadBalancer access resolve directly from the Mac host — MEDIUM-HIGH confidence (official docs summary, not independently tested against this repo's actual chart)
 
 ---
-*Architecture research for: OctoConv v1.5 (MCP Access & Document Fidelity)*
-*Researched: 2026-07-13*
+*Architecture research for: OctoConv v1.6 (Kubernetes & KEDA)*
+*Researched: 2026-07-14*

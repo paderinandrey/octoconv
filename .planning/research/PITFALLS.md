@@ -1,359 +1,298 @@
 # Pitfalls Research
 
-**Domain:** MCP server (stdio) wrapping an internal REST API; self-service preset CRUD; ISO 19005 (veraPDF) validation; OLE-CFB directory parsing
-**Researched:** 2026-07-13
-**Confidence:** MEDIUM-HIGH (MCP timeout/stdio behavior verified via multiple independent sources incl. official docs and live GitHub issues; veraPDF server-mode and CFB-DoS findings verified via official repos/advisories; presets/auth pitfalls derived directly from this codebase's existing conventions — HIGH confidence there)
+**Domain:** Porting OctoConv (Go/asynq/Redis/Postgres/MinIO, 4 engine-class workers + webhook-worker) to Kubernetes + KEDA, on local OrbStack, for milestone v1.6.
+**Researched:** 2026-07-14
+**Confidence:** HIGH for code-grounded findings (queue-depth exposition, sweeper singleton, MCP key model, OrbStack history — all verified directly against this repo's source and `.planning` history); MEDIUM for general KEDA/Helm/OrbStack-k8s mechanics (verified against current docs/GitHub issues, not against this project's own cluster yet, since no chart exists today).
 
 ## Critical Pitfalls
 
-### Pitfall 1: `convert_file` blocks past the MCP client's idle-notification window
+### Pitfall 1: KEDA Prometheus scaler can't see queue depth once workers are at zero replicas (verified in code)
 
 **What goes wrong:**
-The seed design (`SEED-003`) commits `convert_file` to being a single blocking call: multipart upload → internal poll to `done`/`failed` → download. For document-class jobs (LibreOffice, chromium-headless) this can legitimately run well past a few seconds, and Claude Code / other MCP clients kill the call if it goes idle for too long.
+`octoconv_queue_depth{queue=...}` — the exact metric SEED-004 names as the intended KEDA trigger source — is registered by `prometheus.MustRegister(metrics.NewQueueDepthCollector(...))` **inside each engine-worker's own `main()`**, once per binary, scoped to only that worker's own queue:
+
+- `cmd/worker/main.go:89` → registers `queue.QueueImage` only
+- `cmd/document-worker/main.go:94` → registers `queue.QueueDocument` only
+- `cmd/chromium-worker/main.go:86` → registers `queue.QueueHTML` only
+- `cmd/webhook-worker/main.go:114` → registers `queue.QueueWebhook` only
+
+`cmd/api/main.go` registers **no** queue-depth collector — it only serves the globally-registered promauto counters/histograms (job outcomes, webhook deliveries, reconciler actions), none of which is queue depth.
+
+So the *exposition endpoint* for a queue's depth lives exclusively inside the pod that consumes that queue. If KEDA scales the image-worker Deployment to 0 replicas, there is no pod left serving `/metrics` for `octoconv_queue_depth{queue="image"}` — the Prometheus scrape target disappears (Service has zero endpoints), the series goes stale/absent, and KEDA's `prometheus` trigger has nothing to query. **A worker at zero can never see that new work has arrived for it to scale back up on** — this is the literal chicken-and-egg problem, confirmed directly from the collector registration sites, not assumed.
+
+Underlying data note: `queueDepthCollector.Collect()` (`internal/metrics/queue_collector.go:32`) calls `asynq.Inspector.GetQueueInfo(q)`, which reads **Redis** directly — the *data* is not worker-local, only the *exposition* is. This is the fix surface: the metric's source of truth (Redis via asynq's Inspector) is completely decoupled from where it happens to be exposed today.
 
 **Why it happens:**
-MCP clients enforce an **idle window**, not a fixed wall-clock timeout: if a tool call sends no response and no `notifications/progress` for the idle window, the client aborts it — the default idle window is documented as **~30 minutes for stdio servers** vs **~5 minutes for HTTP/SSE/WebSocket servers** (verified against MCP docs + live Claude Code issue reports). A naive implementation that awaits the full poll loop without ever calling `Session.NotifyProgress` looks fine in manual testing (fast image jobs finish before any window matters) and then times out unpredictably in production once a slow LibreOffice/chromium job or queue backpressure pushes total latency past the idle window — this is a "looks done but isn't" trap because the demo case (image convert) never exercises the failure path.
+The collector was added per-worker (OBS-01, v1.0 Phase 4) when scale-to-zero wasn't a concern — every worker was always running, so "expose my own queue's depth from my own process" was the simplest correct design. Porting to KEDA silently invalidates that assumption with no code change flagging it.
 
 **How to avoid:**
-- Every poll iteration inside `convert_file` MUST call `req.Session.NotifyProgress(ctx, ...)` with the current job status (queued/active), not just sleep-and-retry silently — this resets the idle-window clock on the client side regardless of total elapsed time.
-- Read the client's declared progress token via `req.Params.GetProgressToken()` before starting the poll loop; if no token is present (some clients don't request progress), fall back to a documented hard cap and return a structured "still running, use get_job_status(job_id)" result rather than blocking indefinitely — this matches the seed's own admission that `get_job_status`/`download_result` exist "for long jobs."
-- Bound the internal poll loop with its own context timeout derived from a config value (e.g. `MCP_CONVERT_TIMEOUT`), independent of `ENGINE_TIMEOUT`/`DOCUMENT_ENGINE_TIMEOUT` — never let `convert_file` block forever just because the underlying job is stuck in `queued` (reconciler will eventually resolve it, but the MCP call must not hang the agent session waiting).
+Do **not** point KEDA's `prometheus` scaler at the worker Deployments' own `/metrics`. Choose one:
+1. **Move (or duplicate) `NewQueueDepthCollector` registration into the API process** (`cmd/api/main.go`), which never scales to zero (it's the ingress path) and already has `REDIS_ADDR`/`queue.RedisOpt()` available. Register collectors for image/document/html/webhook queues there; scrape the API's `/metrics` for the KEDA trigger. Smallest-diff fix; the collector code is reusable as-is.
+2. **OR use KEDA's native `redis`/`redis-lists` scaler directly against asynq's Redis keys** (bypassing Prometheus entirely) — works regardless of worker replica count. However, SEED-004 explicitly says "не redis-scaler по внутренностям asynq" (don't couple to asynq's Redis internals), so option 1 is the one consistent with the stated design intent; keep option 2 as documented fallback if the Prometheus round-trip proves unreliable at zero.
+3. **Do not use asynqmon as the metric source** — it is `127.0.0.1`-bound with no auth by design (`docker-compose.yml:305-321`) and is a UI, not a scrape target; making it scrape-safe is a separate porting concern (see Pitfall 4) and doesn't remove the need to decide who owns the metric.
 
 **Warning signs:**
-- Manual testing only exercises fast image conversions; no test forces a document/chromium-class job through `convert_file` to observe idle-window behavior.
-- No code path calls `NotifyProgress` at all — grep for it before shipping.
-- Poll loop has no independent max-duration guard distinct from queue/engine timeouts.
+- ScaledObject sits at `minReplicaCount` even after jobs are enqueued; `kubectl describe hpa` shows `unable to get metric` or a stale `0`.
+- Prometheus shows the worker scrape target `DOWN` while the queue clearly has pending items (visible via asynq Inspector or Redis directly).
+- The "0→N→0" proof only ever demonstrates N→0 (scale down works — the still-running pod exposes its own draining metric) but the 0→N leg never fires from a cold queue.
 
-**Phase to address:** MCP server phase (SEED-003) — must be a design decision in the same plan that implements `convert_file`, not deferred.
+**Phase to address:**
+KEDA ScaledObjects phase — resolve **before** writing any ScaledObject manifest, as an early gating sub-task ("expose queue depth from an always-on component"). Do not let this surface only in the load-proof phase; by then the wrong architecture is baked into the chart.
 
 ---
 
-### Pitfall 2: API key leaks into MCP tool results or error text
+### Pitfall 2: Scaling webhook-worker to zero silently kills the singleton reconciler-sweeper (verified in code)
 
 **What goes wrong:**
-The MCP server holds a real client API key in its own environment (per the seed design) and uses it to call `POST /v1/jobs`/`GET /v1/jobs/{id}`. If an HTTP call fails (network error, 401, 500) and the handler naively wraps the raw `error` or dumps the outgoing request for debugging, the `Authorization: ApiKey <key>` header — or the key itself if it was interpolated into a URL/log line — ends up in the tool's returned content, which an LLM client may echo back to the user, log verbatim, or persist in conversation history.
+`internal/reconciler/reconciler.go` gates the sweeper behind a Postgres session-level advisory lock (`PGAdvisoryLock`, `RunWithLock`) so exactly one replica across the webhook-worker fleet sweeps at any time (v1.3 Phase 16). `cmd/webhook-worker` is the **only** binary that constructs and runs the sweeper, and the only consumer of the webhook queue. If KEDA scales `webhook-worker` to 0 (its own queue being momentarily empty makes it look like a good candidate), two duties die at once:
+1. No pod holds the advisory lock → the fleet-wide stale-job sweep stops **for every engine class** (image/document/html), not just webhooks — stranded `queued`/`active` jobs from any engine accumulate unrecovered until a webhook-worker pod exists again. The webhook-gap sweep (RECON-04) stops too.
+2. No pod consumes the webhook queue → deliveries enqueued while at 0 sit pending until scale-up (delayed, not lost — unlike #1, which needs a live sweeper to notice anything at all).
+
+Because the sweeper fixes *other* engines' stuck jobs, scaling this class to zero has fleet-wide blast radius disproportionate to its own queue traffic.
+
+Audit result (the "verify nothing else assumes always-on" question): grep confirms the sweeper is the **only** always-on duty riding in a scalable worker today — single `RunWithLock` call site, only in `cmd/webhook-worker`; `cmd/worker/main.go:74-76` explicitly documents "no sweeper of any kind is constructed or run here" (same for document/chromium workers). So image/document/html classes are genuinely safe to scale to zero from an always-on-duty standpoint.
 
 **Why it happens:**
-This codebase's own convention (`internal/api/handlers.go`) is explicit: **HTTP handlers never leak internal error text to clients** — they map errors to fixed strings and discard the underlying `err`. An MCP server built as a "thin wrapper" is tempting to write more loosely than a hardened HTTP handler because it "isn't public-facing," but MCP tool output is functionally client-facing: it goes straight into an LLM's context and potentially into transcripts/telemetry the agent framework captures. A generic `fmt.Errorf("request failed: %w", err)` where `err` is `*url.Error` will include the full request URL — and if the key was ever placed in a query string or the error type stringifies the request object, the header goes with it.
+The engine-class-per-queue KEDA design treats every queue as an independent, symmetric autoscaling unit. webhook-worker is architecturally *not* symmetric — it carries hidden always-on responsibility unrelated to its own queue depth.
 
 **How to avoid:**
-- Construct the outgoing `http.Request` once in a small internal client wrapper (mirroring `internal/queue.Client` / `internal/storage.Client`'s "wrap the raw SDK" pattern) that NEVER logs or returns the `Authorization` header value; any error surfaced to the MCP tool result must go through the same "map to fixed message, discard raw err" discipline already used in `internal/api/handlers.go`.
-- The API key must be read once from env at process start and held only inside the HTTP client wrapper's closure — not passed around as a bare string to logging call sites.
-- Add a unit test (mirroring `handlers_test.go`'s error-mapping tests) that asserts a forced upstream 401/500 produces a tool result/error string that does NOT contain the configured key substring.
+- Set `minReplicaCount: 1` (or 2, matching compose's deliberate ≥2-consumer redundancy, `docker-compose.yml:149-153`) — or, simpler and truer to SEED-004's intent (the architecture being validated is the *conversion* engine classes): **don't put webhook-worker under KEDA at all** this milestone; run it as a fixed 2-replica Deployment and reserve ScaledObjects for image/document/html.
+- Re-verify the "sweeper is the only always-on duty" audit at execution time, in case new always-on logic lands first.
+- If webhook-worker is KEDA-scaled anyway, treat `minReplicaCount >= 1` as a fail-closed hard gate, not a tunable.
 
 **Warning signs:**
-- Any `log.Printf`/error string in `cmd/mcp-server` includes `%+v` on an `*http.Request`, `*http.Response`, or raw transport error.
-- The key is threaded through function signatures as a bare `string` reused in multiple places instead of confined to one client constructor.
+- Engine-class scale-to-zero load-proof passes, but a soak test shows a job stuck in `active` past `RECONCILER_ACTIVE_STALE_AFTER` (5m) with zero recovery attempts in `job_events`.
+- `octoconv_reconciler_actions_total` flatlines across **all** actions during a window correlating with webhook-worker at 0 replicas.
 
-**Phase to address:** MCP server phase — same plan as Pitfall 1; add as an explicit security must-have, not an afterthought.
+**Phase to address:**
+KEDA ScaledObjects phase, as an explicit exclusion/guard. Verification: ≥1 webhook-worker pod Running throughout a full image-worker 0→N→0 cycle, with continuous sweep activity.
 
 ---
 
-### Pitfall 3: Agent-supplied paths in `convert_file`/`download_result` enable path traversal or arbitrary file read/write
+### Pitfall 3: asynq graceful-shutdown window vs `terminationGracePeriodSeconds` mismatch — SIGKILL mid-conversion
 
 **What goes wrong:**
-`convert_file(path, ...)` and `download_result(job_id)` (which presumably writes the downloaded result to a local path) both take a filesystem path that originates from the LLM agent's own reasoning, not a human typing a trusted CLI argument. A malicious or confused agent (prompt-injected via file content, or simply hallucinating) can supply `../../../../etc/passwd`, an absolute path outside any sanctioned working directory, or a symlink target, causing the MCP server (running with the developer's or service account's filesystem permissions) to read or overwrite files never intended to be touched.
+Kubernetes sends SIGTERM, waits `terminationGracePeriodSeconds` (default **30s**), then SIGKILLs. Every worker's `main()` calls `srv.Shutdown()` on SIGTERM, and asynq waits for in-progress handlers — but per-attempt engine budgets are `ENGINE_TIMEOUT=120s` (image), `DOCUMENT_ENGINE_TIMEOUT=300s` (document), `HTML_ENGINE_TIMEOUT=60s` (html). A pod mid-way through a legitimate 300s LibreOffice conversion gets SIGKILLed at 30s under the default. Consequences:
+- The Postgres row stays `active` with no clean `MarkFailed`/`MarkDone`; recovery falls to the reconciler via staleness — up to `RECONCILER_ACTIVE_STALE_AFTER` (5m) of extra latency plus a wasted full attempt, on every scale-down that catches a long job.
+- The `asynq.Unique` TTL derivations in `internal/queue/queue.go` (`ImageUniqueTTL`/`DocumentUniqueTTL`/`HTMLUniqueTTL`) assumed asynq's own retry/archive semantics, not "pod force-killed mid-attempt, maybe rescheduled minutes later" — compose's `restart: always` (in-place restart) never exercised this mode. The math still holds (TTL is a worst-case ceiling), but re-check the interaction consciously rather than assume.
+- KEDA's `cooldownPeriod` (default 300s) only delays the scale-down *decision*; once replicas are reduced, vanilla Deployment pod selection applies — **no** guarantee the terminated pod is an idle one rather than one mid-task.
 
 **Why it happens:**
-Every other input surface in this codebase treats client-controlled data as untrusted-until-validated (magic-bytes content sniffing, allowlisted `opts`, OLE-CFB fail-closed rejection). A stdio MCP server is easy to mentally categorize as "local dev tool, not the hardened public API," but it inherits the exact same trust boundary problem as accepting a file path from an HTTP client — except the "client" here is an LLM whose input can itself be attacker-influenced (e.g., processing an untrusted document that contains instructions).
+Kubernetes' 30s default is tuned for stateless HTTP services, not long-running task handlers; nothing forces anyone to notice the mismatch until a long job dies mid-flight.
 
 **How to avoid:**
-- Resolve every incoming path with `filepath.Clean` + `filepath.Abs`, then require it to be a strict descendant of one explicitly configured root directory (e.g. `MCP_WORKDIR`); reject with a fixed error message (never echo the resolved path) if it escapes the root — same "fail closed, no leak" posture as the CFB/API-key conventions.
-- For `download_result`, generate the output path server-side inside the allowed root (e.g. based on `job_id`) rather than trusting an agent-supplied destination path directly; if a destination must be accepted, apply the same containment check.
-- Do not follow symlinks when resolving the final path (`os.Lstat` check, reject if the resolved leaf is a symlink) to prevent a workdir-contained symlink from pointing outside the root.
+- Set `terminationGracePeriodSeconds` **per engine-class Deployment**, derived from the real worst case (mirroring the project's own UniqueTTL derivation discipline): document `>= 300s + download/upload overhead + margin`; image `>= 120s + margin`; html `>= 60s + margin`. Never leave the default.
+- Verify asynq v0.26.0's `Server.Shutdown()` semantics specifically (does it block until handlers return, or does it have an internal deadline?) — if asynq has its own shutdown timeout, it must be `<=` the pod grace period or the mismatch reproduces inside asynq itself.
+- A `preStop` hook is likely unnecessary (asynq workers are pull-based, not behind a Service receiving traffic) — but make that a deliberate yes/no in the chart, not a silent default.
+- Load-test scale-DOWN with a long-running **document** job in flight (not just image, which is fast).
 
 **Warning signs:**
-- Path handling code calls `os.Open(path)` / `os.Create(path)` directly on the agent-supplied string without any `filepath.Abs`/containment check.
-- No test exercises `../`-style traversal or absolute-path inputs against `convert_file`/`download_result`.
+- `job_events` shows jobs stuck in `active` time-correlated with KEDA scale-down events (`kubectl get events` termination timestamps vs `active`-since).
+- `octoconv_reconciler_actions_total{action="recovered"}` spikes right after scale-down cycles during the load-proof.
 
-**Phase to address:** MCP server phase — implement alongside the HTTP client wrapper (Pitfall 2), since both are "MCP server's first line of input handling."
+**Phase to address:**
+Helm chart phase sets per-class grace periods; KEDA load-proof phase verifies by injecting a slow document conversion during a scale-down window and confirming clean completion (not reconciler-recovered).
 
 ---
 
-### Pitfall 4: Returning file bytes in tool results blows up agent context and duplicates the existing presigned-URL contract
+### Pitfall 4: `METRICS_ADDR=127.0.0.1` fix is a fail-silent trap if only half-done (SEED-004 landmine #1, sharpened)
 
 **What goes wrong:**
-It's tempting for `download_result`/`convert_file` to read the converted file and return its bytes (raw or base64) as the tool result "for convenience." For anything beyond a tiny image this either exceeds practical MCP result size limits or consumes enormous LLM context, and it silently reimplements what `GET /v1/jobs/{id}`'s presigned URL already solves cleanly.
+`METRICS_ADDR: 127.0.0.1:9090` binds the metrics listener to pod loopback — unreachable by any in-cluster scraper. But the localhost-bind was itself the **security control** (D-19/T-04-13: operational data never exposed, internal-only trust model), not an accident. Flipping it to `0.0.0.0:9090` without a compensating NetworkPolicy silently breaks the trust-model constraint: anything in the cluster can then read queue depths and job outcomes — and for asynqmon (same `127.0.0.1` pattern), an entire **unauthenticated queue-inspection UI**, because auth was deliberately omitted on the grounds of loopback-only reachability.
 
 **Why it happens:**
-The seed design explicitly favors "one call is better than a job_id for agent UX" for `convert_file`, and that convenience framing can bleed into "just hand back the file too." But the whole point of the existing presigned-URL design (`internal/storage`) is that large binary payloads never need to transit the API/MCP process at all.
+"Fix unreachable metrics" and "leak metrics" are the same one-line diff; the compensating control lives in a different file (NetworkPolicy) that nothing forces you to write.
 
 **How to avoid:**
-- `convert_file`/`download_result` should return the local filesystem path where the result was saved (written via the S3 presigned GET, streamed straight to disk, never buffered fully in memory) or the presigned URL itself if the agent's downstream use doesn't need local bytes — never inline file content as the tool result payload.
-- If an agent truly needs to "see" content (e.g., a converted text-like format), that's a deliberate, separate, size-capped tool — not the default path for `convert_file`.
+Ship the bind change and the NetworkPolicy (scoped to the Prometheus scrape identity) as one atomic unit. Apply identically to asynqmon's in-cluster exposure. Fail-closed: if the policy can't be verified, the port stays unexposed. Also keep `127.0.0.1:9090` as the **code default** and override to `0.0.0.0` only via chart env — so compose/CI behavior is untouched (see Pitfall 8's compose-compat rule).
 
 **Warning signs:**
-- Tool result schema includes a `content`/`bytes`/`base64` field sized off the actual converted file rather than a `path`/`url` field.
-- No explicit size check before any data is embedded in a tool response.
+- Any manifest exposing 9090 (or asynqmon's 8080) without a NetworkPolicy in the same PR/plan.
+- A successful `curl` of the metrics endpoint from `kubectl exec` in an unrelated pod — hard-gate failure, not a warning.
 
-**Phase to address:** MCP server phase.
+**Phase to address:**
+Helm chart phase, bundled — NetworkPolicy is the direct replacement for the security property being removed, not "later hardening."
 
 ---
 
-### Pitfall 5: Stray stdout writes corrupt the stdio JSON-RPC stream
+### Pitfall 5: MCP-HTTP breaks the stdio mode's per-client "zero-privilege" key model (verified in code)
 
 **What goes wrong:**
-Anything written to stdout that isn't a JSON-RPC message — a debug `fmt.Println`, a startup banner, a panic's default stack trace (which Go writes to stderr, but a recovered-and-reprinted panic could go to stdout if mishandled), or output from a shelled-out dependency inheriting the process's stdout — desynchronizes the newline-delimited JSON-RPC stream over stdin/stdout that `CommandTransport` in the official Go SDK relies on. The result ranges from a single garbled response to a fully wedged/crashed client session.
+`internal/mcpserver/config.go` reads exactly one `OCTOCONV_API_KEY` at startup; `internal/mcpserver/client.go` embeds that single key in every outbound request (`req.Header.Set("Authorization", "ApiKey "+c.apiKey)` at lines 176/203/228/259). Under **stdio** this is safe: process boundary == trust boundary (one process per user/session, spawned by the calling agent) — that's what makes the client "zero-privilege." An **in-cluster HTTP** endpoint (MCPV2-01) that keeps the load-once pattern serves **one shared key to every caller**: either a single high-privilege shared secret for the whole MCP-HTTP surface (worse blast radius than any one client's key, defeating the `clients`-table per-client rotation/revocation model), or silent wrongness the first time two internal callers need different permissions/rate limits.
 
 **Why it happens:**
-This is a very common real-world MCP failure mode (multiple independent GitHub issues confirm it across ecosystems, e.g. ruvnet/claude-flow #835), because "just log it, we'll figure out formatting later" is a normal Go habit (`log.Printf` defaults to stderr, but any raw `fmt.Print*`/`os.Stdout.Write` slip is fatal here) and because this project's OWN logging convention (`cmd/*/main.go` uses `log.Printf`, which already goes to stderr by default) is easy to violate accidentally the first time someone reaches for `fmt.Println` during development and forgets to remove it, or when a future dependency (e.g. a debug/verbose flag in a vendored library) writes to stdout internally.
+`Load()`'s "read once, fail fast" pattern is exactly right for process-per-session and exactly wrong for a shared server; the code has no per-request-identity notion because it never needed one.
 
 **How to avoid:**
-- Establish as a hard rule for `cmd/mcp-server`: `stdout` is reserved exclusively for the MCP transport; ALL diagnostics go through `log.Printf`/`log.Println` (which already default to stderr in this codebase, matching the existing `🚀`/`🐙`-prefixed startup-log convention) — never `fmt.Println`/`fmt.Print` anywhere in this binary.
-- If any invoked code path could write to stdout (unlikely here since the MCP server is a thin HTTP client, not a process-exec engine like `internal/convert`), redirect/discard it explicitly.
-- Add a lightweight startup smoke test (or manual `mcp inspector` check, per MCP's own debugging docs) that pipes stdout through a JSON-line validator to catch any stray non-protocol output before shipping.
+For the HTTP transport, pass the caller's own API key through per-request: forward the incoming MCP-HTTP request's `Authorization` header to the outbound OctoConv API client per call, so each request uses the calling internal service's own already-provisioned key — key-per-request keeps zero-privilege, zero new secrets, and full reuse of existing auth/rate-limit/rotation. Fallback (conscious tradeoff only): one dedicated `clients` row + Secret per consuming team, pushing "one key per trust boundary" to the deployment layer at the cost of endpoint-per-consumer. Also verify at execution time whether go-sdk v1.6.1 (current, in `go.mod`) ships a server-side Streamable HTTP transport or a bump is needed — check Context7/changelog; MCP transport APIs are moving fast (see Pitfall 6).
 
 **Warning signs:**
-- Any `fmt.Println`/`fmt.Printf` (not `log.Printf`) appears anywhere in `cmd/mcp-server`.
-- Client-side symptom: intermittent "unexpected token" / JSON parse errors in the MCP client log that don't reproduce consistently (classic corrupted-stream signature).
+- A diff that keeps `Config.APIKey` as a single startup-read field now serving a multi-caller `net/http.Server`.
+- No way to answer "which `clients` row authorized this MCP tool call" for an arbitrary in-cluster request.
 
-**Phase to address:** MCP server phase — verification step, not a separate task; catch in code review by grepping for `fmt.Print` in the new package.
+**Phase to address:**
+MCP streamable HTTP phase (MCPV2-01) — an auth-model decision to resolve **before** wiring the transport, not to discover in a security pass afterward.
 
 ---
 
-### Pitfall 6: Mass-assignment lets a client set `scope=system` or spoof `client_id` via the presets REST payload
+### Pitfall 6: MCP streamable HTTP session state across pod restarts / multi-replica (spec-timing dependent)
 
 **What goes wrong:**
-`/v1/presets` (PRST-V2-01) is explicitly self-service, client-scope only — "system-scope остаётся за операторским CLI." If the REST handler naively binds the incoming JSON body onto (or close to) the same `CreateParams`/update struct the `manage-presets` CLI uses — which has `Scope` and `ClientID` fields for legitimate operator use — a client can include `"scope":"system"` or `"client_id":"<someone-else's-uuid>"` in the request body and either promote their preset to system-wide visibility (affecting every client) or attempt to write into another client's namespace.
+Under the pre-2026-07-28 Streamable HTTP spec (the era go-sdk v1.6.1 implements — the stateless spec RC found in research postdates it), the transport is session-based: the server issues `Mcp-Session-Id` on `initialize`, and every later request must present it. With >1 replica behind a plain round-robin Service, a session initialized on pod A 400s when a later request lands on pod B. Even at 1 replica, a rolling restart drops every live session with no failover. stdio never had this problem (one process = one implicit session), so this is a genuinely new state-management problem, not "same logic, different transport."
 
 **Why it happens:**
-`internal/presets/repo.go`'s `CreateParams` struct carries `Scope` and `ClientID` as ordinary exported fields with no built-in authorization check — that's correct for a CLI operated by a trusted human with direct DB access, but wrong for a JSON body coming from an authenticated-but-untrusted-with-elevated-scope HTTP client. This is the single most common REST API mistake in general (classic mass-assignment / "just json.Unmarshal into the DB struct"), and it's especially easy to reintroduce here because the repo layer is deliberately being reused ("share the repo layer" to avoid CLI/REST semantic drift) — reuse of the struct must not become reuse of its full field surface as the wire format.
+SDK server implementations hold session state in-process by default; nothing in a naive port externalizes it.
 
 **How to avoid:**
-- Define a separate, narrower REST request DTO (e.g. `presetRequest{Name, TargetFormat, Options, Description}` — no `Scope`, no `ClientID` fields at all) that the handler unmarshals into; the handler then constructs `presets.CreateParams{Scope: presets.ScopeUser, ClientID: &client.ID, ...}` itself, deriving both from `auth.ClientFromContext(r.Context())` — never from the request body. This mirrors the existing pattern where ownership fields (client_id via API key) are never client-supplied.
-- Keep the `manage-presets` CLI's ability to set `scope=system`/arbitrary `client_id` as CLI-only — the REST DTO simply has no field capable of expressing it, which is a stronger guarantee than a runtime "if scope==system, reject" check (which is one missed-code-path away from a bypass).
-- Add a test asserting a request body containing `"scope":"system"` either fails JSON-decode-into-DTO (field doesn't exist, ignored) or — if using a permissive decoder — is explicitly asserted to have no effect on the resulting `CreateParams`.
+- Simplest for this milestone (internal-only, modest concurrency): pin the MCP-HTTP Deployment to **1 replica**, explicitly documented as a known limit — MCPV2-01 doesn't ask for MCP HA/autoscaling.
+- If multi-replica is ever wanted: header-based sticky routing on `Mcp-Session-Id` at the ingress (ClientIP affinity is a weak proxy). Don't build a shared session store speculatively.
 
 **Warning signs:**
-- REST handler's request struct has a `Scope` or `ClientID` field with a JSON tag.
-- Any code path passes `r.Body`-derived data directly into `presets.CreateParams` without an intermediate DTO.
+- MCP-HTTP E2E passes reliably at 1 replica but flakes at >1 or during rolling updates — that "flakiness" is this bug, not test noise.
 
-**Phase to address:** Presets REST phase (PRST-V2-01) — this is the single highest-severity item in that phase; should be a named must-have with its own test, not folded silently into "CRUD works."
+**Phase to address:**
+MCP streamable HTTP phase — decide and document the replica-count constraint in that phase's plan, not during the (engine-queue-scoped) load-proof.
 
 ---
 
-### Pitfall 7: IDOR across clients if preset ownership isn't derived solely from the authenticated context
+### Pitfall 7: OrbStack daemon has wedged 3× under heavy parallel build/compose load — this milestone is the highest-risk session yet (project history, verified)
 
 **What goes wrong:**
-A client calls `GET/PUT/DELETE /v1/presets/{id}` (or `{name}`) for a preset ID/name that belongs to a different client. If the handler looks up the preset by ID alone and only checks `scope=user` without also filtering by the authenticated client's own `client_id`, one client can read, modify, or deactivate another client's presets — a direct violation of the project's "404 not 403, no cross-client leak" convention already established for jobs (`GET /v1/jobs/{id}` → 404 on cross-client access, Phase 1).
+`.planning/RETROSPECTIVE.md` documents this project's own incidents, not generic OrbStack rumor:
+- Line 142: OrbStack wedged during the first 18-04 attempt — 10-minute executor stall, then a misdiagnosed restart (Docker Desktop isn't installed; OrbStack is).
+- Line 183: "OrbStack wedged twice more during heavy builds; the restart runbook (quit → pkill helper → open -a OrbStack → poll docker version) is now proven but the root cause (daemon under parallel build+compose load) remains."
+
+Three confirmed wedges, root cause unresolved, trigger = parallel build + compose load. This milestone stacks onto the same VM: a full k8s control plane; 7+ simultaneous pods on `helm install` (chromium-worker at 2GB, document-worker under amd64 emulation, LibreOffice image heavy); iterative image rebuilds during chart development; rapid pod churn during the 0→N→0 load-proof. The `platform: linux/amd64` pin on document-worker means OrbStack's Rosetta-class translation (confirmed Rosetta-class, not qemu, in `v1.5-phases/23-verapdf-validation/23-01-SUMMARY.md`) now runs inside a k8s pod with kubelet/scheduler overhead on top. Also documented: a `/tmp` build-context xattr failure (`23-03-SUMMARY.md`: `failed to xattr /private/tmp/devio_semaphore_...`) — stage build contexts inside the worktree, never `/tmp`.
 
 **Why it happens:**
-`internal/presets/repo.go`'s existing methods (`Get`, `List`, `Update`, `Deactivate`) already take `clientID *uuid.UUID` as an explicit parameter and bake the ownership filter into the SQL `WHERE` clause (matching `Resolve`'s no-leak design) — so the repo layer is actually already safe by construction, IF every call site passes the authenticated client's ID and never a request-supplied one. The pitfall is entirely at the REST handler boundary: if a future "get by id" convenience method is added that takes only `id uuid.UUID` (no `clientID` parameter) for operator/debugging convenience, and the REST handler is wired to that method instead of the ownership-scoped one, the IDOR reappears despite the repo's existing design.
+Root cause explicitly unresolved — a standing operational risk to route around, not a solved problem.
 
 **How to avoid:**
-- REST handlers must call `Get`/`Update`/`Deactivate` with `clientID` sourced exclusively from `auth.ClientFromContext(r.Context())`, exactly mirroring `internal/jobs`'s existing cross-client 404 pattern — never accept or trust a `client_id` from the URL, query string, or body.
-- If any `id`-only repo method is added for the CLI's operator convenience, it must live in a clearly-separate code path that the REST handler physically cannot reach (e.g. only called from `cmd/manage-presets`), not a shared "helper" the HTTP layer might be tempted to call directly.
-- Reuse the exact `ErrNotFound`-for-everything semantics already documented in `presets.go` (D-03: nonexistent/inactive/cross-client all indistinguishable) — the REST handler's error mapping must translate `presets.ErrNotFound` to HTTP 404 uniformly, never 403, matching the existing jobs-handler convention.
+- **Pre-build all 5 images once, sequentially, with fixed non-`latest` tags, before iterating on the chart.** OrbStack k8s shares the Docker engine — built images are immediately pod-usable without a registry (official OrbStack docs) — use `imagePullPolicy: IfNotPresent`/`Never` or non-`latest` tags so Kubernetes never attempts a registry pull.
+- Never run the compose stack and the k8s stack hot simultaneously; serialize compose-based and k8s-based validation. The VM memory ceiling matters: LibreOffice + Chromium + emulated JVM + Postgres/Redis/MinIO ×2 stacks would be the heaviest resident set this project has ever asked of the VM.
+- Raise OrbStack's VM memory/CPU allocation before starting, if not already generous.
+- Apply the existing kill-after-120s rule for hanging docker/kubectl commands; run the proven restart runbook at the first stall rather than waiting it out.
+- Schedule the load-proof phase (highest pod churn) with headroom, not back-to-back with a chart-iteration cycle.
+- PVC note (LOW confidence — verify live, not assume): OrbStack k8s PVCs use a local provisioner inside the VM; fine for dev Postgres/MinIO data, but confirm data survives `helm uninstall`/reinstall the way compose named volumes do before any test flow relies on it.
 
 **Warning signs:**
-- Any REST handler reads `client_id` from `r.URL.Query()`, a path parameter, or the JSON body instead of the auth context.
-- A new repo method's signature omits `clientID` "for convenience."
+- Any docker/kubectl command silent >30-60s during a build or apply; past 120s, treat as a wedge (existing rule), not a slow command.
+- `docker version`/`kubectl get nodes` unresponsive after a normal-looking `helm upgrade` — same signature as prior incidents.
 
-**Phase to address:** Presets REST phase (PRST-V2-01) — test explicitly: client A cannot read/modify/deactivate client B's preset, asserting 404 (not 403, not 200).
+**Phase to address:**
+Cross-cutting — flag at roadmap risk level; apply concretely in the first full chart bring-up and the load-proof phases (the two highest-load moments). Add an explicit pre-flight task: build+cache all images, confirm `docker images`, confirm node Ready, then begin.
 
 ---
 
-### Pitfall 8: veraPDF's JVM-per-invocation cost silently regresses job latency and the CI e2e budget
+### Pitfall 8: host-gateway E2E trick and compose-DNS presigned URLs need re-derived (not renamed) solutions in k8s; nothing may break compose/CI (SEED-004 landmines #2/#4)
 
 **What goes wrong:**
-Replacing the current worker-side `OutputIntent` structural sanity check with real veraPDF ISO 19005 validation, if invoked as a fresh CLI process per PDF/A job (`java -jar verapdf...` or the `verapdf` wrapper script), adds JVM startup overhead (hundreds of ms to low seconds depending on classpath size) PLUS actual validation time to every single PDF/A-producing job. At small scale this is invisible; at the CI e2e tier — which already runs a fixed matrix of live conversions inside a 25-minute job cap — every additional PDF/A job absorbs this cost, and CI machines are typically slower/more contended than a dedicated worker host, making the regression show up in CI before it's noticed in production.
+- The E2E webhook receiver reaches a host process via `host.docker.internal:host-gateway` in compose; k8s has no equivalent. The receiver must become an in-cluster pod/Service (SEED-004 already says so), which changes the *harness*, not just a hostname: receiver lifecycle, how the (possibly host-run) test driver asserts against its received payloads, and the SSRF-guard env (`WEBHOOK_ALLOW_PRIVATE_IPS` relaxation lives only in the e2e overlay today) all need re-solving.
+- MinIO presigned URLs embed compose-DNS (`minio:9000`); the dial-redirect workarounds built for e2e and the MCP client (`OCTOCONV_S3_DIAL_ADDR`, preserving the Host header the V4 signature covers) are compose-topology-specific. In k8s the hostname regime changes (Service DNS), and a host-run test client typically can't resolve/reach cluster DNS at all without port-forward/Ingress — pushing toward running E2E as in-cluster Jobs, matching PROJECT.md's own goal ("проходит E2E внутри кластера"). Decide the driver topology (in-cluster Job vs host-run + port-forward) explicitly and early; it determines which existing dial-redirect implementation is the closer analog, and whether one is needed at all.
+- **Test-image drift / CI protection:** k8s validation is explicitly NOT in CI this milestone (local-only). The standing risk is chart work leaking into shared code and breaking the compose path CI *does* protect — Dockerfiles, `.env` contracts, e2e code, env-default changes (like the METRICS_ADDR bind or collector relocation). Every k8s-motivated code change must keep compose defaults intact (override via chart env, not by changing code defaults) and be re-validated against the local compose E2E, since that's the only regression gate for it.
 
 **Why it happens:**
-The existing PDF/A implementation (v1.3 Phase 14) deliberately chose the cheap structural check specifically to avoid this exact cost ("veraPDF = Java-стек в контейнере воркера; для внутренних клиентов достаточно структурного маркера" — a Key Decision explicitly deferring this). Verified externally: veraPDF's own REST-service design (`veraPDF/veraPDF-rest`, official Docker image) exists specifically to amortize this JVM startup cost across many requests by keeping the JVM warm as a long-running daemon rather than re-invoking the CLI per file — which is strong external validation that per-invocation JVM cost is a known, real problem the veraPDF project itself designed around.
+Both compose workarounds patch the same category of problem ("embedded hostname vs consumer's network position") in ways that were only simple under compose's flat bridge network; and a not-in-CI target invites silent drift into the target that *is* in CI.
 
 **How to avoid:**
-- Do NOT shell out to a fresh `verapdf` CLI process per job from `document-worker` (which would repeat the exact CLI-per-call pattern the veraPDF project's own REST-service design exists to avoid). Prefer one of: (a) run veraPDF in its own long-lived server-mode container (`verapdf/rest` image or a custom always-on JVM process) that `document-worker` calls over a local HTTP/socket interface per job, keeping the JVM warm across jobs; or (b) if staying CLI-based for simplicity, explicitly measure and budget the added per-job latency against `DOCUMENT_ENGINE_TIMEOUT` and the CI e2e 25-minute cap before committing to the approach.
-- Whichever approach is chosen, add a CI e2e timing check (or at minimum, note the new PDF/A job's wall-clock delta in the e2e log) so a future JVM-startup regression is visible rather than silently eating into the fixed 25-minute budget — this directly extends the project's own documented CI-timing discipline (`-timeout` overrides chosen deliberately per "Pitfall 7" referenced in `ci.yml`'s own comments).
-- Treat this as an explicit "new engine-class-like resource" decision analogous to the LibreOffice/chromium worker isolation precedent (separate container, resource limits) rather than adding a JVM dependency inline into the existing `document-worker` image, which would also blow up that image's size (Pitfall 9 below).
+- Treat the in-cluster webhook receiver as a design task with its own plan item (reuse the receiver *code*, expect the *harness* to change).
+- Re-derive the presigned-URL handling against the actual chosen topology, as one unit of work spanning API/workers/e2e/MCP — not four independent fixes.
+- Compose-compat rule for every code-touching phase: code defaults unchanged, k8s differences expressed only in chart values/env; run compose E2E locally after each shared-code change.
 
 **Warning signs:**
-- CI e2e job duration creeps upward after this phase lands, without an isolated measurement showing why.
-- `document-worker`'s image size grows by hundreds of MB (JRE + veraPDF jar) with no isolation from the LibreOffice footprint already in that container.
+- Copy-pasting the compose `extra_hosts` block into a manifest (meaningless in k8s) — a sign of renaming instead of re-deriving.
+- E2E failing at the presigned-download step specifically (not the conversion step) — the classic URL/DNS mismatch signature.
+- A red compose-E2E CI run on a "k8s-only" PR — the chart leaked into shared code.
 
-**Phase to address:** veraPDF phase (DOCV3-01) — architecture decision (daemon vs CLI-per-job) must be made and load-tested BEFORE wiring it into the hot path; CI timing impact should be an explicit acceptance check for the phase.
-
----
-
-### Pitfall 9: veraPDF false "fail" on structurally-valid-but-exotic PDF/A outputs turns transient document quirks into terminal job failures
-
-**What goes wrong:**
-Real ISO 19005 validation is stricter and more detailed than the current structural sanity check, and different veraPDF parser backends can disagree on edge cases (verified: an open veraPDF-library issue documents the GreenField vs PDFBox parsers producing DIFFERENT PDF/A-2b conformance verdicts for the same file over a CID TrueType font subset / missing CIDSet descriptor entry). If LibreOffice's PDF/A export occasionally produces output that veraPDF flags as non-conformant on some narrow technicality (font subsetting edge cases are a known friction point), and the worker treats any veraPDF failure as an unconditional job failure, previously "good enough" jobs will start failing terminally in production with no operator-visible distinction between "genuinely broken PDF" and "veraPDF found a picky ISO nit LibreOffice's engine will always trip."
-
-**Why it happens:**
-The existing project convention for genuinely broken conversions is straightforward "mark failed, webhook the client" — but that convention was built for engine crashes and content-validation rejections, not for a validation step whose severity is graded (veraPDF validation profiles distinguish rule severity levels; not every failed rule is equally "the PDF is unusable"). Wiring `verapdf --flavour <PDF/A-2b> ... ; if nonzero/non-compliant: mark failed` without a severity policy conflates "technically imperfect" with "broken," and because LibreOffice's PDF/A export is a third-party black box, some rate of exotic-but-usable output is a near-certainty on real internal documents over time.
-
-**How to avoid:**
-- Choose upfront which veraPDF verdict states are terminal-fail vs which are recorded-but-non-blocking: at minimum, distinguish "compliant" / "non-compliant with only Warning-severity rule violations" / "non-compliant with Error-severity rule violations" if veraPDF's validation profile output exposes rule severity (verify against the specific validation profile's rule metadata before committing to a threshold).
-- Record full veraPDF validation detail (rule ids, verdict) in `job_events` regardless of the pass/fail decision, so a later policy tightening doesn't require re-running historical jobs to see what would have failed.
-- Add this severity-policy decision as an explicit, documented `Key Decision` (matching this project's existing decision-log discipline) rather than letting "veraPDF said no" silently become the new terminal-fail bar without discussion.
-- Test against at least one real LibreOffice-produced PDF/A-2b output from the existing v1.3 fixtures to confirm the chosen policy doesn't immediately regress the "verified" v1.3 PDF/A conversions into new terminal failures.
-
-**Warning signs:**
-- No severity/threshold decision documented; code simply checks `exitCode != 0` or a boolean `isCompliant` field.
-- Existing v1.3 live-verified PDF/A fixture files, when re-validated with real veraPDF, come back non-compliant — this is a canary that must be checked BEFORE shipping, not discovered after.
-
-**Phase to address:** veraPDF phase (DOCV3-01) — severity policy is a design deliverable of this phase, verified against existing PDF/A fixtures before merge.
-
----
-
-### Pitfall 10: Full CFB decompression/traversal reopens the exact DoS class the project already fail-closed rejects
-
-**What goes wrong:**
-`internal/convert/olecfb.go` currently does a deliberately minimal 8-byte magic check specifically to AVOID parsing the CFB directory. DOCV3-02 requires parsing the CFB directory to distinguish encrypted-OOXML from legacy-binary — but a full or naive CFB parser is a well-documented DoS surface: compound-file directory structures use sector-chain/FAT-like linked lists, and a maliciously crafted file can encode a **cycle in the directory chain**, causing a naive traversal to loop forever (verified: this is a real, currently-open vulnerability class — `openmcdf`'s GHSA-jxpf-xq2m-q525 is exactly "infinite loop denial of service via crafted CFB directory cycle" in a mainstream CFB library; Apache POI has multiple historical CVEs, e.g. CVE-2012-0213/CVE-2017-12626, for OOM/infinite-loop on malformed CFB/CDF structures). Since this parser sits in the API's pre-storage validation path (same trust boundary as magic-bytes sniffing — untrusted bytes, before any storage write), an unbounded/cyclic parse here is a request-time DoS against the API process itself, not just the worker.
-
-**Why it happens:**
-"Parse the directory to tell the two cases apart" sounds like a small, contained addition compared to "parse a whole file format," but directory-only CFB parsing still requires walking a FAT-like sector chain and a directory-entry tree, which is exactly where the known DoS bugs live (not in the payload streams, which this parser correctly never touches) — the temptation is to reach for a general-purpose CFB library (e.g. a Go port with wider format support) rather than hand-rolling the minimum bounded logic actually needed, importing a much larger, less-audited attack surface than the question's own framing ("parse ONLY the directory, never decompress") anticipates.
-
-**How to avoid:**
-- Hand-roll (do not adopt a general third-party CFB library — matches this project's zero-new-deps bias, see Pitfall 12) a minimal, bounded directory-only reader: cap the maximum number of sectors/directory entries walked (derived from the file's declared header size, itself bounds-checked against the actual `io.ReaderAt` length before trusting it), and track visited sector indices in a bitset/set to detect and immediately fail-closed-reject any repeat visit (cycle) rather than looping.
-- Never follow the FAT/mini-FAT chains into stream content — the parser's job is exclusively "does the root storage contain an `EncryptionInfo`/`\x06DataSpaces` stream (encrypted) vs does it look like a legacy binary format's expected top-level streams (`WordDocument`/`Workbook`/`PowerPoint Document`)?" — both are directory-entry-name checks, never requiring the mini-FAT stream-reassembly logic where most real-world CFB parser bugs live.
-- Any read of a declared length/offset/count field from the file MUST be bounds-checked against the actual buffer/reader length before being used to size an allocation or drive a loop bound — mirrors this project's existing decompression-bomb precedent (Phase 7's own-parser-not-shell-out choice for image dimensions) applied to CFB structure fields instead of image headers.
-- Fuzz-test the new parser (Go's built-in `go test -fuzz`) against the directory-parsing entry point specifically, seeded with the legitimate legacy/encrypted fixtures already in the v1.3 test suite plus deliberately corrupted variants (truncated header, self-referential sector index, oversized declared sector count) before this ships.
-
-**Warning signs:**
-- New code imports a general external CFB/OLE2 parsing library instead of hand-rolling the minimal directory walk.
-- No cycle-detection/visited-set exists in the sector-chain-walking loop.
-- No fuzz target or malformed-input test cases beyond the two "happy path" fixtures (legacy, encrypted).
-- Any loop bound is derived purely from a value read out of the file itself without also being capped against the actual file size.
-
-**Phase to address:** CFB phase (DOCV3-02) — this is the highest-severity item in that phase given the directly-cited external CVE precedent; fuzzing should be a phase-exit gate, not optional polish.
-
----
-
-### Pitfall 11: CFB encrypted-detection false positives / weakening the existing fail-closed default
-
-**What goes wrong:**
-Splitting the current single "reject both" 422 into two distinguished 422s ("password-protected" vs "legacy format") creates a third, more dangerous failure mode if the detection logic is wrong in the permissive direction: a file that superficially looks like it has encryption markers (or lacks the specific stream names the parser checks for) could be misclassified, and if that misclassification is ever used to ALLOW a "not actually encrypted, safe to convert" path rather than just choosing which 422 message to show, the project's hard-won fail-closed guarantee (D-05's "one 422 on both, without parsing the CFB directory" was itself explicitly the fail-closed-safe choice) regresses to accepting some previously-rejected inputs.
-
-**Why it happens:**
-The current Key Decision log entry states the reason the single-422 approach was chosen was PRECISELY to avoid needing a real CFB parser and its correctness risk. DOCV3-02 reverses that decision, and it's easy for the new parser's "unknown/unrecognized CFB substructure" case to be handled as a default accept-and-attempt-conversion (since the new code path naturally has more branches: encrypted vs legacy vs "neither pattern matched") rather than folding back to the same generic reject the old code always did.
-
-**How to avoid:**
-- The new parser must have exactly three outcomes, and the default/unknown case must map to REJECT: (1) confidently encrypted → 422 "password-protected"; (2) confidently legacy-binary → 422 "unsupported legacy format"; (3) anything else (unrecognized structure, ambiguous, partially-parsed) → generic 422 fail-closed reject, IDENTICAL in effect to today's single-422 behavior — never a path that proceeds to conversion or storage write.
-- Never let CFB-directory parsing become a de-facto "is this actually convertible" allow-decision; its only job is choosing which REJECTION message to show. The `Converter`/`Registry` contract is unchanged: no converter is ever registered for OLE-CFB inputs, full stop.
-- Test the "ambiguous/ill-formed but not clearly either case" branch explicitly (not just the two clean fixtures) to confirm it still 422s.
-
-**Warning signs:**
-- New code has any branch where CFB-detected input reaches the storage-write or job-creation path.
-- The "unrecognized substructure" case is unhandled (falls through) rather than an explicit reject branch.
-
-**Phase to address:** CFB phase (DOCV3-02) — pair directly with Pitfall 10's fuzz tests; both should be verified by the same test matrix.
-
----
-
-### Pitfall 12: New Java/veraPDF dependency and MCP SDK choice bypass the project's zero-new-deps review discipline
-
-**What goes wrong:**
-This project has an explicit, repeatedly-honored bias against new dependencies (Phase 7's own-parser-instead-of-`golang.org/x/image`, Phase 4's magic-bytes-not-shell-out, the zero-new-Go-deps precedent throughout `go.mod`'s currently tight dependency list). Both veraPDF (an entire Java runtime + jar, not a Go library) and the MCP SDK (`modelcontextprotocol/go-sdk`, a brand-new first-party Go dependency) are exactly the kind of addition this project has previously avoided or deferred — if either is added without going through the same explicit "why this, why not zero-dep" review the codebase applies elsewhere, it's a silent philosophy break that later contributors won't have context for.
-
-**Why it happens:**
-Both additions are genuinely justified (veraPDF is the ONLY credible ISO 19005 conformance validator — there is no zero-dep equivalent, unlike image-dimension sniffing which had a feasible hand-rolled alternative; the MCP Go SDK is the official reference implementation, not a third-party convenience lib) — but "justified" still requires the explicit Key Decision entry this project always writes, not silent acceptance.
-
-**How to avoid:**
-- Write an explicit Key Decision entry for both: veraPDF (Java, containerized separately — not vendored into `document-worker`'s existing image, matching the LibreOffice/chromium container-isolation precedent) and the MCP SDK choice (official `modelcontextprotocol/go-sdk` vs `mark3labs/mcp-go`, per SEED-003's own framing) — with rationale for why NO zero-dep alternative exists, mirroring the phrasing style already used for e.g. the decompression-bomb decision.
-- Confirm the MCP SDK addition doesn't transitively bloat `go.mod` for the OTHER binaries (`api`, `worker`, etc.) — it should be an import isolated to `cmd/mcp-server` and whatever shared client code it uses, not something that forces every binary in the module to carry MCP-protocol transitive dependencies. Verify with `go mod why` after the phase.
-
-**Warning signs:**
-- No Key Decision entry added to `PROJECT.md` for either dependency by phase-end.
-- `go.mod`'s existing binaries (`api`, `worker`, `document-worker`) show new transitive dependencies traceable to the MCP SDK import after `go mod tidy`.
-
-**Phase to address:** Both MCP server phase and veraPDF phase — each phase's planning step should explicitly name this as a review checkpoint, not the coding step.
+**Phase to address:**
+In-cluster E2E adaptation phase for the receiver/presigned work; the compose/CI-compatibility rule applies to every phase that touches Go code or env defaults.
 
 ---
 
 ## Technical Debt Patterns
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|-----------------|------------------|
-| CLI-per-job veraPDF invocation instead of daemon/server mode | Simpler wiring, no new long-running container | JVM startup cost paid on every job; regresses CI e2e timing and production job latency at scale | Only as an explicit, measured interim step with a documented follow-up to daemonize before wider rollout — never as the final v1.5 shape without a timing measurement |
-| Sharing `presets.CreateParams` directly as the REST JSON DTO | Less boilerplate, fewer structs | Reopens mass-assignment (Pitfall 6) the moment `Scope`/`ClientID` become client-writable | Never — always use a narrower request DTO for the REST layer |
-| `convert_file` blocking without progress notifications for "fast enough" image jobs | Simple implementation, passes manual testing | Silent time-bomb: first slow document/chromium job during a busy queue period times out the MCP client unpredictably | Never acceptable past a throwaway prototype — must be fixed before the MCP phase's exit criteria |
-| Adopting a general third-party CFB parsing library instead of hand-rolling the bounded directory reader | Faster to implement, "someone else already solved sector-chain parsing" | Imports the exact DoS-prone code the project is trying to avoid, and breaks the zero-new-deps bias | Never, given the project's explicit precedent (Phase 4/7) of hand-rolling parsers for this exact reason |
+|----------|--------------------|-----------------|------------------|
+| Dev creds (`minioadmin`/`octo-pass`/`dev-only-change-me-in-real-deploys`) copied from `docker-compose.yml` into committed `values.yaml` | Fast bring-up, parity with the already-accepted compose trust model | Same actual risk compose accepts, slightly higher exposure surface (Helm defaults are more likely to be reused as-is than `.env.example`, which forces a copy step) | Acceptable this milestone (same internal-only precedent) **only if** loudly flagged as dev-only in values comments/README, exactly like compose does today |
+| Fixed 2-replica webhook-worker Deployment instead of KEDA (Pitfall 2) | Sidesteps the sweeper-singleton risk entirely | Slight inconsistency with the "every engine-class autoscales" narrative | Acceptable and arguably correct; document as an intentional exclusion |
+| Single-replica MCP-HTTP Deployment (Pitfall 6) | Avoids sticky-routing/session-store work | No MCP HA; restart drops live sessions | Acceptable — MCPV2-01 doesn't ask for MCP HA; document as a known limit |
+| Keeping the `linux/amd64` pin on document-worker in k8s | Zero new investigation; veraPDF keeps working as measured | Emulation cost persists inside a pod; irrelevant on OrbStack's single node, matters only on future heterogeneous clusters | Acceptable — pre-existing accepted risk (v1.5 PDFA decision); note that multi-node clusters need nodeSelector/affinity where compose's `platform:` sufficed |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
-|-------------|-----------------|-------------------|
-| MCP client (Claude Code / other hosts) | Assuming a fixed wall-clock timeout (e.g. "60s, so keep calls short") | Design around the documented idle-window model (30 min stdio / 5 min HTTP) and use progress notifications to reset it, not to race a fixed clock |
-| veraPDF (Java process) | Shelling out fresh per job like the existing `os/exec` engine pattern (`internal/convert/exec.go`) without accounting for JVM startup, unlike the lightweight `vips`/`soffice`/`chromium` CLI calls this pattern was designed around | Isolate veraPDF as its own long-lived service (matches LibreOffice/chromium container-isolation precedent) or explicitly budget/measure the per-job JVM cost before committing to CLI-per-job |
-| `manage-presets` CLI vs new REST endpoint | Letting the two diverge in validation semantics because REST was built against a hand-rolled request struct instead of the shared `internal/presets` repo/domain logic | Both CLI and REST call the identical `internal/presets.Repo` methods and the identical `optscheck.go` re-validation logic; only the request-decoding/DTO layer differs (and REST's DTO is deliberately narrower, per Pitfall 6) |
-| Rate limiting on new `/v1/presets` endpoints | Forgetting to wire the existing `ratelimit.PerClient`/`ByIP` chi middleware onto the new router group, since it's easy to mount new routes outside the existing middleware chain when adding a new resource | New `/v1/presets` routes must sit inside the same `auth.Middleware` → `ratelimit.PerClient` chain as `/v1/jobs`, verified by an explicit test hitting the rate limit on the new endpoint (mirroring existing jobs-endpoint rate-limit tests) |
+|-------------|------------------|-------------------|
+| KEDA `prometheus` scaler | Pointing the trigger at the worker's own metrics endpoint (the natural default) | Point at the always-on component hosting the collector post-fix (Pitfall 1); verify via `kubectl get --raw` on the external metrics API that the value resolves correctly at **0** replicas, not just at N |
+| KEDA `pollingInterval`/`cooldownPeriod` | Leaving defaults (30s poll / 300s cooldown) without considering per-class task durations — one long document task, or a queue that empties/refills within the cooldown window, causes flapping | Tune per engine class: image (fast, bursty) shorter cooldown; document/html (slow tasks) longer, so one 300s job doesn't read as sustained load or premature idleness. Total metric lag = Prometheus scrape interval + KEDA poll + HPA stabilization — budget it explicitly in the load-proof's pass criteria |
+| Helm hook Jobs (`migrate`, `createbucket`) | Relying on migrate's idempotence alone; without `helm.sh/hook-delete-policy` the previous release's completed Job collides by name and the **upgrade fails outright** | `helm.sh/hook: pre-install,pre-upgrade` + `hook-delete-policy: before-hook-creation,hook-succeeded` + `restartPolicy: Never` + `activeDeadlineSeconds` on both Jobs. Migrate IS idempotent (per PROJECT.md) and createbucket uses `mc mb --ignore-existing` — the wiring, not the logic, is the risk. Ordering: compose's `depends_on: service_healthy` disappears; hook weights + probes that genuinely gate on DB/bucket readiness replace it |
+| Probes on LibreOffice/chromium workers | Copying compose healthchecks as aggressive liveness probes; heavy images + amd64 emulation make cold start slow, and tight `initialDelaySeconds`/`failureThreshold` produces CrashLoopBackOff on a healthy slow start | Use a `startupProbe` with generous failureThreshold × period covering worst-case cold start under emulation, gating liveness; keep liveness cheap (process-level). Workers are pull-based — readiness gates traffic they don't receive anyway, so probe design is about restart avoidance, not routing |
+| MinIO/S3 in k8s | Assuming `S3_ENDPOINT=minio:9000` translates unchanged | Use the k8s Service DNS name consistently in env **and** accept it lands inside presigned URLs — treat the presigned-hostname problem as one unit across API/workers/e2e/MCP (SEED-004 #4, Pitfall 8) |
+| OrbStack local images | `:latest` + default `imagePullPolicy: Always` → registry pull attempts for images that only exist locally → ImagePullBackOff | Fixed non-`latest` tags or explicit `imagePullPolicy: IfNotPresent`/`Never`; OrbStack shares the engine, so local images are pod-visible without a registry |
+| chromium-worker `/dev/shm` | Forgetting compose's `shm_size: "256m"` has a k8s equivalent that must be recreated | Mount an `emptyDir` with `medium: Memory` and `sizeLimit: 256Mi` at `/dev/shm` (k8s default shm is 64Mi); the `--disable-dev-shm-usage` argv flag alone was deliberately judged insufficient (compose comment: "some Chromium internal code paths still touch /dev/shm even with that flag") |
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|-----------------|
-| CLI-per-job veraPDF JVM startup | Document-worker job duration creeps up specifically for PDF/A-target jobs; CI e2e tier duration grows | Daemonize veraPDF (server mode) or explicitly measure/budget the added latency against `DOCUMENT_ENGINE_TIMEOUT` and the CI e2e 25-min cap | Becomes visible almost immediately in CI (fixed small fixture set × added fixed JVM-start cost per invocation), well before production scale |
-| `convert_file` blocking poll loop with tight interval | High Postgres/API load from an MCP server aggressively polling `GET /v1/jobs/{id}` every few hundred ms across many concurrent agent sessions | Backoff the poll interval (mirrors the image queue's own backoff precedent: 2s/5s/15s) and rely on progress notifications for liveness, not poll frequency | Noticeable once more than a handful of concurrent MCP sessions are converting documents simultaneously |
-| Unbounded CFB directory/sector walk | API process CPU pegged / request hangs on a crafted upload | Bounded, cycle-detected directory-only parse (Pitfall 10) | A single malicious/malformed upload triggers it — this is a correctness bug, not a scale threshold |
+| Cold-start 0→1 stacking: heavy image + amd64-emulated JVM (document-worker) + metric lag + HPA cycle | Time-to-first-conversion after scale-from-zero far worse for document/html than image | Per-class pass/fail budgets in the load-proof, not one uniform threshold; pre-pulled images (already required by Pitfall 7) remove pull time from the equation | Only a production concern if `minReplicaCount: 0` survives into a real deployment for latency-sensitive classes — for this proof, measure honestly rather than hiding it with minReplicaCount=1 |
+| Queue-depth metric lag → replica flapping | Replicas oscillate under steady load; HPA events alternate scale up/down | Scale-down stabilization/cooldown longer than the longest per-class task duration; see the KEDA tuning row above | Visible immediately in the load-proof if untuned — a tuning task, not an architecture flaw |
+| VM memory ceiling with both stacks resident | OrbStack VM swapping; pods OOMKilled; daemon stall (Pitfall 7) | Never run compose + k8s stacks hot simultaneously; carry compose's per-service memory limits (worker 1g / document 1g / chromium 2g) into pod `resources` so the scheduler can actually protect the node | At full-chart bring-up, immediately, if the compose stack is still up |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| API key echoed into MCP tool error text | Credential exposure into LLM context/transcripts/logs outside the API's own trust boundary | Fixed, non-leaking error mapping in the MCP HTTP client wrapper, mirroring `internal/api/handlers.go`'s existing discipline |
-| Agent-supplied filesystem paths trusted without containment check | Path traversal / arbitrary file read-write from a compromised or confused agent | `filepath.Abs` + root-containment check + symlink rejection on every path the MCP server touches |
-| `scope`/`client_id` fields present in the presets REST request DTO | Mass-assignment → privilege escalation to system scope or cross-client writes | Narrow REST DTO with no scope/ownership fields; server derives both from `auth.ClientFromContext` |
-| CFB parser accepting "unrecognized structure" as a pass-through | Regresses the project's fail-closed guarantee for OLE-CFB inputs | Explicit three-way outcome (encrypted / legacy / generic-reject-default), never a fourth "proceed anyway" branch |
-| General third-party CFB library import | Inherits known DoS bug classes (directory-chain cycles, OOM on malformed length fields) into a pre-storage, pre-auth-adjacent validation path | Hand-rolled, bounded, cycle-detected, fuzz-tested directory-only reader; no stream/mini-FAT reassembly code at all |
-
-## UX Pitfalls
-
-| Pitfall | User Impact | Better Approach |
-|---------|-------------|-------------------|
-| `convert_file` silently hangs with no feedback during a slow document job | Agent/developer perceives the tool as broken or the session as frozen | Progress notifications on every poll tick, describing current job status (queued/active) |
-| Presets REST error messages differ in wording/shape from the existing `manage-presets` CLI or the jobs API's `writeError` convention | Confusing, inconsistent API surface for the same underlying concept | Reuse `writeError`'s exact JSON shape (`{"error": "..."}`) and the same no-leak 404 semantics already used across `/v1/jobs` |
-| New "distinguished" CFB 422s use inconsistent/ambiguous wording between "password-protected" and "legacy format" | Client-side error handling can't reliably branch on the difference | Define stable, documented error codes/messages for both 422 sub-cases as part of this phase's contract, not just free-text differences |
+| `values.yaml` Secret defaults that look production-usable | Dev creds copied into a real deployment (worse than `.env.example`, which forces an explicit copy step) | Loudly-fake defaults (the existing `dev-only-change-me...` strings qualify) + chart README stating they MUST be overridden; same trust-model precedent as compose, explicitly flagged |
+| Metrics/asynqmon rebind without NetworkPolicy | In-cluster leak of operational data and an unauthenticated queue-inspection UI | Pitfall 4: bind change + NetworkPolicy as one atomic unit; negative-test the policy |
+| MCP-HTTP shared static key | Single high-value credential reachable by anything that can route to the Service | Pitfall 5: per-request auth-header passthrough; plus a NetworkPolicy on who may reach the MCP Service at all |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **`convert_file`:** Often missing progress notifications on slow (document/chromium-class) jobs — verify by forcing a real document conversion through the MCP tool, not just an image conversion, and confirming no idle-window timeout occurs.
-- [ ] **MCP error handling:** Often missing a check that the API key never appears in any tool-visible error string — verify with a forced-failure test (bad upstream response) asserting the key substring is absent from the result.
-- [ ] **Presets REST:** Often missing a negative IDOR test (client A can't touch client B's preset) and a mass-assignment test (`scope`/`client_id` in payload has no effect) — verify both exist as automated tests before merge.
-- [ ] **veraPDF integration:** Often missing a re-check against the EXISTING v1.3 PDF/A fixtures — verify those known-good outputs still pass under real veraPDF validation before shipping the stricter check.
-- [ ] **CFB directory parser:** Often missing fuzz/malformed-input coverage beyond the two happy-path fixtures (legacy, encrypted) — verify a fuzz target exists and has run for a nontrivial corpus/time budget, and that a crafted cyclic-chain input is an explicit test case.
-- [ ] **CI e2e timing:** Often missing an explicit before/after duration comparison when a new engine-adjacent process (veraPDF) enters the hot path — verify the e2e job's wall-clock duration is checked against the 25-minute cap with the new step included, not assumed fine because the local sandbox was fast.
+- [ ] **KEDA 0→N→0 proof:** often only proves N→0 (a running pod can always report its own draining metric) — verify the 0→N leg separately with the worker genuinely at 0 replicas and a freshly-filled queue (Pitfall 1).
+- [ ] **`helm install` "just works":** often missing the migrate/createbucket **ordering** guarantee compose's `depends_on: service_healthy` gave for free — and verify `helm upgrade` (not just install) re-runs hooks without Job-name collisions.
+- [ ] **In-cluster E2E "passes":** often means happy-path conversion only — verify webhook delivery + signature, reconciler recovery, and MCP are all exercised in-cluster, not just convert-and-download.
+- [ ] **NetworkPolicies "added":** verify with a negative test from an unrelated pod, not by the resource merely existing.
+- [ ] **Compose/CI still green:** every k8s-motivated code change (bind addresses, collector relocation, env defaults) re-validated against the local compose E2E — k8s isn't in CI this milestone, and CI only protects the compose path.
+- [ ] **Graceful shutdown "handled":** `srv.Shutdown()` exists in every worker, but the pod grace period is what makes it real in k8s — verify per-class `terminationGracePeriodSeconds` is set and a live long job survives a scale-down.
+- [ ] **chromium `/dev/shm`:** compose's `shm_size` silently vanishes in a naive port — verify the memory-backed emptyDir mount exists and Chromium renders a heavy page without shm errors.
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|----------------|-----------------|
-| `convert_file` blocking timeouts discovered in production | LOW | Add progress notifications and/or a documented max-duration fallback to `get_job_status`; no data-layer changes needed since job state already lives in Postgres |
-| API key found leaking in error text | LOW-MEDIUM | Patch the error-mapping call site; rotate the exposed client API key via the existing two-slot rotation mechanism (`manage-clients add-key`/`revoke`) since a leaked key must be treated as compromised |
-| Mass-assignment/IDOR found in presets REST after ship | MEDIUM | Tighten the DTO/ownership derivation; audit `job_events`-equivalent history (or add preset audit logging if absent) to check whether any client actually exploited the gap before the fix landed |
-| veraPDF found flakily failing previously-good jobs in production | MEDIUM | Introduce the severity-policy distinction retroactively (Pitfall 9) using recorded veraPDF rule-level output if it was logged even during the unpolicied period; if not logged, must re-run affected jobs' outputs through veraPDF again from S3 (TTL permitting) |
-| CFB parser DoS/cycle found in production | HIGH | Requires an emergency patch + likely a temporary revert to the old single-422 behavior while a bounded/fuzzed replacement is prepared, since this sits pre-auth-adjacent in the API request path and directly affects service availability |
+| Scale-up-from-zero never fires (Pitfall 1 shipped) | LOW | Register `NewQueueDepthCollector` for all queues in the API process (it already has `queue.RedisOpt()`); repoint the ScaledObject query — the collector code is reusable as-is from any process |
+| Sweeper stopped after webhook-worker hit 0 (Pitfall 2 shipped) | LOW | Chart-config-only: `minReplicaCount: 1` or remove the ScaledObject; sweeping resumes on the next tick once a pod holds the lock |
+| SIGKILL mid-conversion (Pitfall 3) | MEDIUM | Raise per-class grace periods; the reconciler already self-heals stranded jobs within `RECONCILER_ACTIVE_STALE_AFTER` — unfixed instances are slow and noisy, not data-lossy |
+| MCP-HTTP shared-key design shipped (Pitfall 5) | HIGH | Retrofit per-request identity into a client built once at startup (`internal/mcpserver/client.go` construction-lifecycle change) — much cheaper caught at design time |
+| OrbStack wedge mid-milestone (Pitfall 7) | LOW per incident | Proven runbook: quit OrbStack → pkill helper → `open -a OrbStack` → poll `docker version`; expect recurrence (root cause unresolved) |
+| Probe-induced CrashLoopBackOff on slow LibreOffice start | LOW | Add/loosen `startupProbe`; no code change |
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
-|---------|-------------------|----------------|
-| Blocking timeout past MCP idle window (P1) | MCP server phase | Live test: force a document/chromium-class job through `convert_file`, confirm no client-side timeout, confirm `NotifyProgress` calls observed |
-| API key leak into tool results (P2) | MCP server phase | Forced-failure unit test asserting key substring absent from all tool error paths |
-| Path traversal via agent-supplied paths (P3) | MCP server phase | Test with `../`-traversal and absolute-path inputs against both `convert_file` and `download_result` |
-| Giant file bytes in tool results (P4) | MCP server phase | Code review + test asserting tool results carry paths/URLs, never file content, above a trivial size |
-| Stdout corruption (P5) | MCP server phase | Grep for `fmt.Print*` in `cmd/mcp-server`; pipe stdout through a JSON-line validator during manual smoke test |
-| Mass-assignment on presets REST (P6) | Presets REST phase | Test: payload with `scope`/`client_id` fields has zero effect on resulting preset's actual scope/owner |
-| IDOR across clients on presets REST (P7) | Presets REST phase | Test: client A's request against client B's preset id/name returns 404, not 403, not 200 |
-| veraPDF JVM-cost regression (P8) | veraPDF phase | Explicit before/after CI e2e wall-clock measurement with the new validation step included |
-| veraPDF false-fail severity policy (P9) | veraPDF phase | Re-validate existing v1.3 PDF/A-2b fixtures under real veraPDF before merge; documented severity threshold Key Decision |
-| CFB directory-parse DoS (P10) | CFB phase | Fuzz target covering the directory-walk entry point; explicit cyclic-chain crafted-input test |
-| CFB fail-closed default weakening (P11) | CFB phase | Test: ambiguous/unrecognized CFB structure still returns generic 422, never proceeds to conversion |
-| New-dependency review bypass (P12) | Both MCP server phase and veraPDF phase | `PROJECT.md` Key Decisions entry present for each dependency by phase-end; `go mod why` confirms no unwanted transitive bleed into other binaries |
+|---------|-------------------|---------------|
+| 1. Queue-depth chicken-egg at 0 replicas | KEDA phase, gating early sub-task (metric relocation before ScaledObjects) | External-metrics API returns correct depth with the worker Deployment at 0 and a nonzero queue; 0→N scale-up observed live |
+| 2. webhook-worker scale-to-zero kills sweeper | KEDA phase (explicit exclusion / minReplicaCount guard) | ≥1 webhook-worker pod Running throughout a full engine-class 0→N→0 cycle; continuous sweep activity in `job_events` |
+| 3. SIGKILL mid-conversion | Helm chart phase (per-class `terminationGracePeriodSeconds`) | Long document job in flight during scale-down completes cleanly, not reconciler-recovered |
+| 4. METRICS_ADDR without NetworkPolicy | Helm chart phase (atomic bind + policy change) | Negative curl from an unrelated pod fails; scraper succeeds |
+| 5. MCP-HTTP shared key | MCP HTTP phase, design step before transport wiring | Two callers with two distinct API keys are separately attributed/rate-limited |
+| 6. MCP session state across replicas | MCP HTTP phase | Single-replica constraint documented + enforced, or a session survives routing across replicas |
+| 7. OrbStack wedging | Cross-cutting; pre-flight task in chart bring-up + load-proof phases | Sequential pre-build completes; no >120s stalls; runbook on hand |
+| 8. E2E receiver + presigned DNS + compose/CI protection | In-cluster E2E phase; compose-compat rule in every code-touching phase | Full webhook round-trip against an in-cluster receiver; presigned download works; compose E2E stays green after each shared-code change |
 
 ## Sources
 
-- MCP idle-window/timeout behavior: [Claude Code MCP docs](https://code.claude.com/docs/en/mcp), live GitHub issues on anthropics/claude-code (#17662, #22542, #47076, #65643, #44006) — MEDIUM-HIGH confidence (cross-referenced multiple independent bug reports plus docs)
-- Stdio stdout-corruption failure mode: [MCP official debugging docs](https://modelcontextprotocol.io/docs/tools/debugging), ruvnet/claude-flow issue #835, dirmacs/daedra issue #4 — HIGH confidence (official docs + multiple independent real-world reports)
-- Go SDK progress notifications (`NotifyProgress`, `GetProgressToken`): [pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp), [go-sdk protocol docs](https://github.com/modelcontextprotocol/go-sdk/blob/main/docs/protocol.md) — MEDIUM confidence (official SDK docs, not independently executed against a running server)
-- veraPDF server/REST mode amortizing JVM cost: [veraPDF/veraPDF-rest](https://github.com/veraPDF/veraPDF-rest), [verapdf/rest Docker Hub](https://hub.docker.com/r/verapdf/rest) — HIGH confidence (official project's own architecture choice)
-- veraPDF parser-dependent verdict divergence (GreenField vs PDFBox): [veraPDF-library issue #1253](https://github.com/veraPDF/veraPDF-library/issues/1253) — MEDIUM confidence (single documented issue, real but not exhaustive)
-- CFB directory-cycle DoS precedent: [openmcdf GHSA-jxpf-xq2m-q525](https://github.com/openmcdf/openmcdf/security/advisories/GHSA-jxpf-xq2m-q525) — HIGH confidence (official security advisory)
-- Apache POI historical CFB/CDF DoS CVEs (CVE-2012-0213, CVE-2017-12626): [cvedetails.com Apache POI DoS list](https://www.cvedetails.com/vulnerability-list/vendor_id-45/product_id-22766/opdos-1/Apache-POI.html) — MEDIUM confidence (aggregator listing, cross-referenced with IBM security bulletins in the same search)
-- Codebase conventions (fail-closed 404/no-leak, error-mapping discipline, rate-limit middleware ordering, zero-new-deps precedent, guarded transitions): `internal/api/handlers.go`, `internal/auth/middleware.go`, `internal/ratelimit/ratelimit.go`, `internal/presets/repo.go`, `internal/presets/presets.go`, `internal/convert/olecfb.go`, `.planning/PROJECT.md` Key Decisions — HIGH confidence (direct repository inspection)
-- CI e2e budget structure (25-min cap, 4-tier pipeline): `.github/workflows/ci.yml` — HIGH confidence (direct repository inspection)
-- SEED-003 design sketch (thin MCP wrapper, blocking `convert_file`, SDK choice): `.planning/seeds/SEED-003.md` — HIGH confidence (direct repository inspection)
+- This project's own source, read directly (HIGH confidence, primary evidence): `internal/queue/queue.go`, `cmd/worker/main.go:89`, `cmd/document-worker/main.go:94`, `cmd/chromium-worker/main.go:86`, `cmd/webhook-worker/main.go:114`, `cmd/api/main.go`, `internal/metrics/queue_collector.go`, `internal/metrics/metrics.go`, `internal/reconciler/reconciler.go`, `internal/mcpserver/config.go`, `internal/mcpserver/client.go`, `docker-compose.yml`, `go.mod`
+- This project's planning history (HIGH confidence): `.planning/PROJECT.md`, `.planning/seeds/SEED-004.md`, `.planning/RETROSPECTIVE.md` (OrbStack wedges, lines 138/142/183), `.planning/milestones/v1.5-phases/23-verapdf-validation/23-01-SUMMARY.md` (Rosetta-class amd64 emulation), `23-03-SUMMARY.md` (/tmp build-context xattr failure)
+- [Prometheus: Scaling to zero not working in KEDA 1.4.0 · Issue #770](https://github.com/kedacore/keda/issues/770) — MEDIUM, chicken-egg precedent
+- [KEDA vs native HPA scale-to-zero](https://blog.devops.dev/keda-vs-kubernetes-1-36-native-hpa-the-ultimate-scale-to-zero-showdown-0a85f79cd7ed) — MEDIUM, external-metric-source framing of the zero-pods problem
+- [Redis Lists | KEDA](https://keda.sh/docs/2.8/scalers/redis-lists/), [KEDA discussion #6443](https://github.com/kedacore/keda/discussions/6443) — MEDIUM, redis-scaler fallback mechanics
+- [ScaledObject specification | KEDA](https://keda.sh/docs/2.20/reference/scaledobject-spec/), [Flapping when idleReplicaCount != 0 · Issue #2314](https://github.com/kedacore/keda/issues/2314) — MEDIUM/HIGH (official docs), defaults 30s poll / 300s cooldown, flapping precedent
+- [Kubernetes best practices: terminating with grace (Google Cloud)](https://cloud.google.com/blog/products/containers-kubernetes/kubernetes-best-practices-terminating-with-grace), [CNCF: pod termination lifecycle](https://www.cncf.io/blog/2024/12/19/decoding-the-pod-termination-lifecycle-in-kubernetes-a-comprehensive-guide/) — MEDIUM, SIGTERM/grace/SIGKILL mechanics
+- [Chart Hooks | Helm](https://helm.sh/docs/topics/charts_hooks/) — HIGH (official), hook-delete-policy and idempotency guidance
+- [Kubernetes · OrbStack Docs](https://docs.orbstack.dev/kubernetes/) — HIGH (official), local images pod-usable without a registry; pull-policy guidance
+- [Scaling HTTP Streamable MCP Servers on Kubernetes (sticky sessions)](https://zhimin-wen.medium.com/scaling-http-streamable-mcp-servers-on-kubernetes-handling-sticky-sessions-24212857c8ca), [MCP 2026-07-28 Release Candidate](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/) — MEDIUM; confirms the stateful `Mcp-Session-Id` era applies to go-sdk v1.6.1's timeframe. LOW-MEDIUM on whether v1.6.1 ships server-side Streamable HTTP at all — verify via Context7/changelog at execution time
 
 ---
-*Pitfalls research for: OctoConv v1.5 (MCP Access & Document Fidelity)*
-*Researched: 2026-07-13*
+*Pitfalls research for: OctoConv v1.6 (Kubernetes & KEDA milestone)*
+*Researched: 2026-07-14*

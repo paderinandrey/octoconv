@@ -1,297 +1,201 @@
 # Feature Research
 
-**Domain:** Internal file-conversion service — MCP agent access, self-service presets REST, PDF/A ISO validation, OLE-CFB error taxonomy (milestone v1.5)
-**Researched:** 2026-07-13
-**Confidence:** MEDIUM overall (HIGH for MCP protocol mechanics and CFB stream names — grounded in official spec/blog sources; MEDIUM for veraPDF operational specifics — official docs found but no direct benchmark data; MEDIUM for presets REST — derived from existing verified CLI/repo code, not external research)
+**Domain:** Internal Go microservice moving from Docker Compose to Kubernetes + KEDA; adding an in-cluster MCP HTTP endpoint and an operator-scoped presets REST API
+**Researched:** 2026-07-14
+**Confidence:** MEDIUM (Helm/KEDA patterns are well-documented and stable; go-sdk streamable-HTTP specifics are current-training-data + one doc fetch, not independently verified against a running cluster — flagged LOW where noted)
 
-This file is organized by the four v1.5 clusters, each with its own Table Stakes / Differentiators / Anti-Features, followed by every open question with a recommended default, then cross-cluster dependencies and an MVP cut.
+## Recommended Defaults — Answer to Every Open Question
 
----
+This section directly answers the milestone's five open questions before the standard feature-landscape tables below (per the quality gate: every question needs an explicit recommended default).
 
-## Cluster 1: MCP Server
+### 1. Helm chart UX
 
-### Table Stakes
+- **`values.yaml` surface (table stakes, not more):** per-service `image.repository`/`image.tag` (default `tag: latest` overridden by `--set` in local dev — OrbStack's k8s pulls from its own local image cache when `imagePullPolicy: IfNotPresent` and the tag matches an image already `docker build`-ed on the host; no registry push needed), `replicaCount` (fixed int, not autoscaling — KEDA owns the workers), `resources.limits/requests` (port directly from existing `docker-compose.yml` `cpus:`/`memory:` values: image/document workers `2 CPU / 1Gi`, chromium-worker `2 CPU / 2Gi`), and `env` overrides for anything not templated as a Secret. Secrets (`API_KEY_SALT`, `WEBHOOK_SIGNING_SECRET`, Postgres/MinIO credentials) go into a single templated `Secret` object populated from `values.secrets.*`, **never committed with real values** — local dev supplies them via `--set` or a git-ignored `values.local.yaml`, mirroring the existing `.env`-is-gitignored convention.
+- **`NOTES.txt`:** yes, include one — it's near-zero cost and is the idiomatic place to print the in-cluster API URL, the `kubectl port-forward` command for local access, and a reminder that `/metrics` is intentionally not exposed outside the cluster. Table stakes for "helm install works" as a self-documenting artifact.
+- **`helm test` hooks:** recommend **skip for this milestone**. A `helm test` Job duplicates work the E2E adaptation (SEED-004 item 4) already does more thoroughly (full upload→convert→webhook round trip). Adding a second, thinner test surface is scope creep for a first infra milestone — defer until there's a second consumer of the chart (e.g., a staging environment) that actually needs a fast smoke gate independent of the full E2E suite.
+- **Readiness/liveness probes:**
+  - **api**: `httpGet /healthz` for both liveness and readiness — it already pings Postgres/Redis/S3 and returns 503 on degradation (`internal/api/handlers_test.go:1015-1041`), which is exactly what a readiness probe wants. Do not also use it as a naive liveness probe without a longer `failureThreshold`/`periodSeconds` — a transient S3 blip should pull the pod out of Service rotation (readiness) but should **not** restart the process (liveness), since restarting doesn't fix an external dependency outage and causes unnecessary churn. Recommended split: liveness = same `/healthz` path but tolerant (`failureThreshold: 6`, `periodSeconds: 10`, i.e. ~60s of sustained failure before restart); readiness = tighter (`failureThreshold: 2`, `periodSeconds: 5`).
+  - **workers (image/document/html/webhook)**: none of them expose an HTTP surface except the metrics port. Two real options: (a) `exec` probe shelling a trivial process check (e.g. `pgrep` the worker binary, or a lock-file heartbeat) — brittle, adds shell dependency to already-minimal `debian:bookworm-slim` images; (b) point liveness/readiness at the already-existing `/metrics` endpoint once `METRICS_ADDR` is changed from `127.0.0.1` to `0.0.0.0` (SEED-004 landmine 1) — a 200 on `/metrics` proves the process's HTTP listener goroutine is alive and the binary hasn't deadlocked, which is a legitimate (if indirect) liveness signal for a worker whose real job (draining a queue) isn't otherwise probeable over HTTP. **Recommended default: (b), httpGet on `/metrics`.** It reuses infrastructure that already exists, costs zero new code, and is consistent across all four worker binaries. Do not conflate this with removing localhost-only metrics security — pair it with a `NetworkPolicy` restricting `:9090` ingress to only the Prometheus/kubelet source, so widening the bind address doesn't silently regress the "operational data isn't public" decision already recorded in Key Decisions.
+- **Migrate as Helm hook vs initContainer — recommend the hook.** A `pre-install,pre-upgrade` hook Job (mirroring `cmd/migrate`'s existing one-shot CLI semantics) runs exactly once per install/upgrade, before any Deployment rolls out — this is a direct, low-risk port of the current `createbucket`-style one-shot pattern (SEED-004 landmine 3) and matches documented Helm best practice (Jobs, not per-pod initContainers, avoid N-replica races where multiple pods each try to run the same migration concurrently). An initContainer on the `api` Deployment would re-run the migration on every pod restart/scale event, which is harmless here only because `cmd/migrate` is already idempotent (`internal/db/db.go` embedded-migration runner tracks applied migrations) — but it's still the wrong tool: it couples migration timing to whichever pod happens to (re)start first, offers no single clear failure point to `helm install --wait`, and would run redundantly on every KEDA scale-up of a worker if ever mis-attached there. Use `helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded` so the Job is retained on failure for `kubectl logs` debugging but cleaned up on the next successful run, and `backoffLimit: 0` so a broken migration fails loudly instead of silently retrying.
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| `convert_file` blocking tool (upload → poll → result) | This is the entire point of the seed (SEED-003) — agents want one call, not manual multipart+poll+presign | MEDIUM | Internally: multipart upload to `POST /v1/jobs`, then poll `GET /v1/jobs/{id}` until `done`/`failed`, bounded by a server-side timeout |
-| `get_job_status` / `download_result` as separate tools | Escapes the blocking pattern for genuinely long conversions (large documents, HTML render) without inventing a new async protocol | LOW | Thin wrappers over existing `GET /v1/jobs/{id}` + presigned URL fetch — no new API surface needed |
-| `list_supported_formats` | Agent must discover valid `(source, target)` pairs before calling `convert_file`, or it will blindly trigger 422s | LOW | Direct wrap of `convert.Default` registry (`Pairs()` per engine) — data already exists, no new backend work |
-| `list_presets` | Mirrors CLI/API preset self-service; lets an agent discover `preset="archive-pdf"` instead of guessing opts | LOW-MEDIUM | See dependency note below — must merge system + client scope like `Resolve` does, not a single `repo.List` call |
-| stdio transport, single API key via env | Matches the seed's decided design; simplest possible deployment for a developer's local MCP client config | LOW | `modelcontextprotocol/go-sdk` `StdioTransport`; no HTTP transport needed for v1.5 |
-| Human-readable tool descriptions with explicit XOR/param guidance | Poorly described tools cause models to call them wrong (wrong param combo, wrong format casing) — directly costs correctness | LOW | Cheap to get right, expensive to retrofit — write descriptions test-first against a real agent session |
-| Tool-execution errors surfaced as `isError: true` content, not protocol errors | Spec explicitly separates "business logic failure" (422 unsupported pair, 413 too large) from "protocol/malformed call" — conflating them breaks agent retry logic | LOW | Mechanical: forward the API's `{"error": "..."}` body text into the `isError` content block |
+### 2. KEDA UX
 
-### Differentiators
+- **What a convincing 0→N→0 proof looks like:** capture, with timestamps, all of: (a) queue depth at 0, worker replicas at 0 (steady state before the burst); (b) a burst of N jobs submitted via the API in a tight loop; (c) time-to-first-replica (KEDA's `pollingInterval` tick that first observes `octoconv_queue_depth{queue="image",state=~"pending|active"} > 0` and asks the HPA to scale up from 0→1, then the HPA's normal reactive scaling 1→N as depth climbs); (d) time-to-drain (last job's `job_events` row hits `done`/`failed`); (e) time-to-scale-to-zero (`cooldownPeriod` after depth returns to 0, KEDA scales the Deployment back to 0). Plot pod count and `octoconv_queue_depth` on the same time axis (Prometheus/Grafana or even a `kubectl get pods -w` timestamped log correlated against a `promtool query` loop) — a reviewer needs to see the causal chain, not just "it scaled."
+- **Metrics to observe:** `octoconv_queue_depth{queue="image",state="pending"}` (the KEDA trigger signal itself), pod count over time (`kubectl get deployment octoconv-worker -w` or `kube_deployment_status_replicas` if kube-state-metrics is available), and job-outcome metrics already emitted (`internal/metrics` — conversion duration/outcome) to prove the scaled-up replicas actually did useful work, not just existed.
+- **Timing windows — recommended defaults for a snappy, legible demo (not production tuning):** `pollingInterval: 5` (seconds; KEDA default is 30 — too slow to eyeball in a demo), `cooldownPeriod: 60` (KEDA default is 300; 60s is long enough to avoid obvious flapping but short enough that a demo doesn't require minutes of dead air after drain). Document explicitly that these are demo-tuned, not production-tuned — production would likely widen `cooldownPeriod` since cold-starting a container (pulling the image, `libvips`/LibreOffice/Chromium startup cost) is more expensive than a few extra idle minutes of one replica.
+- **Flapping protection:** two independent mechanisms, both needed. (1) KEDA's own `cooldownPeriod` gates the 1→0 transition specifically (scale-up is not similarly debounced by KEDA itself — that's delegated to the HPA it manages). (2) For the HPA-managed 1→N range, set `advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds` (e.g. 60s) so a queue depth that briefly dips to 0 mid-burst (a natural artifact of jobs finishing faster than new ones are being submitted) doesn't cause a premature scale-down mid-burst, only to immediately scale back up — the classic flapping failure mode this milestone must visibly avoid.
+- **`minReplicaCount` per worker class — 0 for image/document/html, but the webhook-worker is a hard exception:**
+  - image-worker, document-worker, chromium-worker (html): `minReplicaCount: 0`. Each is a pure queue consumer with no other duty; scaling to zero when idle is exactly the target behavior this milestone proves.
+  - **webhook-worker: `minReplicaCount` must NOT be 0 — flag this explicitly, it is the single most important interaction in this research.** The webhook-worker container is not just a webhook-queue consumer: it is also the exclusive host of the reconciler sweeper (`internal/reconciler.RunWithLock`, gated by a Postgres session-level advisory lock so exactly one replica across the fleet acts as sweeper at any time — see `internal/reconciler/reconciler.go:95-226`). If KEDA ever scaled the webhook-worker Deployment to zero replicas, **the sweeper stops entirely**: no replica exists to hold the advisory lock, so no process ever recovers jobs stranded in `queued`/`active` past their staleness threshold, and no process ever detects/repairs `webhook_deliveries` gaps (RECON-04). This is a silent, delayed failure mode — nothing errors immediately, jobs just accumulate as permanently stuck rows the next time a worker crashes mid-task, with detection only surfacing much later (or never) because the very component that would notice is asleep. **Recommended default: do not put a KEDA `ScaledObject` on the webhook-worker at all this milestone.** Keep it a plain Kubernetes `Deployment` with a fixed `replicas: 2` (porting the existing docker-compose two-replica-always-on redundancy design verbatim — that redundancy was deliberately built in v1.3 Phase 16 precisely so sweeper failover survives a single replica's crash/deploy, ~11s observed failover). If a future milestone wants KEDA on the webhook queue too (e.g. to add extra webhook-delivery throughput under a bursty callback storm), the correct shape is `minReplicaCount: 2` (never 0, never even 1 — 1 replica has no failover partner) with the KEDA trigger only adding replicas beyond the floor, never removing the sweeper-hosting floor. That is more complexity than this milestone's KEDA proof needs; the simple, safe default is "webhook-worker opts out of KEDA entirely."
+- **Load-generation approach:** a small script/CLI (reuse an existing internal test client or a plain `curl` loop against `POST /v1/jobs`) that authenticates with a real client API key and bursts N image-conversion jobs (recommend N≈30-50 — enough to visibly exceed single-replica throughput and force multi-replica scale-up under the existing per-job `ENGINE_TIMEOUT`/concurrency, but small enough to drain in well under a minute so the demo stays legible) against a small fixture image. Submit the burst in a tight loop (not one every few seconds) so the queue-depth spike is unambiguous in the metrics graph, then let the system settle to prove the full 0→N→0 arc unattended.
 
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| `resource_link` result (presigned URL) instead of inline base64 | Avoids context-window poisoning; a 1 MB result would be ~1.5M tokens as base64 — no competitor-grade MCP server does this for files of any real size | LOW | OctoConv already has a presigned-URL mechanism (`PresignGet`) — this is pure reuse, not new plumbing |
-| Progress notifications reusing the client's `progressToken` | Lets agent hosts render a progress bar during a multi-second/minute document or HTML conversion instead of an opaque hang | LOW-MEDIUM | Only if the incoming `tools/call` request supplied a `progressToken` (spec: optional, not all clients send one) — do not invent a bespoke notification channel |
-| `convert_file` accepting `preset=` (mirrors API XOR) | Agents get the same "one named preset, zero opts fiddling" ergonomics as human API clients — directly extends v1.4 presets value into the agentic surface | LOW | The MCP layer performs no independent validation beyond a friendly early rejection; the API's existing D-01 XOR gate remains the single source of truth |
+### 3. MCP HTTP endpoint
 
-### Anti-Features
+- **Auth model: pass-through of the existing per-client API key via header, checked by HTTP middleware wrapping the SDK's `StreamableHTTPHandler` — not mTLS.** The `getServer` callback the SDK's `mcp.NewStreamableHTTPHandler(getServer func(*http.Request) *Server, opts *StreamableHTTPOptions)` takes receives the full `*http.Request`, so auth can either happen in that callback or (cleaner, and consistent with the existing chi-middleware style in `internal/api/routes.go`) in a standard `http.Handler` middleware wrapping the SDK handler before it's mounted. Recommend reusing the same `X-API-Key`-style header and hashed-lookup-against-`clients` mechanism the REST API already uses (do not invent a second credential type for the same trust domain) — factor the existing auth-check logic out of `internal/api` into something both packages can call, rather than duplicating the hash-compare code. mTLS is unwarranted complexity for this milestone: the constraint is "внутренние клиенты, безопасно через API-ключ" — mTLS would require a cert-issuance/rotation story the project doesn't have and doesn't need yet; a `NetworkPolicy` restricting which in-cluster pods can reach the MCP Service, combined with the existing API-key check, matches the trust model already used everywhere else in the system.
+- **Session semantics of streamable HTTP in go-sdk v1.6.1:** the SDK exposes `Mcp-Session-Id` header-based session tracking by default (stateful mode), with a `StreamableHTTPOptions.Stateless` flag to opt out, and a `GetSessionID` override for custom extraction. **Recommend `Stateless: true` for the in-cluster endpoint.** Rationale: (a) the existing tool set (`convert_file`, `get_job_status`, `download_result`, `list_supported_formats`, `list_presets`) is already designed so each call is self-contained — `convert_file` blocks and streams progress within a single request/response, and follow-up polling explicitly uses `get_job_status` with a job id rather than relying on server-held session state; (b) stateless mode means a plain Kubernetes `Service` can round-robin across MCP replicas without needing session affinity (`sessionAffinity: ClientIP`) — sticky sessions are one more moving part this first infra milestone doesn't need to introduce. Flag as **LOW confidence** pending a live smoke test: verify specifically that `convert_file`'s in-flight progress-notification stream still works correctly end-to-end in stateless mode before committing to it (this is exactly the kind of claim that must be verified against the real SDK behavior, not asserted from documentation alone).
+- **Confirm: the stdio binary and the HTTP endpoint MUST share tool code — this is already true today, not a redesign.** `internal/mcpserver.NewServer(cfg, client) *mcp.Server` builds a transport-agnostic `*mcp.Server` with all five tools registered; the *only* transport-specific code is one line in `cmd/mcp-server/main.go` (`srv.Run(ctx, &mcp.StdioTransport{})`). Adding the HTTP endpoint is additive: a new `cmd/mcp-http-server` (or a flag on the existing binary) that instead does `http.ListenAndServe(addr, authMiddleware(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, opts)))`. Do **not** fork or duplicate `internal/mcpserver/tools.go` — that would be the anti-pattern this question is explicitly guarding against.
 
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|------------------|-------------|
-| Direct Postgres/S3/Redis access from the MCP server | "Just skip the HTTP hop, it's faster" | Duplicates auth, rate limiting, content validation, and fail-closed logic in a second place — the seed explicitly rejects this (thin wrapper over HTTP API only) | Always go through the existing `/v1/*` API with the client's API key |
-| Base64-embedding every result file by default | Simple, one content-type, "just works" for tiny test files | Breaks down catastrophically for real documents/images — 1 MB file ≈ 1.5M tokens; poisons agent context and burns budget | `resource_link` / presigned URL by default; base64 only as an explicit opt-in for genuinely tiny files (see Q1 below) |
-| Reimplementing multipart/poll/presign logic per-tool inconsistently | Each tool "just does its own thing" quickly | Divergent error handling, inconsistent timeouts, duplicated poll loops — a maintenance trap as more tools are added | One shared internal client wrapping `POST /v1/jobs` / `GET /v1/jobs/{id}` / presigned download, all five tools call into it |
-| Streamable-HTTP transport in this milestone | "Might as well support both transports now" | No current internal consumer needs shared/remote MCP access; adds transport-negotiation complexity and auth-over-HTTP questions (does the MCP HTTP endpoint need its own API-key middleware?) that are out of scope | stdio only for v1.5; revisit if an internal MCP-server catalog materializes (already flagged as a SEED-003 trigger condition) |
-| Unbounded blocking wait inside `convert_file` | "Agents want one call" (true) taken to an extreme — wait forever until done | A stuck/slow document conversion (LibreOffice, Chromium engines have their own multi-second-to-minute budgets) can hang the MCP stdio pipe indefinitely, and MCP hosts often have their own client-side tool-call timeouts that will hard-kill the call anyway | Bound the internal poll loop with a config timeout (e.g. mirrors `ENGINE_TIMEOUT`/`DOCUMENT_ENGINE_TIMEOUT` order of magnitude); on timeout return `job_id` + a message telling the agent to use `get_job_status`/`download_result` — graceful degradation to the async pattern, never a silent infinite hang |
+### 4. system-presets REST (PRAPIV2-01) — operator authorization
 
----
+- **Recommended minimal-safe option: add an `is_operator boolean not null default false` column to the `clients` table (new migration), checked by the existing API-key auth middleware, gating only the system-scope preset write routes.** This is the option most consistent with the project's own stated constraint ("Auth: API-ключи через существующую таблицу `clients` — не вводить отдельный внешний auth-провайдер") and its established convention of extending `clients` for new authorization concerns (the two-slot rotation columns in `0002_client_api_keys.sql` are the direct precedent: add columns to `clients`, don't introduce a parallel credential system). Concretely:
+  - New migration adds `is_operator` (boolean, default false) to `clients`.
+  - `cmd/manage-clients` gets a new flag (e.g. `--operator`) to set/unset it on `create`/an existing client — reusing the CLI that already owns client lifecycle, not a new tool.
+  - The existing per-request auth middleware, which already resolves the request's `client_id` from the API key, additionally loads `is_operator` and stores it on request context (mirroring how `client_id` is already threaded through).
+  - System-scope preset write handlers (`POST/PUT/DELETE` equivalents for `scope=system` in `internal/presets`) check `is_operator` and reject with **403** (not 404) when false — this is a deliberate departure from the existing "cross-client → 404, never 403" convention, and the departure is correct: that convention exists to avoid leaking *whether a specific resource exists* to a client who shouldn't see it (an ownership/enumeration concern). Insufficient privilege to perform an operator-only *action* is a different kind of failure — there is nothing to hide about the existence of the system-presets endpoint itself, and a plain 403 is the standard, unambiguous signal for "this exists, you're just not allowed."
+  - Reads of system presets (`GET`) can remain open to any authenticated client exactly as today — `Resolve`/`GetForClient`/`ListForClient` in `internal/presets/repo.go` already let any client read system-scope presets; only the *write* path is operator-gated.
+- **Why not a separate `ADMIN_API_KEY` env var:** it introduces a second, out-of-band secret with no rotation story, no audit trail tying an action back to a specific `client_id` (breaking the existing `job_events`/audit-style traceability pattern used everywhere else), and duplicates auth infrastructure instead of reusing what already exists — inconsistent with the "не вводить отдельный... провайдер" constraint's spirit even though it's technically the same *mechanism* (a bearer credential). The `is_operator` column keeps exactly one authentication system and one authorization model in the codebase.
 
-## Cluster 2: Presets REST CRUD
+### 5. Anti-features — explicitly out of scope this milestone
 
-### Table Stakes
+- **No public ingress / TLS story.** Local validation on OrbStack k8s only needs `kubectl port-forward` or a `ClusterIP`/`NodePort` Service for manual poking — do not build an `Ingress` resource, cert-manager wiring, or any TLS termination. The constraint stack already defers "Kubernetes + KEDA" as the current infra frontier and public multi-tenancy is explicitly out of scope; adding ingress/TLS now is solving a problem (external exposure) this milestone doesn't have.
+- **No multi-environment `values.yaml` sprawl.** Resist the urge to create `values-dev.yaml`/`values-staging.yaml`/`values-prod.yaml` from day one. This milestone has exactly one target (local OrbStack k8s) — a single `values.yaml` with sane local defaults, overridable via `--set`/`-f values.local.yaml` (git-ignored), is table stakes; a multi-environment values hierarchy is premature structure for a chart that has never been used against a second environment.
+- **No CD pipeline.** `helm install`/`helm upgrade` run manually against the local cluster for this milestone's proof. Wiring the existing GitHub Actions CI (which already bakes 5 images) into an automatic `helm upgrade` step is a reasonable *future* milestone, not this one — there is no remote cluster to deploy to yet, and building deployment automation before there's a real deployment target is speculative.
+- **No KEDA on the webhook-worker (repeated here as an anti-feature, not just a caveat).** As detailed in the KEDA section above: the webhook-worker hosts the sweeper and must never scale to zero. The *simplest* correct move is not "KEDA with `minReplicaCount: 2`" but "no `ScaledObject` at all for this Deployment" — keep it a plain fixed-`replicas: 2` Deployment. Treat any temptation to autoscale it as scope creep this milestone doesn't need.
+- **No KEDA/HPA on the MCP HTTP endpoint or the API Deployment this milestone.** The milestone's KEDA proof is specifically about the engine-class queue-depth architecture (image/document/html workers) — that is the thing SEED-004 says needs proving. The API and MCP server are request/response services with no queue-depth signal to scale on; leave them as plain fixed-replica Deployments. Introducing a second autoscaling *kind* (e.g. CPU-based HPA on the API) this milestone dilutes the actual target of the proof.
+- **No CAD/av/archive engine classes, no full Handler/Capability contract rework** — already correctly out of scope per PROJECT.md; unaffected by this infra milestone and not to be pulled in "while we're touching the worker Deployments anyway."
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| `POST /v1/presets` (create, client-scope only) | Self-service is the entire point of PRST-V2-01 | LOW | Thin handler over existing `presets.Repo.Create`; scope is ALWAYS derived from the authenticated client, never a request field |
-| `GET /v1/presets` (list own presets) | A client needs to see what it already has before creating/updating | LOW | Wraps `Repo.List(ScopeUser, &client.ID, includeInactive=false)` |
-| `GET /v1/presets/{name}` (show one) | Needed before update, to see current target/opts | LOW | Wraps `Repo.Get` |
-| `PUT /v1/presets/{name}` (update = bump-on-update) | Mirrors CLI `update` verb exactly — same versioning model, same guarantees | LOW-MEDIUM | Wraps `Repo.Update`; full-replacement semantics (client resends target+opts+description each time), not a partial PATCH |
-| `DELETE /v1/presets/{name}` (maps to deactivate, not hard delete) | Matches the existing "no hard delete" philosophy (client key rotation pattern, presets `is_active` flag) | LOW | Wraps `Repo.Deactivate`; DELETE verb is the REST-idiomatic name for the operation even though it's a soft-deactivate under the hood — document this explicitly so clients don't expect history loss |
-| Existing per-client rate limiting applies automatically | `/v1/presets/*` sits inside the same chi `/v1` route group as `/v1/jobs` | LOW | No new middleware — `ratelimit.PerClient` already wraps the whole group in `routes.go` |
-| Every response scoped/filtered so a client can never see another client's presets or any system preset via `GET /v1/presets` | Directly mirrors the AUTH-03 cross-client 404 discipline already enforced for jobs | LOW | `clientID` always comes from `auth.ClientFromContext`, never a request parameter — same pattern as `handleGetJob`'s ownership guard |
+## Feature Landscape
 
-### Differentiators
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Response body echoes the new version number on create/update | Lets a self-service client immediately know which version a subsequent job will provenance-tag (`preset_name`/`preset_version` on the job row) | LOW | Already returned by `Repo.Create`/`Repo.Update` — just surface it in JSON |
-| `409 Conflict` on create-when-active-exists | REST-idiomatic status distinct from generic 400/422, gives a self-service client (or the MCP-adjacent tooling) a programmatically distinguishable "use PUT instead" signal | LOW | The CLI just `log.Fatalf`s; the REST layer should map the same repo condition to `409` explicitly rather than a generic 500 |
-
-### Anti-Features
-
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|------------------|-------------|
-| Creating/updating **system**-scope presets via REST | "Why maintain two management surfaces?" | System presets are shared across every client — a self-service endpoint that could touch them turns any single compromised/misbehaving API key into a blast-radius-of-everyone incident; this is explicitly flagged in the milestone as an anti-feature | System presets stay exclusively on the operator `manage-presets` CLI, which requires DB access, not an API key |
-| Exposing full version history over `GET /v1/presets` by default | "Might as well show everything, it's already in the table" | Adds response-shape complexity and a second semantic ("list active" vs "list all") for a self-service surface whose only real need is "what do I have right now" | Default to active-only, exactly like the CLI's default (`includeInactive=false`); do not add an `?all=true` history param in this milestone — defer until a real audit/debugging need appears |
-| Idempotency-Key header / ledger for preset writes | "Best practice for REST APIs that mutate state" | Preset CRUD is low-frequency, human-paced self-service — not a hot retried path like webhook delivery; a full idempotency ledger is meaningfully more code (storage, TTL, key validation) for a feature with no evidenced need | `409` on duplicate create + normal client-side retry-on-network-error is sufficient; revisit only if evidence of double-submission problems emerges |
-| A distinct/looser rate limit tier for `/v1/presets/*` | "Preset management feels different from job submission, maybe it needs its own quota" | Adds a second rate-limit configuration axis for a low-volume surface; existing per-client quota already exists and this traffic pattern (rare CRUD calls) won't meaningfully compete with job-submission quota | Reuse the existing single per-client `ratelimit.PerClient` quota unchanged |
-
----
-
-## Cluster 3: veraPDF ISO 19005 Validation
-
-### Table Stakes
+### Table Stakes (Users Expect These)
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Always-on validation for every PDF/A export (no opt-in flag) | Mirrors the existing precedent: the current OutputIntent sanity check (v1.3 Phase 14) is already unconditional, not opt-in — DOCV3-01 is framed as *replacing* that check with a real one, not adding an optional extra | LOW (policy), MEDIUM (integration) | An opt-in flag would silently let non-compliant "PDF/A" ship for any client that forgets to set it — defeats the entire purpose of this milestone item |
-| Validate against the **PDF/A-2b** profile specifically | Matches the existing export target (`pdf_profile` opt already produces PDF/A-2b, v1.3/Phase 14) | LOW | `verapdf -f 2b <file>` (or Docker image equivalent) — do not validate against a stricter/different profile (2u/3b) than what LibreOffice was configured to produce |
-| Validation failure → terminal job failure (job `status=failed`, not a silent pass) | Mirrors current behavior (OutputIntent check already fails the job); a client who explicitly asked for PDF/A output has a right to know if what they got isn't actually compliant | LOW (policy), MEDIUM (plumbing) | `error_code="pdfa_validation_failed"`, `error_message` a bounded/truncated summary of the failing ISO rule(s) — veraPDF's full report can be large and must not be dumped verbatim into the `jobs` row |
-| Bounded validation timeout, hardened process execution | veraPDF is a JVM CLI process — same untrusted-external-process risk class as libvips/LibreOffice/Chromium | MEDIUM | Reuse the existing hardened `runCommand` (Setpgid + process-group SIGKILL) pattern from `internal/convert/exec.go`; a veraPDF timeout should be classified terminal (a validation that can't complete can't be trusted), same as `DOCUMENT_ENGINE_TIMEOUT` |
+| `helm install` brings up the entire stack (Postgres, Redis, MinIO, api, 4 worker classes, asynqmon) in one command | This is the literal definition of "we have a Helm chart" — a chart that requires manual post-install steps isn't a chart, it's a partial template set | MEDIUM | Postgres/Redis/MinIO can be plain Deployments+PVCs for local dev (not full HA StatefulSets/operators) — matches compose's own non-HA local setup; no need to over-engineer datastore HA for a local validation milestone |
+| Readiness probes gate Service traffic correctly per component | Kubernetes' own contract — a pod that isn't ready must not receive traffic, or requests silently fail during rollout/scale events | LOW | api: `/healthz` (already exists, already dependency-aware). Workers: `/metrics` once `METRICS_ADDR` is `0.0.0.0` — see recommended defaults above |
+| Migration and bucket-creation run exactly once, before anything depends on them, with clear ordering | Directly ports two `docker-compose.yml` one-shot patterns (`createbucket`, embedded migration runner) that already work — must not regress on the k8s port | MEDIUM | Helm `pre-install,pre-upgrade` hook Jobs (see recommended default above); this is SEED-004 landmine 3 |
+| Secrets/config are never baked into the chart's committed defaults | Matches existing `.env`-is-gitignored / `.env.example`-documents-shape convention; a chart that ships real secrets in `values.yaml` is a supply-chain hazard even for "internal only" | LOW | Templated `Secret` object populated from `values.secrets.*`, left empty/placeholder in the committed chart, supplied locally via `--set` or a git-ignored overlay |
+| Per-engine-class KEDA `ScaledObject`s that visibly scale 0→N→0 under a real load burst | This is the milestone's stated headline goal (SEED-004) — the entire point of the engine-class queue architecture built since v1.2 is to prove independent per-class autoscaling actually works, not just compiles | HIGH | Prometheus scaler against `octoconv_queue_depth{queue=...,state=~"pending|active"}` — the metric already exists (`internal/metrics/queue_collector.go`), zero new instrumentation needed |
+| MCP tool code is identical between stdio and HTTP transports | Already true today (`internal/mcpserver.NewServer` is transport-agnostic) — users/reviewers will immediately notice and flag a fork | LOW | New thin entrypoint only; see recommended default #3 above |
+| System-preset writes require an explicit operator credential, not just "any valid client key" | System presets affect every client (`ListForClient`'s shadow-merge means a system preset is visible to all callers) — letting any authenticated client edit them would let one internal service silently change conversion behavior for every other internal service | MEDIUM | `is_operator` column + 403 gate; see recommended default #4 above |
 
-### Differentiators
-
-| Feature | Value Proposition | Complexity | Notes |
-|---------|-------------------|------------|-------|
-| Real ISO 19005 structural/semantic conformance (fonts embedded, color spaces, XMP metadata, etc.), not just an OutputIntent marker | This is the actual value-add of DOCV3-01 — internal clients relying on "PDF/A" for archival/compliance workflows get a genuine guarantee instead of a heuristic | HIGH | veraPDF is the industry-reference open-source validator (used by PDF Association test corpora) — no better-grounded alternative exists for self-hosted ISO conformance checking |
-
-### Anti-Features
-
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|------------------|-------------|
-| Opt-in `strict_validation` flag defaulting to off | "Don't slow down/break existing clients who don't care about strict compliance" | Silently reintroduces the exact gap this milestone exists to close; a client that doesn't set the flag gets the old (weaker) guarantee indefinitely | Always-on for `pdfa` target; if a genuine "I don't need ISO compliance" use case emerges later, that's a different target format/opt (e.g., "pdf" without the `pdf_profile` opt), not a bypass flag on the PDF/A path itself |
-| Attaching the validation report as warning metadata but marking the job `done` anyway | "Let the client decide if the failure matters to them" | Directly contradicts the Core Value (safe, reliable conversion) — a client asked for PDF/A and would receive a file mislabeled as compliant; internal clients built around this milestone's guarantee would silently regress | Terminal `failed` status; if a future need for "best-effort with warnings" surfaces, it should be a distinct, explicitly-named target/opt, not a silent downgrade of the existing one |
-| Running veraPDF as a new dedicated engine-class/queue | "It's a new external tool, treat it like a new engine" | This is a post-processing **gate** on an existing document conversion job, not a new conversion type — routing it through a whole new asynq queue/engine-class duplicates infrastructure for no benefit | Invoke veraPDF as an in-process step inside the existing document-worker's PDF/A conversion path, right after LibreOffice produces output, before `MarkDone` |
-
----
-
-## Cluster 4: CFB Encrypted-vs-Legacy Distinction
-
-### Table Stakes
-
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| Distinct 422 for password-protected OOXML vs legacy binary Office | This is the literal deliverable (DOCV3-02) — clients currently get one undifferentiated message and can't tell "remove the password" from "convert the file format" | MEDIUM | Requires a minimal CFB **directory** parser (walk sector/FAT enough to enumerate root storage/stream entry names) — `IsOLECFB` today only checks the 8-byte magic, it does not open the directory |
-| Encrypted branch triggers on presence of `EncryptedPackage` **and/or** `EncryptionInfo` root streams | These two streams are the primary, method-agnostic indicators of an encrypted Office document (both Standard and Agile encryption write them) — verified via CFB/OOXML encryption research (Didier Stevens' analysis, corroborated by Apache POI's own encryption-detection code) | MEDIUM | Confidence: MEDIUM — corroborated by two independent technical sources, not an official Microsoft spec citation, so validate against a few real encrypted `.docx`/`.xlsx` samples during implementation |
-| Legacy branch triggers on presence of any of `WordDocument` / `Workbook` / `PowerPoint Document` root streams | These are the well-known root-level streams for binary `.doc`/`.xls`/`.ppt` (pre-2007 Office formats) | MEDIUM | Older Excel variants may use `Book` instead of `Workbook` — include both in the legacy allow-list to avoid a false miss |
-| Fall-through: any other CFB content (neither list matches) keeps the CURRENT generic 422 | Fail-closed default — do not invent a third bespoke message for content this milestone wasn't asked to characterize (e.g., legacy Visio/Project files, corrupted directories) | LOW | Preserves the existing fail-closed discipline (D-05/D-06 in `olecfb.go`) for anything outside the two named cases |
-
-### Differentiators
+### Differentiators (Competitive Advantage)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Distinct logged `reason=` tags (`encrypted_document` / `legacy_document`) alongside the two 422s | Improves operator diagnosability without changing the client-facing contract — mirrors the existing scoped logging discipline (D-08) already used for every other content-validation rejection | LOW | Pure additive change to the existing `log.Printf` call sites |
+| A load-proven 0→N→0 autoscale demonstration with an explicit timeline (queue depth graph + pod count over time) | Converts the "KEDA — будущее" line in PROJECT.md's own Constraints from an unverified hypothesis into a demonstrated fact, closing SEED-004's stated purpose outright | MEDIUM | The differentiator isn't KEDA itself (table stakes for any k8s-native queue consumer) — it's the *rigor* of the proof: explicit timestamps, explicit flapping-protection reasoning, explicit acknowledgment of the sweeper exception |
+| A single shared `internal/mcpserver` tool implementation exposed over two transports (stdio for local dev tooling, streamable HTTP for in-cluster automated consumers) | Lets internal services and human developer tooling use the exact same conversion capabilities without maintaining two integrations | LOW (already structurally free — see Table Stakes) | The differentiator is architectural discipline already paid for in Phase 21; this milestone just adds the second transport |
+| Operator-role authorization layered onto the existing single-credential-type API-key model, without introducing a second auth system | Keeps the "internal clients, minimal auth surface" trust model intact while still supporting a real privilege distinction (any client vs. operator) that the system genuinely needs now that system-scope presets are writable via REST | LOW | The differentiator is restraint — solving the authorization problem with the smallest addition to an already-trusted model, not a full RBAC system |
 
-### Anti-Features
+### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|------------------|-------------|
-| Pulling in a full third-party OLE/CFB library (e.g. a Go port of `olefile`) | "Why write a parser when libraries exist" | Contradicts the project's established zero-dependency-parser convention (Phase 7's decompression-bomb protection deliberately avoided new deps for the same class of problem — bounded, scoped binary format parsing) | Implement the minimal directory-walk (enough to enumerate root entry names) from the public MS-CFB specification, in-house, matching existing code style |
-| Adding a new machine-readable `error_code` field for these two 422s specifically | "Now that we distinguish them, give clients something to parse" | No other synchronous request-validation 422 in `handleCreateJob` carries a structured `error_code` today (that field only exists on job-level async `failed` status) — introducing it for just these two cases creates an inconsistent, half-covered API surface | Keep this a message-only distinction, consistent with every other content-validation 422 in the same handler; treat `error_code` taxonomy for synchronous validation as a separate, larger future decision if ever needed |
-| Attempting to detect/report the *specific* encryption method (Standard vs Agile) or legacy sub-format details in the message | "More detail is more helpful" | Scope creep beyond what DOCV3-02 asks for; adds parsing surface (reading `EncryptionInfo`'s versioned binary header) with no client-actionable benefit — the remediation ("remove the password" / "convert the format") is identical regardless of which encryption method was used | Two flat messages, exactly as scoped; leave method-level detail out |
-
----
-
-## Open Questions — Recommended Defaults
-
-### Cluster 1: MCP
-
-**Q: Progress notifications for long-running blocking tools?**
-Recommended default: **Yes, but conditional and reused, never invented.** Send `notifications/progress` using the client-supplied `progressToken` only if the incoming `tools/call` request included one (per spec, this is optional — many hosts won't send it). Do not build a bespoke interim-message channel. If no `progressToken` is present, `convert_file` blocks silently until terminal status or timeout — this is spec-compliant and matches how mature MCP servers handle the optional case.
-
-**Q: Tool result shape for a produced file — path, base64, or both?**
-Recommended default: **`resource_link` (presigned URL) + structured JSON (`job_id`, `status`, `download_url`), never base64 by default.** Base64-inflating a real document/image result would poison the agent's context window (a 1 MB file ≈ 1.5M tokens per community/spec discussion). `download_result` performs the actual byte transfer only when explicitly invoked, and should write to a caller-specified local path, returning that path as text — not inline bytes. Reserve inline base64 for a possible future small-file fast-path (e.g., under a few KB), out of scope for v1.5.
-
-**Q: Error mapping — API 4xx → MCP tool error vs `isError` result?**
-Recommended default: **`isError: true` tool-execution result for all API business-logic 4xx (400/413/422/429).** These are legitimate outcomes the model should reason about (e.g., adjust `target_format`, remove password, retry after rate limit). Reserve JSON-RPC protocol-level errors for MCP-layer failures the model can't reason its way out of: malformed tool-call arguments (schema validation failure) or the MCP server itself being unable to reach the API at all (connection refused/5xx from the API's own infra, not a client-content problem).
-
-**Q: Tool naming/description conventions?**
-Recommended default: **snake_case verb_noun names exactly as sketched in SEED-003** (`convert_file`, `get_job_status`, `download_result`, `list_supported_formats`, `list_presets`) — consistent with widely-deployed reference MCP servers. Descriptions must explicitly state param mutual-exclusivity (`target_format` XOR `preset`) and point the model at the companion discovery tools (e.g., `convert_file`'s description should say "call `list_supported_formats` first if unsure").
-
-**Q: Should `list_supported_formats`/`list_presets` be tools or MCP resources?**
-Recommended default: **Ship as tools in v1.5.** By the pure MCP mental model (side-effect-free, application-controlled, cacheable data) these are textbook Resources. However: (a) the model actively needs this data as an input to a decision it's about to make (which `convert_file` call to construct) — a genuinely model-driven need, not just host-attached context; (b) resource subscription/attachment support varies more across MCP hosts than tool-calling does, and this milestone's target consumer (developer-facing coding-agent sessions) reliably supports tool calls; (c) low cardinality, single stdio client, no meaningful caching win to justify the extra resource-template/subscription plumbing right now. Flag this as a candidate to *additionally* expose as resources later, once resource support is verified against the actual target host(s).
-
-**Q: `convert_file` param design — `target_format` XOR `preset`?**
-Recommended default: **Mirror the API exactly** — two optional string params, description states XOR explicitly, and the MCP layer does not duplicate the API's validation beyond a cheap early client-side rejection for a friendlier message. The API's existing D-01 mutual-exclusivity gate remains the single source of truth; never let the MCP layer silently merge/prioritize if both happen to be set.
-
-### Cluster 2: Presets REST
-
-**Q: Endpoint shapes?**
-Recommended default: `POST /v1/presets` (create), `GET /v1/presets` (list own, active-only), `GET /v1/presets/{name}` (show), `PUT /v1/presets/{name}` (update, bump-on-update), `DELETE /v1/presets/{name}` (maps to `Repo.Deactivate`, soft not hard). This exactly mirrors the five CLI verbs (`create/update/list/show/deactivate`) onto REST idioms.
-
-**Q: Client-scope only — system presets via REST an anti-feature?**
-Recommended default: **Confirmed anti-feature, hard rule.** No request field can ever select `scope=system`; the REST layer derives scope from `auth.ClientFromContext` exactly like `handleCreateJob`'s ownership checks. System presets remain exclusively the operator CLI's responsibility (requires direct DB access, not an API key).
-
-**Q: Version semantics exposure — active only, or include history?**
-Recommended default: **Active only by default**, matching the CLI's `includeInactive=false` default. Do not add a version-history query param in this milestone; it's low-value for a self-service surface and can be added later without breaking the default contract if a real need appears.
-
-**Q: How does update work — PUT bump-on-update mirroring CLI?**
-Recommended default: **Yes, exact mirror.** `PUT /v1/presets/{name}` calls `Repo.Update`, which deactivates the current active row and inserts version+1 — full-replacement semantics (client must resend `target_format`+`opts`+`description` together), not a partial PATCH.
-
-**Q: Idempotency?**
-Recommended default: **No idempotency-key mechanism.** `POST` create returns `409 Conflict` when an active preset of the same name already exists (mapped from the same repo condition the CLI already checks) — sufficient for a low-frequency, human/tool-paced self-service surface. Do not build an idempotency-key ledger.
-
-**Q: Rate limit interplay?**
-Recommended default: **No new limiter.** `/v1/presets/*` inherits the existing single per-client `ratelimit.PerClient` quota automatically by virtue of chi route grouping in `routes.go` — no separate preset-specific quota tier.
-
-### Cluster 3: veraPDF
-
-**Q: Validate ALWAYS for PDF/A exports, or opt-in flag?**
-Recommended default: **Always, no opt-in.** Matches the existing precedent that the (weaker) OutputIntent check was already unconditional; an opt-in flag would silently preserve today's gap for any client that doesn't discover/set it, defeating DOCV3-01's purpose.
-
-**Q: What to do on validation failure — terminal job failure vs warning metadata?**
-Recommended default: **Terminal job failure** (`status=failed`, `error_code="pdfa_validation_failed"`, bounded/truncated `error_message`). Warning-only would mean a client explicitly requesting PDF/A output could receive a mislabeled non-compliant file — directly undermining the milestone's stated purpose and the project's Core Value (safe, reliable conversion).
-
-**Q: Which profile?**
-Recommended default: **2b**, matching the current PDF/A-2b export configuration (v1.3 Phase 14's `pdf_profile` opt). Do not validate against a stricter or different profile than what's actually produced.
-
-**Q: Performance budget per job?**
-Recommended default: **A dedicated, bounded timeout** (separate config, e.g. `VERAPDF_TIMEOUT`, order of magnitude similar to existing engine timeouts — tens of seconds), enforced via the existing hardened `runCommand` process-group-kill pattern. Classify a veraPDF timeout as terminal (an incomplete validation cannot be trusted to certify compliance), exactly like `DOCUMENT_ENGINE_TIMEOUT`'s existing terminal classification for the document engine. Note: veraPDF is JVM-based — expect nontrivial fixed startup cost (JVM boot) on top of per-page validation time; this pushes toward invoking it as a CLI subprocess bundled into the document-worker image (same isolation pattern as LibreOffice/Chromium) rather than a lighter embedded approach, since no pure-Go veraPDF equivalent exists.
-
-### Cluster 4: CFB Distinction
-
-**Q: Exact stream names distinguishing encrypted vs legacy?**
-Recommended default: Encrypted → presence of `EncryptedPackage` and/or `EncryptionInfo` root-level streams (covers both Standard and Agile encryption methods). Legacy binary Office → presence of any of `WordDocument` (.doc), `Workbook` or `Book` (.xls), `PowerPoint Document` (.ppt) root-level streams. Any other CFB content (neither list matches) falls through to the current generic 422, fail-closed.
-
-**Q: The two 422 messages' content?**
-Recommended default:
-- Encrypted: `"password-protected Office document is not supported; remove the password and resubmit"`
-- Legacy: `"legacy binary Office format (.doc/.xls/.ppt) is not supported; convert to docx/xlsx/pptx"`
-
-Both logged with a distinct `reason=` tag (`encrypted_document` / `legacy_document`), mirroring the existing D-08 logging discipline. No new structured `error_code` field — stay consistent with every other synchronous content-validation 422 in `handleCreateJob`, none of which carry one today.
-
-**Q: Does the existing single-422 text need a compat note for existing clients?**
-Recommended default: **Yes, note it, but treat as non-breaking.** The current text was never a documented stable contract (it's a free-text `message` field, not a parsed `error_code`), and the project has no precedent of clients pattern-matching on 422 message text. Still, call out the wording change explicitly in the v1.5 release notes/CHANGELOG, since `olecfb.go`'s own comments pre-announce DOCV3-02 as a planned split — an easy, low-cost courtesy to any client that may have started matching on the old string.
-
----
+| KEDA `ScaledObject` (including scale-to-zero) on the webhook-worker | "Consistency" — every other engine-class worker gets one, why not this one too? | Scales away the only host of the reconciler sweeper (Postgres advisory-lock-elected, singleton-by-design) — silent, delayed failure: stranded jobs and webhook-delivery gaps stop being detected/repaired with no immediate error | Plain fixed `replicas: 2` Deployment, no `ScaledObject` at all (see recommended default above) |
+| mTLS between in-cluster MCP consumers and the MCP HTTP endpoint | "It's a network boundary now, not a local stdio pipe — shouldn't it be more secure?" | Requires a cert issuance/rotation/CA story the project has never needed and doesn't need yet; massively over-engineered relative to the "internal clients, API-key auth" trust model already used for the REST API and every other service boundary | Existing per-client API-key header check (reused, not duplicated) + `NetworkPolicy` restricting which pods can reach the Service |
+| A separate `ADMIN_API_KEY` environment variable for operator-only presets actions | Feels like the fastest way to add "an admin path" without touching the `clients` schema | Out-of-band secret with no rotation mechanism, no per-action audit trail back to a `client_id`, a second parallel auth model living beside the existing one | `is_operator` boolean column on `clients`, checked through the existing auth middleware (see recommended default above) |
+| Public `Ingress` + cert-manager/TLS for the new HTTP surfaces (MCP HTTP, presets REST) | "We're exposing new HTTP endpoints, shouldn't they be reachable and secured like a real service?" | Solves external exposure for a service whose constraints explicitly state internal-only clients and no public release; adds a TLS/cert lifecycle this milestone has no consumer for | `ClusterIP` Service + `kubectl port-forward` for local validation; defer ingress to when there's an actual external/cross-cluster consumer |
+| `helm test` hooks as an additional CI-style smoke gate | Feels like standard Helm chart hygiene | Duplicates the in-cluster E2E adaptation (SEED-004 item 4) with a thinner, second test surface for zero additional coverage this milestone | Rely on the adapted E2E suite as the chart's correctness gate; revisit `helm test` only if a second chart consumer needs a faster, narrower smoke check |
+| Per-environment `values-*.yaml` file sprawl from the first commit | "Best practice" cargo-culted from multi-environment production charts | Structure for environments that don't exist yet (only OrbStack-local is a target this milestone); premature abstraction that adds maintenance surface with zero current payoff | One `values.yaml` with local defaults; add environment-specific overlays only when a second real environment shows up |
 
 ## Feature Dependencies
 
 ```
-[MCP list_presets tool]
-    └──requires──> [presets.Repo.List merged across BOTH scopes]
-                       (existing Repo.List is scope-specific; a client-facing
-                       list needs to reproduce Resolve's shadow-precedence —
-                       system presets usable by any client, shadowed by a
-                       same-named client preset — which today requires TWO
-                       repo.List calls merged in Go, or a new repo method)
+Helm chart (base manifests + probes + Secrets/ConfigMaps)
+    └──requires──> Migrate-as-hook Job (jobs table must exist before any worker/API pod starts)
+    └──requires──> METRICS_ADDR = 0.0.0.0 port (SEED-004 landmine 1) — needed for both
+                    worker liveness probes AND the KEDA Prometheus scaler's scrape target
+                       └──enables──> KEDA ScaledObjects per engine class (need a scrapeable
+                                     octoconv_queue_depth metric)
 
-[MCP convert_file preset=] ──reuses──> [existing API D-01 XOR gate + Resolve]
-    (no new server-side preset logic; MCP is a thin client of what already
-    ships in v1.4)
+KEDA ScaledObjects (image/document/html workers)
+    └──excludes──> webhook-worker (must stay a plain fixed-replica Deployment — see
+                   the sweeper-singleton constraint; this is a hard exclusion, not
+                   an oversight to fix later)
 
-[Presets REST CRUD] ──independent-of──> [MCP server]
-    (self-service preset management via REST does not require the MCP
-    server to exist, and vice versa — a human/tool can create a preset via
-    REST that an agent later references via MCP's list_presets/convert_file,
-    but neither cluster blocks the other)
+MCP streamable-HTTP endpoint
+    └──requires──> internal/mcpserver.NewServer's existing transport-agnostic design
+                    (already satisfied — no new dependency, just a new entrypoint)
+    └──requires──> Shared auth-check logic factored so both internal/api and the new
+                    MCP HTTP entrypoint can validate the same API-key header without
+                    duplicating the hash-compare code
 
-[veraPDF validation] ──gates──> [existing PDF/A-2b export path]
-    (post-processing step inside the document-worker's existing conversion
-    flow, not a new engine-class/queue — depends on nothing from Clusters
-    1/2/4)
+system-presets REST (PRAPIV2-01)
+    └──requires──> clients.is_operator column (new migration) + manage-clients CLI flag
+                    └──requires──> existing auth middleware extended to load/thread
+                                   is_operator alongside client_id (small, additive change)
 
-[CFB distinction] ──replaces──> [existing single-422 IsOLECFB branch]
-    (pure refinement of existing v1.3 code in internal/convert/olecfb.go +
-    internal/api/handlers.go — depends on nothing from Clusters 1/2/3)
+Load-proven 0→N→0 KEDA demonstration
+    └──requires──> KEDA ScaledObjects already deployed and correctly scoped (excludes
+                    webhook-worker, per above)
+    └──requires──> A load-generation script/client bursting real jobs through the
+                    already-authenticated API (no new feature — reuses existing
+                    POST /v1/jobs)
 ```
 
 ### Dependency Notes
 
-- **MCP `list_presets` requires scope-merged listing:** `presets.Repo.List(scope, clientID, includeInactive)` is scope-specific (system XOR user). A client-facing "what presets can I use" view must reproduce `Resolve`'s shadow-precedence semantics (client preset of the same name hides the system one). Plan for either two `List` calls merged in the MCP-server (or API) layer, or a new repo method — do not ship a `list_presets` that silently omits system presets or double-lists shadowed names.
-- **Presets REST and MCP are independent but complementary:** a human or automation could provision a client preset via `POST /v1/presets`, and an agent could later discover and use it via MCP's `list_presets`/`convert_file(preset=...)`. Neither cluster blocks the other's phase ordering.
-- **veraPDF and CFB clusters are both pure document-class deepenings** with zero coupling to MCP or presets REST — they can be sequenced in either order relative to Clusters 1/2, and even relative to each other.
-
----
+- **Helm chart requires migrate-as-hook:** the `jobs`/`clients`/`presets`/etc. tables must exist before the api Deployment's pods can serve traffic or before any worker can query `jobs` — a hook Job ordered before all Deployments is the correct place to enforce this, mirroring the existing compose `depends_on: condition: service_healthy` + embedded-migration-on-`cmd/api`-startup pattern but making the ordering explicit and singular instead of implicit-per-process.
+- **KEDA requires `METRICS_ADDR=0.0.0.0`:** this is a hard prerequisite, not a nice-to-have — KEDA's Prometheus scaler and any worker liveness probe both need the metrics endpoint reachable from outside the pod's own network namespace (a Prometheus scrape and a kubelet probe both originate outside the container). This is exactly SEED-004's landmine 1, and it must be paired with a `NetworkPolicy` to avoid silently regressing the "operational data isn't public" decision.
+- **KEDA excludes webhook-worker:** this is the single most load-bearing exclusion in this document. Every other dependency chain in this milestone assumes "per-engine-class worker gets a `ScaledObject`" — webhook-worker is the one deliberate, documented exception, and any roadmap phase that touches KEDA ScaledObjects must explicitly carve it out rather than apply a template uniformly across all worker Deployments.
+- **MCP HTTP requires shared auth-check logic, not a second copy:** factoring out the API-key validation (hash lookup against `clients.api_key_hash`/`api_key_hash_secondary`, revocation check) into something both `internal/api` and the new MCP HTTP entrypoint call is a small refactor, but skipping it (i.e., copy-pasting the check) would silently diverge the two credential-validation paths over time — flag this dependency explicitly in phase planning so it isn't done as an afterthought inside the MCP phase alone.
+- **system-presets REST requires the `is_operator` migration before the REST routes:** the REST handlers must be able to read `is_operator` from request context from day one — there is no safe intermediate state where the routes exist but the authorization check is a no-op, since that would ship a de-facto "any client can edit system presets" window.
 
 ## MVP Definition
 
-### Launch With (v1.5)
+### Launch With (v1 of this milestone)
 
-- [ ] `convert_file` (blocking, target_format XOR preset), `get_job_status`, `download_result`, `list_supported_formats`, `list_presets` — the five tools from SEED-003, stdio transport, go-sdk
-- [ ] `resource_link`/presigned-URL result shape (no default base64 embedding)
-- [ ] `POST/GET/PUT/DELETE /v1/presets` (+ `/{name}` variants), client-scope only, active-only listing, bump-on-update
-- [ ] veraPDF PDF/A-2b validation, always-on, terminal failure on non-conformance
-- [ ] CFB directory parse distinguishing encrypted vs legacy, two distinct 422s
+- [ ] Helm chart deploying the full stack (Postgres, Redis, MinIO, api, image/document/chromium/webhook workers, asynqmon) to OrbStack k8s via `helm install`, with migrate/createbucket as `pre-install,pre-upgrade` hook Jobs — this is the literal milestone headline and everything else builds on it being solid
+- [ ] `METRICS_ADDR` ported to `0.0.0.0` with a `NetworkPolicy` restricting `:9090` ingress — prerequisite for both worker liveness probes and KEDA's Prometheus scaler; blocks two other MVP items if skipped
+- [ ] KEDA `ScaledObject`s for image/document/html workers only (explicitly excluding webhook-worker), with a documented, timestamped 0→N→0 load-proof run — the other stated headline goal
+- [ ] webhook-worker ported as a plain fixed `replicas: 2` Deployment (no `ScaledObject`) — must ship alongside the KEDA work, not as an afterthought, since it's the one component that must NOT get the default treatment
+- [ ] MCP streamable-HTTP endpoint reusing `internal/mcpserver`'s existing transport-agnostic server, gated by the same API-key header check as the REST API
+- [ ] system-presets REST routes gated by a new `clients.is_operator` column + `manage-clients` CLI flag, returning 403 (not 404) for non-operator callers
 
 ### Add After Validation (v1.x)
 
-- [ ] Progress-notification wiring for `convert_file` if agent hosts in practice send `progressToken` (validate need before building further polish)
-- [ ] `?all=true` version history on `GET /v1/presets` if a real audit/debugging need appears
-- [ ] Small-file inline-base64 fast path for MCP results, if agents in practice want inline content for tiny files
+- [ ] Widen `pollingInterval`/`cooldownPeriod` from demo-tuned values to production-appropriate ones once real traffic patterns (not a synthetic burst) are observed — trigger: this chart gets used against something other than a one-off local proof
+- [ ] Session-affinity or multi-replica tuning for the MCP HTTP endpoint if `Stateless: true` turns out to be wrong for some tool interaction not yet exercised live — trigger: the live smoke test flagged as LOW confidence above surfaces a real gap
+- [ ] `helm test` smoke hook — trigger: a second consumer of the chart needs a faster gate than the full E2E suite
 
 ### Future Consideration (v2+)
 
-- [ ] Exposing `list_supported_formats`/`list_presets` as MCP Resources in addition to tools, once resource support is verified against the actual target host(s)
-- [ ] Streamable-HTTP MCP transport, if an internal shared/remote MCP-server catalog materializes
-- [ ] Structured `error_code` taxonomy for synchronous 422 validation paths (a larger, cross-cutting API decision — not scoped to CFB alone)
+- [ ] Ingress/TLS for the HTTP surfaces — defer until there's an actual external or cross-cluster consumer, not "because it's now HTTP instead of stdio"
+- [ ] CD pipeline wiring CI's existing image bake into automatic `helm upgrade` — defer until there's a real remote cluster target
+- [ ] Multi-environment `values-*.yaml` — defer until a second real environment exists
+- [ ] KEDA on the API/MCP Deployments (CPU-based or request-rate-based) — defer until there's evidence the request/response tier, not just the queue-consumer tier, needs elastic scaling
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
-|---------|------------|---------------------|----------|
-| `convert_file` + 4 companion MCP tools | HIGH | MEDIUM | P1 |
-| Presets REST CRUD (client-scope) | HIGH | LOW-MEDIUM | P1 |
-| veraPDF ISO 19005 validation | MEDIUM-HIGH | MEDIUM-HIGH | P1 |
-| CFB encrypted-vs-legacy distinction | MEDIUM | MEDIUM | P1 |
-| Progress notifications for MCP | LOW-MEDIUM | LOW-MEDIUM | P2 |
-| Preset version history over REST | LOW | LOW | P3 |
-| MCP resources (in addition to tools) | LOW | MEDIUM | P3 |
+|---------|------------|----------------------|----------|
+| Helm chart bringing up the full stack | HIGH | MEDIUM | P1 |
+| Migrate/createbucket as hook Jobs | HIGH | LOW | P1 |
+| `METRICS_ADDR=0.0.0.0` + NetworkPolicy | HIGH (blocks two other P1 items) | LOW | P1 |
+| KEDA ScaledObjects (image/document/html) with 0→N→0 proof | HIGH | HIGH | P1 |
+| webhook-worker opt-out of KEDA (fixed replicas: 2) | HIGH (correctness-critical, not optional) | LOW | P1 |
+| MCP streamable-HTTP endpoint sharing tool code | HIGH | MEDIUM | P1 |
+| system-presets REST with `is_operator` gate | HIGH | MEDIUM | P1 |
+| `NOTES.txt` on the chart | MEDIUM | LOW | P2 |
+| Liveness probe tuning (tolerant vs. tight thresholds) | MEDIUM | LOW | P2 |
+| Demo-vs-production KEDA timing-window documentation | MEDIUM | LOW | P2 |
+| `helm test` hooks | LOW | MEDIUM | P3 |
+| Ingress/TLS | LOW (no current consumer) | HIGH | P3 |
+| Multi-environment values | LOW (no current consumer) | MEDIUM | P3 |
 
 **Priority key:**
-- P1: Must have for v1.5 milestone completion
-- P2: Should have, add when possible within v1.5 if time allows
-- P3: Nice to have, future consideration beyond v1.5
+- P1: Must have for this milestone to be considered shipped
+- P2: Should have, meaningfully improves the milestone's quality/legibility but not launch-blocking
+- P3: Explicitly deferred — see Anti-Features and Future Consideration above
+
+## Competitor / Reference Pattern Analysis
+
+Not a market-facing product, so this section maps to reference infrastructure patterns rather than competitors:
+
+| Concern | Standard k8s/KEDA/Helm pattern | Our approach |
+|---------|-------------------------------|--------------|
+| Scale-to-zero queue consumers | KEDA `ScaledObject` with `minReplicaCount: 0`, a scaler (Prometheus/Redis/etc.) driving the HPA it manages | Prometheus scaler against the already-existing `octoconv_queue_depth` metric — no new scaler type, no redis-internals scraper, exactly matching SEED-004's own decision to avoid an asynq-internals redis scaler |
+| Pre-deploy one-shot setup tasks (migrations, bucket creation) | Helm `pre-install,pre-upgrade` hook Jobs with `hook-delete-policy` and `backoffLimit: 0` | Direct port, same shape, reusing the existing idempotent `cmd/migrate` binary unchanged |
+| MCP server transport flexibility (stdio for local tools, HTTP for networked consumers) | go-sdk's transport-agnostic `*mcp.Server` + `mcp.NewStreamableHTTPHandler` wrapping the same server instance | Already structurally in place from Phase 21 (`internal/mcpserver.NewServer`); this milestone adds the second transport's thin entrypoint only |
+| Operator/admin authorization layered onto an existing single-tenant-style API-key model | Either a role/claim column on the existing principal table, or a fully separate RBAC/IdP integration | Minimal column addition (`is_operator`) on `clients`, consistent with the project's own established pattern of extending `clients` for new auth concerns (key rotation slots) rather than reaching for a new provider |
 
 ## Sources
 
-- [Tools — Model Context Protocol specification (2025-06-18)](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) — tool result content types, resource_link, isError vs protocol errors, output schema (HIGH confidence, official spec)
-- [Architecture overview — Model Context Protocol](https://modelcontextprotocol.io/docs/learn/architecture) — progress notification / progressToken mechanics (MEDIUM confidence, official docs)
-- [modelcontextprotocol/go-sdk (GitHub)](https://github.com/modelcontextprotocol/go-sdk) and [pkg.go.dev mcp package](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp) — official Go SDK API shape, `AddTool`/`StdioTransport` (HIGH confidence, official repo/docs)
-- [Keep file bytes out of your AI agent's context window — Arcade.dev](https://www.arcade.dev/blog/model-never-needs-to-see-the-file/) and [MCP discussion #794/#793 on image content URL support](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/794) — base64 context-window cost, resource_link rationale (MEDIUM confidence, community consensus + spec discussion)
-- [MCP Resources vs Tools — multiple sources cross-checked](https://zuplo.com/blog/mcp-resources), [dev.to pattern guide](https://dev.to/webbywisp/mcp-server-patterns-tools-vs-resources-vs-prompts-when-to-use-each-5bgp) — model-controlled vs application-controlled distinction (MEDIUM confidence, multiple independent sources agree)
-- [veraPDF CLI docs — validation](https://docs.verapdf.org/cli/validation/) and [veraPDF CLI quick start](https://docs.verapdf.org/cli/) — `-f 2b` flavour flag, CLI invocation shape (HIGH confidence, official docs)
-- [verapdf/cli Docker Hub image](https://hub.docker.com/r/verapdf/cli) — Docker/JVM packaging confirmation (MEDIUM confidence, official image, no direct performance benchmark found)
-- [Encrypted OOXML Documents — Didier Stevens](https://blog.didierstevens.com/2018/06/07/encrypted-ooxml-documents/) — EncryptedPackage/EncryptionInfo stream analysis (MEDIUM confidence, well-known independent security researcher, corroborated by Apache POI's own encryption code and oletools' crypto.py)
-- [Apache POI — Encryption support](https://poi.apache.org/encryption.html) — corroborates EncryptedPackage/EncryptionInfo as the standard detection streams (MEDIUM confidence, official project docs for a mature OOXML library)
-- Internal code read directly: `internal/api/handlers.go`, `internal/convert/olecfb.go`, `internal/presets/repo.go`, `cmd/manage-presets/main.go`, `internal/api/routes.go`, `internal/convert/convert.go`, `internal/ratelimit/*_test.go`, `.planning/seeds/SEED-003.md`, `.planning/PROJECT.md` — grounds all "mirrors existing X" claims in actual shipped code, not assumption
+- KEDA documentation: Prometheus scaler (`keda.sh/docs/2.19/scalers/prometheus/`), ScaledObject spec (`keda.sh/docs/2.20/reference/scaledobject-spec/`) — MEDIUM confidence (WebSearch-aggregated against official KEDA docs, not independently verified against a running cluster this session)
+- Helm hooks / migration-Job vs. initContainer best-practice discussion (multiple 2026 blog sources aggregated via WebSearch, consistent with each other and with general Helm documentation on hook annotations) — MEDIUM confidence
+- `github.com/modelcontextprotocol/go-sdk` `mcp` package (`pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp`), `StreamableHTTPHandler`/`StreamableHTTPOptions`/session semantics — MEDIUM confidence for the API shape (fetched from pkg.go.dev), **LOW confidence** specifically for the `Stateless: true` recommendation's interaction with `convert_file`'s progress-notification streaming — flagged for live validation during phase execution
+- go-sdk DNS-rebinding-protection commit (`github.com/modelcontextprotocol/go-sdk@67bd3f2`) — confirms automatic localhost-origin protection exists and is bypassable via `DisableLocalhostProtection`/correct `Host` header handling behind a proxy; relevant if the in-cluster Service is ever fronted by something that rewrites `Host` — MEDIUM confidence
+- Direct codebase inspection (HIGH confidence, primary source): `docker-compose.yml` (existing resource limits, healthchecks, per-worker env), `internal/reconciler/reconciler.go` (`RunWithLock`/`PGAdvisoryLock` — sweeper singleton mechanics), `internal/presets/repo.go` (scope/shadow model — no existing operator concept), `internal/db/migrations/0001_init.sql` + `0002_client_api_keys.sql` (`clients` schema — confirms no role/scope column exists today), `internal/metrics/queue_collector.go` (`octoconv_queue_depth{queue,state}` — confirms the exact metric KEDA would scrape already exists), `internal/mcpserver/mcpserver.go` + `cmd/mcp-server/main.go` (confirms `NewServer` is transport-agnostic today), `.planning/seeds/SEED-004.md` (the planted seed enumerating known porting landmines), `.planning/PROJECT.md` (milestone scope, constraints, Out of Scope, Key Decisions history)
 
 ---
-*Feature research for: OctoConv v1.5 (MCP Access & Document Fidelity)*
-*Researched: 2026-07-13*
+*Feature research for: Kubernetes + KEDA milestone (v1.6), OctoConv*
+*Researched: 2026-07-14*
