@@ -87,7 +87,7 @@ veraPDF are independent document-track deepenings, with veraPDF (highest uncerta
 - [x] **Phase 20: Presets REST CRUD & Format Discovery** — Clients self-service manage client-scope presets and discover supported formats over authenticated REST
 - [x] **Phase 21: MCP Server** — Agents convert files and discover capabilities through a stdio MCP server that is a zero-privilege HTTP client of the API
 - [x] **Phase 22: CFB Encrypted-vs-Legacy Classification** — OLE-CFB uploads get distinct, bounded 422s (password-protected vs legacy binary)
-- [ ] **Phase 23: veraPDF ISO 19005 Validation** — PDF/A-2b outputs validated for real conformance; non-compliant exports fail terminally
+- [x] **Phase 23: veraPDF ISO 19005 Validation** — PDF/A-2b outputs validated for real conformance; non-compliant exports fail terminally
 
 ## Phase Details
 
@@ -149,9 +149,9 @@ Plans:
 **Cost gate**: JVM-per-invocation cost must be measured live before veraPDF is placed on the job path; the CLI-vs-daemon shape is an explicit, measured decision (not assumed), and the daemon fallback is documented either way. Verify veraPDF's exact non-conformance report format/exit codes live before hardcoding terminal signatures.
 
 Plans:
-- [ ] 23-01-PLAN.md — Dockerfile packaging (pinned verapdf/cli:1.30.2, glibc verified live) + JVM cold-start MEASUREMENT GATE (p95 <= 10s go/no-go, blocking operator checkpoint)
-- [ ] 23-02-PLAN.md — Go wiring: internal/convert/verapdf.go (runCommand + machine-report parser, fail-closed) + wantPDFA hook in validateDocumentOutput + terminalVeraPDFSignatures same-commit + fixture-driven unit tests
-- [ ] 23-03-PLAN.md — LIVE HARD GATE: compliant PDF/A-2b passes e2e under real veraPDF; deliberately non-compliant marker-bearing PDF fails terminally with reason in job_events; build-time delta recorded
+- [x] 23-01-PLAN.md — Dockerfile packaging (pinned verapdf/cli:1.30.2, glibc verified live) + JVM cold-start MEASUREMENT GATE (p95 <= 10s go/no-go, blocking operator checkpoint)
+- [x] 23-02-PLAN.md — Go wiring: internal/convert/verapdf.go (runCommand + machine-report parser, fail-closed) + wantPDFA hook in validateDocumentOutput + terminalVeraPDFSignatures same-commit + fixture-driven unit tests
+- [x] 23-03-PLAN.md — LIVE HARD GATE: compliant PDF/A-2b passes e2e under real veraPDF; deliberately non-compliant marker-bearing PDF fails terminally with reason in job_events; build-time delta recorded
 
 ## Progress
 
