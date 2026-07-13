@@ -132,3 +132,13 @@ None for the code shipped in this plan. **Follow-up required:** re-run the live 
 - FOUND: README "MCP server" section
 - FOUND: commit 0aeef3d (Task 1)
 - FOUND: commit b9cdda3 (Task 2)
+
+---
+
+**RESOLVED (orchestrator follow-up, 2026-07-13):** the Docker daemon (OrbStack) was restarted
+and the outstanding D-13 live gate executed from main (HEAD after merge):
+`TestLiveStdioJSONRPCGate` → `--- PASS (2.80s)` against the freshly rebuilt compose stack
+(api image rebuilt; fresh client key minted via manage-clients). Full chain proven live:
+initialize handshake → tools/list (5) → convert_file png→jpg (presigned_url + local file with
+JPEG magic, via OCTOCONV_S3_DIAL_ADDR=127.0.0.1:9100 on the child env) → list tools round-trip
+→ isError on bad input → every stdout line valid JSON-RPC. No code changes were needed.

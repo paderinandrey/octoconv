@@ -85,7 +85,7 @@ and an encrypted-vs-legacy CFB error taxonomy. Build order is dependency-justifi
 veraPDF are independent document-track deepenings, with veraPDF (highest uncertainty) sequenced last.
 
 - [x] **Phase 20: Presets REST CRUD & Format Discovery** — Clients self-service manage client-scope presets and discover supported formats over authenticated REST
-- [ ] **Phase 21: MCP Server** — Agents convert files and discover capabilities through a stdio MCP server that is a zero-privilege HTTP client of the API
+- [x] **Phase 21: MCP Server** — Agents convert files and discover capabilities through a stdio MCP server that is a zero-privilege HTTP client of the API
 - [ ] **Phase 22: CFB Encrypted-vs-Legacy Classification** — OLE-CFB uploads get distinct, bounded 422s (password-protected vs legacy binary)
 - [ ] **Phase 23: veraPDF ISO 19005 Validation** — PDF/A-2b outputs validated for real conformance; non-compliant exports fail terminally
 
