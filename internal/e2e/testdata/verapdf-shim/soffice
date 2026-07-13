@@ -1,0 +1,49 @@
+#!/bin/sh
+# verapdf-shim/soffice -- E2E-ONLY soffice interposer (Phase 23 Plan 03).
+#
+# This file is shadow-mounted (read-only) over /usr/local/bin/soffice by
+# docker-compose.e2e.yml, which sits AHEAD of the real /usr/bin/soffice on
+# the document-worker image's PATH (no PATH env override -- WARNING-6). It
+# is TRANSPARENT for every input except the deliberate trigger fixture
+# (internal/e2e/testdata/trigger.docx): for that one input it substitutes a
+# pre-crafted, marker-bearing but ISO-19005-non-compliant PDF exactly where
+# soffice would have written its own output, so every downstream step
+# (validatePDF, the /GTS_PDFA pre-filter, the real veraPDF JVM, terminal
+# classification, MarkFailed, job_events) is the genuine production path --
+# only the LibreOffice rendering step itself is swapped out.
+#
+# MUST NEVER be used in production -- confined entirely to
+# docker-compose.e2e.yml's established test-only bind-mount pattern.
+#
+# Argv contract honored (internal/convert/libreoffice.go Convert, ~101-108):
+#   soffice --headless --invisible --nocrashreport --nodefault --nologo
+#     --nofirststartwizard --norestore -env:UserInstallation=file://<profile>
+#     --convert-to <target>:<filter>[:<suffix>] --outdir <workDir> <inPath>
+# The worker's inPath convention is always "in.<sourceFormat>" and it
+# expects the produced file at "<workDir>/in.<targetFormat>" before its own
+# rename step runs.
+
+set -eu
+
+TRIGGER_MARKER='VERAPDF-E2E-NONCOMPLIANT-TRIGGER'
+FIXTURE_PATH='/e2e-fixtures/verapdf_noncompliant_marker.pdf'
+
+outdir=""
+input=""
+prev=""
+for arg in "$@"; do
+	if [ "$prev" = "--outdir" ]; then
+		outdir="$arg"
+	fi
+	prev="$arg"
+	input="$arg" # the last argv element is always the input path
+done
+
+if [ -n "$input" ] && [ -f "$input" ] && grep -aq "$TRIGGER_MARKER" "$input" 2>/dev/null; then
+	base=$(basename "$input")
+	stem=${base%.*}
+	cp "$FIXTURE_PATH" "$outdir/$stem.pdf"
+	exit 0
+fi
+
+exec /usr/bin/soffice "$@"

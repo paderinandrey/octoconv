@@ -58,3 +58,20 @@ services:
   chromium-worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # document-worker: E2E-ONLY fault-injection shim for the veraPDF live
+  # terminal-fail gate (Phase 23 Plan 03, D-09). NEVER present in production
+  # docker-compose.yml. A single-file, read-only bind mount SHADOWS the real
+  # /usr/bin/soffice binary by placing the shim at /usr/local/bin/soffice,
+  # which the image's PATH resolves AHEAD of /usr/bin (no PATH env override
+  # -- WARNING-6). The shim is transparent pass-through
+  # (`exec /usr/bin/soffice "$@"`) for every input except the deliberate
+  # trigger.docx fixture, for which it substitutes a pre-crafted
+  # marker-bearing-but-non-compliant PDF -- exercising the REAL veraPDF JVM,
+  # terminal classification, and job_events diagnostics trail end-to-end.
+  # Both mounted files must stay world-readable/executable: the worker
+  # container runs as USER nobody.
+  document-worker:
+    volumes:
+      - ./internal/e2e/testdata/verapdf-shim/soffice:/usr/local/bin/soffice:ro
+      - ./internal/e2e/testdata/verapdf_noncompliant_marker.pdf:/e2e-fixtures/verapdf_noncompliant_marker.pdf:ro
