@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"text/template"
 	"time"
@@ -277,6 +278,49 @@ func pollUntilDone(t *testing.T, baseURL, apiKey, jobID string, timeout time.Dur
 		case "failed":
 			t.Fatalf("job %s failed: error_code=%v error_message=%v",
 				jobID, body["error_code"], body["error_message"])
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("job %s did not reach a terminal state within %v (last=%v)", jobID, timeout, last)
+	return nil
+}
+
+// pollUntilFailed is pollUntilDone's inverse sibling (Phase 23 Plan 03,
+// D-09): identical ~2s poll loop, but the two helpers' pass/fail sense is
+// deliberately swapped -- pollUntilFailed fatals on "done" (the whole point
+// of the non-compliant hard gate is that the job must NEVER succeed) and
+// returns the terminal response body on "failed". Keep these two helpers
+// adjacent so they never drift apart.
+func pollUntilFailed(t *testing.T, baseURL, apiKey, jobID string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last map[string]any
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/jobs/"+jobID, nil)
+		if err != nil {
+			t.Fatalf("build GET /v1/jobs/%s request: %v", jobID, err)
+		}
+		req.Header.Set("Authorization", "ApiKey "+apiKey)
+		resp, err := e2eHTTP.Do(req)
+		if err != nil {
+			t.Fatalf("GET /v1/jobs/%s: %v", jobID, err)
+		}
+		var body map[string]any
+		decodeErr := json.NewDecoder(resp.Body).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET /v1/jobs/%s status = %d, want 200; body=%v", jobID, resp.StatusCode, body)
+		}
+		if decodeErr != nil {
+			t.Fatalf("decode GET /v1/jobs/%s response: %v", jobID, decodeErr)
+		}
+		last = body
+
+		switch body["status"] {
+		case "failed":
+			return body
+		case "done":
+			t.Fatalf("job %s reached \"done\" but was expected to fail terminally: %v", jobID, body)
 		}
 		time.Sleep(2 * time.Second)
 	}
@@ -620,6 +664,61 @@ func TestPDFAExportE2E(t *testing.T) {
 		}
 		assertDownloadIsPDF(t, downloadURL)
 	})
+}
+
+// TestPDFANonCompliantE2E is the LIVE HARD GATE (D-09, ROADMAP success
+// criterion 1): a deliberately non-compliant, /GTS_PDFA-marker-bearing PDF
+// (trigger.docx, intercepted by the e2e-only soffice shim -- see
+// docker-compose.e2e.yml) fed through the real validation path must fail the
+// job TERMINALLY, never succeed, and never retry-storm. pollUntilFailed's
+// 5-minute bound is itself part of the proof: a retry loop burning
+// DOCUMENT_MAX_RETRY x backoff would blow this bound, so simply reaching
+// "failed" within it demonstrates the failure was classified terminal on the
+// FIRST attempt, not after exhausting retries. The veraPDF reason is then
+// cross-checked directly in job_events.detail via a live Postgres query
+// (provisionClient's DATABASE_URL precedent) -- proving the diagnostics
+// trail (D-07), not just the terminal status code, actually reached the
+// audit log.
+func TestPDFANonCompliantE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	data, err := os.ReadFile(filepath.Join("testdata", "trigger.docx"))
+	if err != nil {
+		t.Fatalf("read fixture trigger.docx: %v", err)
+	}
+
+	jobID := postJob(t, cfg.baseURL, apiKey, "trigger.docx", data, "pdf", "", pdfAProfileOpts)
+
+	body := pollUntilFailed(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+
+	if code, _ := body["error_code"].(string); code != "engine_error" {
+		t.Errorf("job %s error_code = %v, want \"engine_error\"", jobID, body["error_code"])
+	}
+
+	ctx := context.Background()
+	pool, err := db.Connect(ctx) // reads DATABASE_URL
+	if err != nil {
+		t.Fatalf("db.Connect: %v", err)
+	}
+	defer pool.Close()
+
+	jid, err := uuid.Parse(jobID)
+	if err != nil {
+		t.Fatalf("parse job id %q: %v", jobID, err)
+	}
+
+	var reason string
+	row := pool.QueryRow(ctx,
+		`SELECT detail->>'engine_stderr' FROM job_events WHERE job_id = $1 AND to_status = 'failed'`,
+		jid,
+	)
+	if err := row.Scan(&reason); err != nil {
+		t.Fatalf("query job_events.detail for job %s: %v", jobID, err)
+	}
+	if !strings.Contains(reason, "pdf/a non-compliant") {
+		t.Errorf("job_events.detail.engine_stderr for job %s = %q, want it to contain \"pdf/a non-compliant\"", jobID, reason)
+	}
 }
 
 // optsRejectionCases is the table of live opts inputs that must 422 (T-14-01/
