@@ -1,5 +1,24 @@
 # Milestones
 
+## v1.5 MCP Access & Document Fidelity (Shipped: 2026-07-13)
+
+**Phases completed:** 4 phases, 10 plans, 22 tasks
+
+**Key accomplishments:**
+
+- Authenticated REST self-service for client-scope presets (create/list/show/update/deactivate) plus a registry-derived GET /v1/formats capability endpoint, both mounted inside the existing /v1 auth+rate-limit chain.
+- curl-driven live gate (scripts/presets-rest-acceptance.sh) proving all five /v1/presets verbs, mass-assignment resistance, byte-identical no-leak 404s, and registry-derived GET /v1/formats against the real compose stack — 42/42 assertions passed on first run
+- Hand-rolled, zero-internal-import HTTP client of the OctoConv public API implementing the blocking convert workflow (multipart upload -> poll -> presigned download), with API-key redaction, output-path containment, and an optional Host-preserving dial-redirect knob for presigned downloads -- all proven by offline httptest unit tests.
+- Five agent-facing MCP tools (convert_file/get_job_status/download_result/list_supported_formats/list_presets) registered on the pinned go-sdk v1.6.1, with per-tick NotifyProgress during blocking conversion and upstream API failures surfaced as isError tool results — all proven against a real in-memory MCP session, not just faked handler calls.
+- cmd/mcp-server ships as a thin, fail-fast, stderr-only-logging stdio binary; README documents client wiring; and the D-13 live stdio JSON-RPC hard gate PASSED against the real compose stack -- five tools, a real png→jpg conversion (presigned_url + local JPEG-magic file via the child binary's OCTOCONV_S3_DIAL_ADDR dial-redirect), list round-trips, bad-input isError, and full stdout purity.
+- Hand-rolled, bounded, fuzz-hardened CFB directory-entry-name parser (`ClassifyCFB`) distinguishing encrypted vs. legacy-binary Office uploads, zero new dependencies, proven crash-free over a 3.5M-execution 30s native fuzz run.
+- handleCreateJob now returns a distinct "remove the password" 422 for encrypted OOXML and a distinct "legacy binary ... convert to docx/xlsx/pptx" 422 for legacy .doc/.xls/.ppt, via `convert.ClassifyCFB`, proven live end-to-end against the real fixtures through the rebuilt compose stack.
+- veraPDF CLI bundled into Dockerfile.document-worker via a Debian-JRE fallback path (jlink JRE fails the glibc boundary live); measured JVM cold-start p95 = 4650ms over 10 real PDF/A-2b validations -- GO, 2.15x margin under the 10s D-01 budget.
+- ValidatePDFA wired into validateDocumentOutput's wantPDFA branch (after the /GTS_PDFA pre-filter) via the existing hardened runCommand, extended to capture stdout since veraPDF's `--format xml` report is stdout-only; fail-closed terminal classification (terminalVeraPDFSignatures) lands in the same commit, and VERAPDF_TIMEOUT is injected from cmd/document-worker/main.go via SetVeraPDFTimeout.
+- Live, unconditional proof against the rebuilt document-worker image (real veraPDF JVM in the path): a genuine PDF/A-2b export still reaches done (no regression), and a marker-bearing-but-corrupted PDF/A export injected via an e2e-only soffice shim fails terminally with the exact "pdf/a non-compliant" veraPDF reason recorded in job_events -- all three live tests (TestPDFAExportE2E, TestPDFANonCompliantE2E, TestDocumentConversionE2E) passed in a single 43.16s run; document-worker image build-time delta measured at +12.13s (+8%) via two controlled --no-cache local builds.
+
+---
+
 ## v1.4 CI, Presets & Debt Cleanup (Shipped: 2026-07-12)
 
 **Phases completed:** 3 phases, 8 plans, 15 tasks

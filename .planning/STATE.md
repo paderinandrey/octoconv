@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: MCP Access & Document Fidelity
-status: executing
+status: Awaiting next milestone
 stopped_at: Roadmap complete (Phases 20-23), ready to plan Phase 20
-last_updated: "2026-07-13T10:48:49.446Z"
-last_activity: 2026-07-13 -- Phase 23 execution started
+last_updated: "2026-07-13T12:11:57.247Z"
+last_activity: 2026-07-13 — Milestone v1.5 completed and archived
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 10
   completed_plans: 10
-  percent: 70
+  percent: 100
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-07-13 after v1.5 milestone start)
 
 ## Current Position
 
-Phase: 23 (verapdf-validation) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 23
-Last activity: 2026-07-13 -- Phase 23 execution started
+Phase: Milestone v1.5 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-13 — Milestone v1.5 completed and archived
 
 ## Performance Metrics
 
@@ -124,4 +124,4 @@ Resume file: .planning/ROADMAP.md
 
 ## Operator Next Steps
 
-- Run `/gsd:plan-phase 20` to plan the first v1.5 phase (Presets REST CRUD & Format Discovery).
+- Start the next milestone with /gsd-new-milestone

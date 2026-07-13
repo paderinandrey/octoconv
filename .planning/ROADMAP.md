@@ -7,7 +7,7 @@
 - ✅ **v1.2 Document Engine Class** — Phases 8-11 (shipped 2026-07-10) — see `.planning/milestones/v1.2-ROADMAP.md`
 - ✅ **v1.3 Document Class v2** — Phases 12-16 (shipped 2026-07-12) — see `.planning/milestones/v1.3-ROADMAP.md`
 - ✅ **v1.4 CI, Presets & Debt Cleanup** — Phases 17-19 (shipped 2026-07-13) — see `.planning/milestones/v1.4-ROADMAP.md`
-- 🚧 **v1.5 MCP Access & Document Fidelity** — Phases 20-23 (in progress) — details below
+- ✅ **v1.5 MCP Access & Document Fidelity** — Phases 20-23 (shipped 2026-07-13) — see `.planning/milestones/v1.5-ROADMAP.md` — details below
 
 ## Phases
 
@@ -76,82 +76,17 @@ Full details: `.planning/milestones/v1.4-ROADMAP.md`
 
 </details>
 
-### 🚧 v1.5 MCP Access & Document Fidelity (Phases 20-23) — IN PROGRESS
+<details>
+<summary>✅ v1.5 MCP Access & Document Fidelity (Phases 20-23) — SHIPPED 2026-07-13</summary>
 
-Four largely-independent capability additions layered onto the hardened v1.0–v1.4 core: an
-agent-facing stdio MCP server, self-service preset REST CRUD, real ISO 19005 PDF/A validation,
-and an encrypted-vs-legacy CFB error taxonomy. Build order is dependency-justified — Presets REST
-(with the new `GET /v1/formats`) is a hard prerequisite for two of MCP's five tools; CFB and
-veraPDF are independent document-track deepenings, with veraPDF (highest uncertainty) sequenced last.
+- [x] Phase 20: Presets REST CRUD & Format Discovery (2/2 plans) — completed 2026-07-13
+- [x] Phase 21: MCP Server (3/3 plans) — completed 2026-07-13
+- [x] Phase 22: CFB Encrypted-vs-Legacy Classification (2/2 plans) — completed 2026-07-13
+- [x] Phase 23: veraPDF ISO 19005 Validation (3/3 plans) — completed 2026-07-13
 
-- [x] **Phase 20: Presets REST CRUD & Format Discovery** — Clients self-service manage client-scope presets and discover supported formats over authenticated REST
-- [x] **Phase 21: MCP Server** — Agents convert files and discover capabilities through a stdio MCP server that is a zero-privilege HTTP client of the API
-- [x] **Phase 22: CFB Encrypted-vs-Legacy Classification** — OLE-CFB uploads get distinct, bounded 422s (password-protected vs legacy binary)
-- [x] **Phase 23: veraPDF ISO 19005 Validation** — PDF/A-2b outputs validated for real conformance; non-compliant exports fail terminally
+Full details: `.planning/milestones/v1.5-ROADMAP.md`
 
-## Phase Details
-
-### Phase 20: Presets REST CRUD & Format Discovery
-**Goal**: Clients can self-service manage their own presets and discover supported formats over authenticated REST — the discovery substrate MCP's list tools depend on.
-**Depends on**: Nothing new (extends already-shipped `internal/presets.Repo` from Phase 18; first v1.5 phase)
-**Requirements**: PRAPI-01, PRAPI-02, PRAPI-03
-**Success Criteria** (what must be TRUE):
-  1. A client can create / list / show / update / deactivate its own client-scope presets via `/v1/presets`, with scope and client_id derived solely from the auth context — a request body attempting `scope=system` or a foreign `client_id` is ignored (narrow DTO, no mass-assignment).
-  2. REST behavior mirrors the CLI through the shared `internal/presets.Repo`: update bumps the version and echoes the new number, a duplicate active-create returns 409, and there is no hard delete (deactivate only).
-  3. Requesting another client's or a non-existent preset returns the no-leak response (404-style, never 403, never revealing existence).
-  4. `GET /v1/formats` returns the supported (source, target) format pairs and their engine classes from a read-only registry walk.
-**Plans**: 2 plans
-
-Plans:
-- [x] 20-01-PLAN.md — PresetAdmin interface + /v1/presets CRUD + /v1/formats registry walk + unit/handler tests
-- [x] 20-02-PLAN.md — live acceptance hard gate: curl-driven REST CRUD + formats proof against the compose stack
-
-### Phase 21: MCP Server
-**Goal**: Agents (e.g. a Claude Code session) can convert files and discover capabilities through a stdio MCP server that holds zero privileged access and is a pure HTTP client of the existing public API.
-**Depends on**: Phase 20 (`list_presets` and `list_supported_formats` tools consume the `/v1/presets` and `/v1/formats` REST endpoints — MCP holds no `internal/presets`/`internal/convert` imports)
-**Requirements**: MCP-01, MCP-02, MCP-03, MCP-04, MCP-05
-**Success Criteria** (what must be TRUE):
-  1. `convert_file` from a real MCP client session converts a real file (blocking, `target_format` XOR `preset`) and returns a presigned URL plus the local path of the downloaded result — file bytes are never inlined into the tool result.
-  2. `get_job_status` and `download_result` support the non-blocking flow; `list_supported_formats` and `list_presets` (merged client+system view) return live data through the Phase 20 REST endpoints.
-  3. During a long-running conversion the internal poll loop emits a progress notification each tick and enforces its own max-duration guard, so a stuck job never blocks past the ~30-min stdio idle window.
-  4. The API key never appears in any tool result or error text; agent-supplied paths are canonicalized and contained (no traversal); stdout carries only JSON-RPC framing (logs go to stderr); upstream API errors map to `isError` content results, not protocol errors.
-**Plans**: 3 plans
-- [x] 21-01-PLAN.md — internal/mcpserver: MCP SDK dependency + config + HTTP API client (redaction, path containment) + httptest-fake unit tests
-- [x] 21-02-PLAN.md — Five MCP tools (convert_file blocking+progress, get_job_status, download_result, list_supported_formats, list_presets) + server wiring + tool unit tests
-- [x] 21-03-PLAN.md — cmd/mcp-server thin binary (stderr logging, fail-fast) + README section + live stdio JSON-RPC hard gate
-**Live acceptance**: real MCP client session (Claude Code) driving the tools against the running docker-compose stack — not a mocked transport. This is "new territory" per PROJECT.md; re-verify the pinned `go-sdk` (≥v1.6.1) tool-registration API surface and progress/keepalive mechanics live at planning time.
-
-### Phase 22: CFB Encrypted-vs-Legacy Classification
-**Goal**: OLE-CFB uploads receive a distinct, bounded 422 telling the client whether the file is password-protected or a legacy binary format — never a hang, never a path to conversion.
-**Depends on**: Nothing (independent document-track deepening; mirrors the existing `SniffContainer` two-stage pattern, reuses Phase 13 fixtures)
-**Requirements**: CFB-01, CFB-02
-**Success Criteria** (what must be TRUE):
-  1. A password-protected OOXML upload (`EncryptionInfo`/`EncryptedPackage` streams) gets an "encrypted" 422 while a legacy binary `.doc`/`.xls`/`.ppt` (`WordDocument`/`Workbook`|`Book`/`PowerPoint Document` streams) gets a distinct "legacy" 422 — both before any S3/Postgres write.
-  2. An unrecognized or corrupt CFB structure falls through fail-closed to today's generic 422 and never proceeds to conversion.
-  3. A crafted CFB with a directory-chain cycle (or truncated header / self-referential sector index / oversized declared count) gets a bounded 422 and never hangs — the parser caps sectors/entries walked and rejects cycles via a visited-set.
-  4. The hand-rolled CFB directory parser survives Go native fuzzing (crash-free, bounded) as the phase exit-gate, seeded with the Phase 13 fixtures plus deliberately corrupted variants.
-**Plans**: 2 plans
-
-Plans:
-- [x] 22-01-PLAN.md — internal/convert/cfb.go ClassifyCFB bounded directory parser + unit table over real fixtures + FuzzClassifyCFB 30s exit-gate
-- [x] 22-02-PLAN.md — handleCreateJob three-way ClassifyCFB split (distinct/legacy/unknown 422s) + handler tests + live TestOLECFBRejectionE2E distinct-message gate
-
-### Phase 23: veraPDF ISO 19005 Validation
-**Goal**: PDF/A-2b outputs are validated for real ISO 19005 conformance, replacing the v1.3 OutputIntent heuristic, so a non-compliant export fails the job terminally with the veraPDF reason recorded.
-**Depends on**: Nothing (independent; highest-uncertainty item, sequenced last so any slip doesn't block Phases 20–22)
-**Requirements**: PDFA-01, PDFA-02
-**Success Criteria** (what must be TRUE):
-  1. A deliberately non-compliant PDF/A export fails the job terminally with the veraPDF non-conformance reason recorded in `job_events`.
-  2. A genuinely compliant PDF/A-2b export still passes validation against the existing v1.3 PDF/A fixtures — no regression from the stricter check, per the decided severity policy (Warning vs Error rule violations).
-  3. veraPDF is bundled into `Dockerfile.document-worker` (multi-stage `COPY` from `verapdf/cli`, glibc-compat verified live) and invoked through the hardened `runCommand` with its own bounded timeout; `terminalVeraPDFSignatures` are added same-commit (D-04 discipline).
-  4. The measured JVM cold-start cost is captured against `DOCUMENT_ENGINE_TIMEOUT` and the CI e2e budget before wiring veraPDF into the job path; if the cost proves prohibitive, the daemon/server-mode (`verapdf/rest`) fallback is documented as the decided alternative.
-**Plans**: 3 plans
-**Cost gate**: JVM-per-invocation cost must be measured live before veraPDF is placed on the job path; the CLI-vs-daemon shape is an explicit, measured decision (not assumed), and the daemon fallback is documented either way. Verify veraPDF's exact non-conformance report format/exit codes live before hardcoding terminal signatures.
-
-Plans:
-- [x] 23-01-PLAN.md — Dockerfile packaging (pinned verapdf/cli:1.30.2, glibc verified live) + JVM cold-start MEASUREMENT GATE (p95 <= 10s go/no-go, blocking operator checkpoint)
-- [x] 23-02-PLAN.md — Go wiring: internal/convert/verapdf.go (runCommand + machine-report parser, fail-closed) + wantPDFA hook in validateDocumentOutput + terminalVeraPDFSignatures same-commit + fixture-driven unit tests
-- [x] 23-03-PLAN.md — LIVE HARD GATE: compliant PDF/A-2b passes e2e under real veraPDF; deliberately non-compliant marker-bearing PDF fails terminally with reason in job_events; build-time delta recorded
+</details>
 
 ## Progress
 

@@ -160,6 +160,45 @@
 
 ---
 
+## Milestone: v1.5 — MCP Access & Document Fidelity
+
+**Shipped:** 2026-07-13
+**Phases:** 4 (20–23) | **Plans:** 10 | **Timeline:** ~1 день, 71 коммит, +5537/−84 строк (без .planning)
+
+### What Was Built
+- Presets REST self-service + /v1/formats (registry-derived) — the discovery substrate MCP consumes (Phase 20)
+- stdio MCP server: 5 tools, blocking convert_file with per-tick progress, zero-privilege HTTP client, key redaction, dial-redirect knob for host-run binaries; SEED-003 seed→shipped in 24h of planted intent (Phase 21)
+- Hand-rolled bounded CFB directory parser (cycle-guard, 3.5M fuzz executions clean) splitting the combined 422 into encrypted/legacy/unknown (Phase 22)
+- Real ISO 19005-2b validation via veraPDF in document-worker, gated by the project's first MEASURED go/no-go (p95 4.65s vs 10s budget, N=10, nearest-rank) — research's "no benchmark exists" gap answered with our own numbers (Phase 23)
+
+### What Worked
+- **Measurement-gate-as-plan-1**: making the JVM-cost spike a blocking go/no-go BEFORE any wiring meant the риskiest unknown died first; the glibc failure (musl JRE on Debian) fired exactly as research predicted and the pre-planned fallback absorbed it without replanning.
+- **Checker-executes-the-plan's-own-commands** matured into standard practice: three phases' checkers ran mock validations, live docker probes (bind-mount semantics, Debian PATH order), and pkg.go.dev cross-checks — catching a host-unresolvable presigned URL (dial-redirect blocker), a phantom fuzz-seed reference, and a TDD-attribute/single-commit contradiction before any executor hit them.
+- **Resume-don't-respawn for dead agents**: the Phase 23 planner died mid-file (API error) and was resumed from its own transcript via SendMessage — finished 23-03 with full context, zero rework.
+- **Fixture engineering as a discipline**: length-preserving pdfaid→pdfXid corruption (keeps marker+magic, breaks one ISO clause) and the e2e-only soffice bind-mount shim let the REAL production path be driven to terminal failure without touching production code or compose.
+
+### What Was Inefficient
+- **A masked merge failure nearly lost work**: `git merge | tail` hid a non-zero exit; the cleanup branch-delete ran anyway, dangling 22-02's commits (recovered by SHA from the executor report). Fix adopted mid-milestone: merge success now guards cleanup explicitly. Never pipe a command whose exit code gates destructive follow-ups.
+- **Zombie executor instances**: two stalled/killed agents later resumed themselves, one stopping the shared compose stack and editing SUMMARY in the MAIN checkout. Their edits were truthful (verified before accepting), but shared-infra mutation by unmanaged resurrections is a real hazard — worth an upstream harness guard.
+- **OrbStack wedged twice more** during heavy builds; the restart runbook (quit → pkill helper → open -a OrbStack → poll docker version) is now proven but the root cause (daemon under parallel build+compose load) remains.
+
+### Patterns Established
+- Go/no-go measurement plans (autonomous:false, budget + formula explicit, GO recorded with raw numbers) for any new runtime class.
+- E2E-only fault injection via single-file read-only bind mounts shadowing PATH-resolved binaries — production compose untouched.
+- Same-commit coupling encoded structurally (one task = one commit) rather than as prose discipline.
+
+### Key Lessons
+1. Measure the scariest unknown first, as its own gated plan — a failed budget then costs a plan, not a phase.
+2. Exit codes gate destructive follow-ups: no pipes on load-bearing commands; cleanup only inside the success branch.
+3. Research predictions (glibc, JVM cost, stream names) are hypotheses — every one that was live-tested either confirmed or usefully failed; none were safe to assume.
+
+### Cost Observations
+- Model mix: planner Opus, checker/executor/verifier/integration Sonnet — unchanged.
+- Sessions: ~1 background session end-to-end for the whole milestone.
+- Notable: 4 phases in ~1 календарный день; вся серия v1.3→v1.5 — три милстоуна за четыре дня с нулём post-merge падений тестов.
+
+---
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -171,6 +210,7 @@
 | v1.2 | ~2 | 4 | First multi-engine milestone; verify → gap-plan → re-verify loop exercised for real (Content-Type parity); first committed live E2E suite |
 | v1.3 | ~4 | 5 | Third engine class; review-fixes-before-verifier discipline adopted; first parallel-session reconciliation (quick-task vs gap-plan) |
 | v1.4 | ~1 | 3 | First live CI on GitHub; unconditional live hard gates institutionalized; plan self-checks empirically validated pre-execution |
+| v1.5 | ~1 | 4 | First measured go/no-go gate; first new dep since v1.0; agent-resume-from-transcript recovery; masked-exit-code merge bug found and fixed |
 
 ### Cumulative Quality
 
@@ -181,6 +221,7 @@
 | v1.2 | 10/10 satisfied | 0 | 4 advisory (WR-02/03/04 + gofmt nit), all documented in 11-REVIEW.md and STATE.md |
 | v1.3 | 14/14 satisfied | 0 | 3 advisory (dead webhook wiring in document/chromium workers, fakeEnqueuer -race, no image E2E), documented in v1.3-MILESTONE-AUDIT.md |
 | v1.4 | 11/11 satisfied | 0 | 4 advisory (CACHED-residual, branch-protection manual step, D-04 invariant, manual acceptance script), documented in v1.4-MILESTONE-AUDIT.md |
+| v1.5 | 12/12 satisfied | 0 | 3 advisory (no MCP-specific CFB live path, amd64 pin, JRE path B size), documented in v1.5-MILESTONE-AUDIT.md |
 
 ### Top Lessons (Verified Across Milestones)
 
@@ -188,3 +229,4 @@
 2. Live, real-infrastructure verification (not just unit tests or narrative trust) is the deciding factor in audit confidence — established in v1.0, worth preserving as milestones grow larger and re-verifying everything live becomes more expensive.
 3. Fix code-review findings that overlap verification criteria before spawning the verifier — learned in v1.2 (paid a gap cycle), applied in v1.3 (two first-pass verifications).
 4. Live hard gates discover bugs planning cannot — confirmed across v1.3 (chromium research corrections) and v1.4 (terminal-Close hang, CI 429 cascade); make them unconditional in every plan that touches infrastructure.
+5. Never let a piped command's masked exit code gate destructive cleanup — v1.5's dangling-commit incident; success-branch-only cleanup is now the standard merge shape.

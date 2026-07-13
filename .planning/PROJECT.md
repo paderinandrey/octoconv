@@ -8,17 +8,11 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current Milestone: v1.5 MCP Access & Document Fidelity
+## Current State (after v1.5, shipped 2026-07-13)
 
-**Goal:** Агенты и внутренние сервисы получают OctoConv как MCP-инструмент и self-service API пресетов, а документный класс добирает строгую достоверность: настоящая ISO-валидация PDF/A и внятное различение «запаролен» vs «устарел».
+**Shipped:** v1.5 MCP Access & Document Fidelity — 4 фазы (20–23), 10 планов, 22 задачи, 71 коммит, ~1 день. Агенты получили OctoConv как MCP-сервер (stdio, 5 инструментов, zero-privilege HTTP-клиент); клиенты — self-service REST пресетов + /v1/formats; документный класс добрал строгость: различённые CFB-422 через собственный fuzz-hardened парсер и настоящая ISO 19005-2b валидация PDF/A через veraPDF с измеренным JVM-бюджетом (p95 4.65s).
 
-**Target features:**
-- MCP-сервер (SEED-003): cmd/mcp-server, stdio-транспорт, тонкая обёртка над HTTP API; convert_file (блокирующий, preset-aware), get_job_status/download_result, list_supported_formats, list_presets; официальный modelcontextprotocol/go-sdk
-- REST CRUD пресетов (PRST-V2-01): /v1/presets под API-ключом — self-service client-scope пресеты; system-scope остаётся за операторским CLI
-- veraPDF-валидация (DOCV3-01): полная ISO 19005 проверка PDF/A-выходов вместо OutputIntent-sanity
-- CFB-различение (DOCV3-02): парсинг CFB-директории — разные 422 для «запаролен» и «legacy»
-
-**Key context:** MCP — новая территория (research first). Первые два кластера строятся на пресетах v1.4; вторые два углубляют document-класс. CI v1.4 гоняет каждый пуш. Прошлое состояние: v1.4 shipped 2026-07-13 (см. Context).
+**Next milestone goals:** не определены — `/gsd:new-milestone`. SEED-004 (k8s+KEDA) — триггер активен. Прочие кандидаты: MCPV2 (HTTP-транспорт), PRAPIV2 (system-scope REST), DOCV3-03, новые классы движков.
 
 ## Requirements
 
@@ -62,14 +56,16 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Именованные пресеты: internal/presets (shadowing client>system в SQL, bump-on-update, no-leak 422), cmd/manage-presets (5 глаголов), preset=<name> в POST /v1/jobs c XOR, re-валидацией хранимых opts и TOCTOU-речеком; provenance в jobs.preset_name/version — Phase 18 (PRST-01..04, live 33/33 ×3)
 - ✓ Хвост v1.3-долга закрыт: мёртвая webhook-обвязка удалена, fakeEnqueuer race-safe, image E2E-тест; бонус — терминальный PGAdvisoryLock.Close (DEFER-17-01) — Phase 17 (DEBT-06..08)
 
+- ✓ REST self-service пресетов (/v1/presets, узкий DTO, no-leak, 409) + /v1/formats (registry-derived) — Phase 20 (PRAPI-01..03, live 42/42 ×3)
+- ✓ MCP-сервер: cmd/mcp-server (stdio, go-sdk v1.6.1 — первая новая зависимость с v1.0), 5 инструментов, блокирующий convert_file с progress, zero-privilege HTTP-клиент с редакцией ключа — Phase 21 (MCP-01..05, live stdio-гейт ×2; SEED-003 implemented)
+- ✓ CFB-различение: собственный bounded-парсер директории (cycle-guard, fuzz 3.5M/0), три различённых 422 — Phase 22 (CFB-01..02)
+- ✓ Настоящая ISO 19005-2b валидация PDF/A: veraPDF в document-worker (Debian-JRE, amd64 pin), terminal fail-closed, замеренный go/no-go (p95 4.65s/10s) — Phase 23 (PDFA-01..02)
+
 ### Active
 
-<!-- Milestone v1.5 (MCP Access & Document Fidelity). -->
+<!-- Пусто — v1.5 закрыт. -->
 
-- [ ] Агент может конвертировать файл одним MCP-вызовом (convert_file, stdio) через существующий API с ключом клиента
-- [ ] Клиент управляет своими пресетами через REST /v1/presets (self-service, client-scope)
-- [ ] PDF/A-выходы проходят полную ISO 19005 (veraPDF) валидацию
-- [ ] CFB-входы получают различённые 422: «запаролен» vs «устаревший формат»
+(нет активных требований — ожидается новый milestone)
 
 ### Out of Scope
 
@@ -92,6 +88,7 @@ OctoConv — внутренний асинхронный сервис конве
 - v1.1-аудит (`v1.1-MILESTONE-AUDIT.md`) прошёл без блокеров и без tech debt (4/4 требования, 5/5 точек интеграции, живые smoke-тесты всех новых механизмов по отдельности и в комбинации против пересобранного docker-стека) — впервые за проект milestone закрылся с нулевым переносом.
 - Code review при исполнении Phase 2 (v1.0) нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
 - **Milestone v1.2 (Document Engine Class) shipped 2026-07-10.** 4 фазы (8–11), 13 планов (вкл. gap-closure 11-04), 71 коммит, +2754 строк Go (без .planning), ~2 дня. Второй класс движков: docx/xlsx/pptx/odt/ods/odp → PDF через LibreOffice headless в отдельном контейнере, live E2E по всем 6 парам. Аудит: 10/10 требований, 10/10 интеграционных связей. Полный отчёт: `.planning/milestones/v1.2-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
+- **Milestone v1.5 (MCP Access & Document Fidelity) shipped 2026-07-13.** 4 фазы (20–23), 10 планов, 71 коммит, +5537/−84 строк (без .planning). Аудит: 12/12, 6/6 интеграции. Первый measured go/no-go гейт (veraPDF JVM). Полный отчёт: `.planning/milestones/v1.5-*`.
 - **Milestone v1.4 (CI, Presets & Debt Cleanup) shipped 2026-07-13.** 3 фазы (17–19), 8 планов, 54 коммита, +2261/−60 строк (без .planning), ~2 дня. Аудит: 11/11 требований, 6/6 интеграции. Репозиторий публичный; CI живой (badge passing). Полный отчёт: `.planning/milestones/v1.4-*`.
 - **Milestone v1.3 (Document Class v2) shipped 2026-07-12.** 5 фаз (12–16), 17 планов (вкл. gap-closure 16-05), 147 коммитов, +4773/−145 строк (без .planning), ~2 дня. Аудит: 14/14 требований, 7/7 интеграционных проверок, 8/8 E2E-потоков. Полный отчёт: `.planning/milestones/v1.3-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
 - Tech debt, перенесённый из v1.3-аудита (advisory): мёртвая webhook-обвязка в `cmd/document-worker`/`cmd/chromium-worker` (WR-02/WR-03 из 16-REVIEW); data race в `fakeEnqueuer` тест-хелпере при full-package `-race`; нет dedicated image E2E-теста; SEED-001 dormant.
@@ -150,4 +147,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-13 after v1.5 milestone start*
+*Last updated: 2026-07-13 after v1.5 milestone*
