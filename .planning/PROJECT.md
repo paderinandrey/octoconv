@@ -8,11 +8,18 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current State (after v1.5, shipped 2026-07-13)
+## Current Milestone: v1.6 Kubernetes & KEDA
 
-**Shipped:** v1.5 MCP Access & Document Fidelity — 4 фазы (20–23), 10 планов, 22 задачи, 71 коммит, ~1 день. Агенты получили OctoConv как MCP-сервер (stdio, 5 инструментов, zero-privilege HTTP-клиент); клиенты — self-service REST пресетов + /v1/formats; документный класс добрал строгость: различённые CFB-422 через собственный fuzz-hardened парсер и настоящая ISO 19005-2b валидация PDF/A через veraPDF с измеренным JVM-бюджетом (p95 4.65s).
+**Goal:** Весь стек OctoConv поднимается в Kubernetes из Helm-чарта, воркеры автоскейлятся KEDA по глубине очередей (0→N→0 под нагрузкой — доказано), MCP получает in-cluster HTTP-эндпоинт, а пресеты — system-scope REST.
 
-**Next milestone goals:** не определены — `/gsd:new-milestone`. SEED-004 (k8s+KEDA) — триггер активен. Прочие кандидаты: MCPV2 (HTTP-транспорт), PRAPIV2 (system-scope REST), DOCV3-03, новые классы движков.
+**Target features:**
+- Helm-чарт + полный стек на OrbStack k8s (SEED-004): Deployments/probes, Secrets/ConfigMaps, migrate/createbucket как Jobs; четыре известные мины переноса закрыты (METRICS_ADDR localhost-bind, host-gateway E2E-трюк, one-shot ordering, compose-DNS в presigned URL)
+- KEDA ScaledObjects per engine-class по существующей Prometheus queue_depth метрике
+- Нагрузочная проверка автоскейла: скейл 0→N→0 с наблюдаемыми критериями
+- MCP streamable HTTP (MCPV2-01): контейнер в кластере, внутренний эндпоинт
+- system-пресеты REST (PRAPIV2-01)
+
+**Key context:** первый инфраструктурный милстоун; research first (KEDA-скейлеры prometheus vs redis, OrbStack k8s специфика — локальные образы без registry, Helm-паттерны, in-cluster E2E адаптация). Прошлое состояние: v1.5 shipped 2026-07-13 (см. Context).
 
 ## Requirements
 
@@ -63,9 +70,12 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Пусто — v1.5 закрыт. -->
+<!-- Milestone v1.6 (Kubernetes & KEDA). -->
 
-(нет активных требований — ожидается новый milestone)
+- [ ] Полный стек разворачивается в k8s одной командой (helm install) и проходит E2E внутри кластера
+- [ ] Каждый engine-class воркер автоскейлится KEDA по глубине своей очереди; 0→N→0 доказано под нагрузкой
+- [ ] MCP доступен как in-cluster HTTP-эндпоинт
+- [ ] system-пресеты управляются через REST (operator-роль)
 
 ### Out of Scope
 
@@ -147,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-13 after v1.5 milestone*
+*Last updated: 2026-07-14 after v1.6 milestone start*
