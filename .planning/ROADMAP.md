@@ -130,7 +130,11 @@ Plans:
   2. An unrecognized or corrupt CFB structure falls through fail-closed to today's generic 422 and never proceeds to conversion.
   3. A crafted CFB with a directory-chain cycle (or truncated header / self-referential sector index / oversized declared count) gets a bounded 422 and never hangs — the parser caps sectors/entries walked and rejects cycles via a visited-set.
   4. The hand-rolled CFB directory parser survives Go native fuzzing (crash-free, bounded) as the phase exit-gate, seeded with the Phase 13 fixtures plus deliberately corrupted variants.
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 22-01-PLAN.md — internal/convert/cfb.go ClassifyCFB bounded directory parser + unit table over real fixtures + FuzzClassifyCFB 30s exit-gate
+- [ ] 22-02-PLAN.md — handleCreateJob three-way ClassifyCFB split (distinct/legacy/unknown 422s) + handler tests + live TestOLECFBRejectionE2E distinct-message gate
 
 ### Phase 23: veraPDF ISO 19005 Validation
 **Goal**: PDF/A-2b outputs are validated for real ISO 19005 conformance, replacing the v1.3 OutputIntent heuristic, so a non-compliant export fails the job terminally with the veraPDF reason recorded.
@@ -169,7 +173,7 @@ Plans:
 | 19. CI Pipeline | v1.4 | 2/2 | Complete | 2026-07-13 |
 | 20. Presets REST CRUD & Format Discovery | v1.5 | 0/? | Not started | - |
 | 21. MCP Server | v1.5 | 0/? | Not started | - |
-| 22. CFB Encrypted-vs-Legacy Classification | v1.5 | 0/? | Not started | - |
+| 22. CFB Encrypted-vs-Legacy Classification | v1.5 | 0/2 | Planned | - |
 | 23. veraPDF ISO 19005 Validation | v1.5 | 0/? | Not started | - |
 
 ---
