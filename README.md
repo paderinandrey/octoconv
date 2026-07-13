@@ -241,6 +241,58 @@ npm install
 npm run dev   # http://localhost:5173, proxies /v1 and /healthz to :8090
 ```
 
+## MCP server
+
+`cmd/mcp-server` exposes OctoConv to agents (Claude Code, Claude Desktop, or any MCP
+client) as a stdio [Model Context Protocol](https://modelcontextprotocol.io) server. It is a
+zero-privilege pure HTTP client of the public API — it holds only a client API key and
+filesystem access to its own output directory, never a database, S3, or Redis credential.
+
+It exposes five tools:
+
+| Tool | Purpose |
+|------|---------|
+| `convert_file` | Upload a local file, block until the conversion finishes, download the result |
+| `get_job_status` | Check a job's status without blocking |
+| `download_result` | Download a `done` job's result on demand |
+| `list_supported_formats` | List the (source, target) format pairs each engine supports |
+| `list_presets` | List named conversion presets available to the client |
+
+Build it like any other binary:
+
+```bash
+go build -o octoconv-mcp ./cmd/mcp-server
+```
+
+Configuration is environment-variable based:
+
+| Variable | Purpose |
+|----------|---------|
+| `OCTOCONV_BASE_URL` | base URL of a running OctoConv API (required) |
+| `OCTOCONV_API_KEY` | client API key, as issued by `manage-clients` (required) |
+| `OCTOCONV_OUTPUT_DIR` | where downloaded results are written (default `$TMPDIR/octoconv-mcp`) |
+| `OCTOCONV_CONVERT_TIMEOUT` | `convert_file`'s overall blocking deadline (default `10m`) |
+| `OCTOCONV_POLL_INTERVAL` | how often `convert_file` polls job status (default `1s`) |
+| `OCTOCONV_S3_DIAL_ADDR` | operator-only: redial a different host:port for presigned downloads (e.g. when running the binary on the Docker host against a compose-internal MinIO); normally left empty |
+
+Point a client at the built binary. For Claude Code / Claude Desktop, add an entry to the
+MCP servers config:
+
+```json
+{
+  "mcpServers": {
+    "octoconv": {
+      "command": "/path/to/octoconv-mcp",
+      "args": [],
+      "env": {
+        "OCTOCONV_BASE_URL": "http://localhost:8090",
+        "OCTOCONV_API_KEY": "<raw-key-from-manage-clients>"
+      }
+    }
+  }
+}
+```
+
 ## Roadmap
 
 OctoConv is built and shipped in small, audited milestones — each one closes with a live
