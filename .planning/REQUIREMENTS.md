@@ -28,8 +28,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### veraPDF Validation
 
-- [ ] **PDFA-01**: PDF/A-2b выходы проходят полную ISO 19005 валидацию (veraPDF) в document-worker; non-compliant экспорт фейлится terminally (прецедент OutputIntent-проверки v1.3)
-- [ ] **PDFA-02**: veraPDF упакован в Dockerfile.document-worker (multi-stage COPY из verapdf/cli, glibc-совместимость проверена живьём), вызывается через hardened exec (`runCommand`) со своим таймаутом; terminal-error signatures добавлены same-commit (D-04 дисциплина)
+- [x] **PDFA-01**: PDF/A-2b выходы проходят полную ISO 19005 валидацию (veraPDF) в document-worker; non-compliant экспорт фейлится terminally (прецедент OutputIntent-проверки v1.3)
+- [x] **PDFA-02**: veraPDF упакован в Dockerfile.document-worker (multi-stage COPY из verapdf/cli, glibc-совместимость проверена живьём), вызывается через hardened exec (`runCommand`) со своим таймаутом; terminal-error signatures добавлены same-commit (D-04 дисциплина)
 
 ## v2 Requirements
 
@@ -69,8 +69,8 @@ Deferred to future release.
 | MCP-05 | Phase 21 | Complete |
 | CFB-01 | Phase 22 | Complete |
 | CFB-02 | Phase 22 | Complete |
-| PDFA-01 | Phase 23 | Pending |
-| PDFA-02 | Phase 23 | Pending |
+| PDFA-01 | Phase 23 | Complete |
+| PDFA-02 | Phase 23 | Complete |
 
 **Coverage:**
 - v1 requirements: 12 total
