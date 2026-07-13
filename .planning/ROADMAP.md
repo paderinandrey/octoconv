@@ -116,9 +116,9 @@ Plans:
   3. During a long-running conversion the internal poll loop emits a progress notification each tick and enforces its own max-duration guard, so a stuck job never blocks past the ~30-min stdio idle window.
   4. The API key never appears in any tool result or error text; agent-supplied paths are canonicalized and contained (no traversal); stdout carries only JSON-RPC framing (logs go to stderr); upstream API errors map to `isError` content results, not protocol errors.
 **Plans**: 3 plans
-- [ ] 21-01-PLAN.md — internal/mcpserver: MCP SDK dependency + config + HTTP API client (redaction, path containment) + httptest-fake unit tests
-- [ ] 21-02-PLAN.md — Five MCP tools (convert_file blocking+progress, get_job_status, download_result, list_supported_formats, list_presets) + server wiring + tool unit tests
-- [ ] 21-03-PLAN.md — cmd/mcp-server thin binary (stderr logging, fail-fast) + README section + live stdio JSON-RPC hard gate
+- [x] 21-01-PLAN.md — internal/mcpserver: MCP SDK dependency + config + HTTP API client (redaction, path containment) + httptest-fake unit tests
+- [x] 21-02-PLAN.md — Five MCP tools (convert_file blocking+progress, get_job_status, download_result, list_supported_formats, list_presets) + server wiring + tool unit tests
+- [x] 21-03-PLAN.md — cmd/mcp-server thin binary (stderr logging, fail-fast) + README section + live stdio JSON-RPC hard gate
 **Live acceptance**: real MCP client session (Claude Code) driving the tools against the running docker-compose stack — not a mocked transport. This is "new territory" per PROJECT.md; re-verify the pinned `go-sdk` (≥v1.6.1) tool-registration API surface and progress/keepalive mechanics live at planning time.
 
 ### Phase 22: CFB Encrypted-vs-Legacy Classification

@@ -1,5 +1,6 @@
 ---
-status: dormant
+status: implemented
+implemented_in: "v1.5 Phase 21 (MCP-01..05) — cmd/mcp-server + internal/mcpserver, live stdio gate passed twice, verified 2026-07-13"
 planted_during: "v1.4 milestone (CI, Presets & Debt Cleanup) planning session, 2026-07-12"
 trigger_when: "Planning the milestone after v1.4 ships — presets (Phase 18) are the natural prerequisite: an MCP convert tool is dramatically cleaner when it can reference named presets instead of exposing the raw opts allowlist"
 ---

@@ -9,11 +9,11 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### MCP Server
 
-- [ ] **MCP-01**: Агент конвертирует файл одним блокирующим вызовом `convert_file(path, target_format|preset, opts?)` — stdio-сервер (`cmd/mcp-server`, официальный modelcontextprotocol/go-sdk ≥v1.6.1), API-ключ из env, внутренний поллинг с progress-notification на каждом тике (30-мин stdio idle-окно)
-- [ ] **MCP-02**: Результат конвертации — presigned URL + путь локально скачанного файла; байты файла никогда не инлайнятся в tool result
-- [ ] **MCP-03**: `get_job_status(job_id)` / `download_result(job_id)` доступны для неблокирующего сценария
-- [ ] **MCP-04**: `list_supported_formats` и `list_presets` (merged client+system view) доступны как tools
-- [ ] **MCP-05**: Безопасность MCP-поверхности: API-ключ не появляется в tool results/error text; agent-supplied пути канонизируются (без traversal); stdout несёт только JSON-RPC (лог в stderr); ошибки API мапятся в `isError`-results, не в protocol errors
+- [x] **MCP-01**: Агент конвертирует файл одним блокирующим вызовом `convert_file(path, target_format|preset, opts?)` — stdio-сервер (`cmd/mcp-server`, официальный modelcontextprotocol/go-sdk ≥v1.6.1), API-ключ из env, внутренний поллинг с progress-notification на каждом тике (30-мин stdio idle-окно)
+- [x] **MCP-02**: Результат конвертации — presigned URL + путь локально скачанного файла; байты файла никогда не инлайнятся в tool result
+- [x] **MCP-03**: `get_job_status(job_id)` / `download_result(job_id)` доступны для неблокирующего сценария
+- [x] **MCP-04**: `list_supported_formats` и `list_presets` (merged client+system view) доступны как tools
+- [x] **MCP-05**: Безопасность MCP-поверхности: API-ключ не появляется в tool results/error text; agent-supplied пути канонизируются (без traversal); stdout несёт только JSON-RPC (лог в stderr); ошибки API мапятся в `isError`-results, не в protocol errors
 
 ### Presets REST API
 
@@ -62,11 +62,11 @@ Deferred to future release.
 | PRAPI-01 | Phase 20 | Complete |
 | PRAPI-02 | Phase 20 | Complete |
 | PRAPI-03 | Phase 20 | Complete |
-| MCP-01 | Phase 21 | Pending |
-| MCP-02 | Phase 21 | Pending |
-| MCP-03 | Phase 21 | Pending |
-| MCP-04 | Phase 21 | Pending |
-| MCP-05 | Phase 21 | Pending |
+| MCP-01 | Phase 21 | Complete |
+| MCP-02 | Phase 21 | Complete |
+| MCP-03 | Phase 21 | Complete |
+| MCP-04 | Phase 21 | Complete |
+| MCP-05 | Phase 21 | Complete |
 | CFB-01 | Phase 22 | Pending |
 | CFB-02 | Phase 22 | Pending |
 | PDFA-01 | Phase 23 | Pending |
