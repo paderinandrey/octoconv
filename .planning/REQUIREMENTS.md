@@ -21,8 +21,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### MCP HTTP
 
-- [ ] **MCPH-01**: `cmd/mcp-http` — streamable-HTTP MCP-эндпоинт (go-sdk `NewStreamableHTTPHandler`, уже в запиненном v1.6.1): per-request caller-key pass-through (под НЕ хранит ключей — zero-privilege сохранён; общий ключ сломал бы per-client лимиты и preset-scoping), те же 5 инструментов из transport-agnostic internal/mcpserver; контейнер + Service в чарте
-- [ ] **MCPH-02**: Результат `convert_file` в HTTP-режиме remote-пригоден: `local_path`-контракт решён (опции: omit в HTTP-режиме / presigned-only / download-proxy tool — выбор фиксируется на планировании фазы как Key Decision)
+- [x] **MCPH-01**: `cmd/mcp-http` — streamable-HTTP MCP-эндпоинт (go-sdk `NewStreamableHTTPHandler`, уже в запиненном v1.6.1): per-request caller-key pass-through (под НЕ хранит ключей — zero-privilege сохранён; общий ключ сломал бы per-client лимиты и preset-scoping), те же 5 инструментов из transport-agnostic internal/mcpserver; контейнер + Service в чарте
+- [x] **MCPH-02**: Результат `convert_file` в HTTP-режиме remote-пригоден: `local_path`-контракт решён (опции: omit в HTTP-режиме / presigned-only / download-proxy tool — выбор фиксируется на планировании фазы как Key Decision)
 
 ### Operator REST
 
@@ -58,8 +58,8 @@ Requirements for this milestone. Each maps to roadmap phases.
 | KEDA-01 | Phase 27 | Pending |
 | KEDA-02 | Phase 27 | Pending |
 | KEDA-03 | Phase 28 | Pending |
-| MCPH-01 | Phase 25 | Pending |
-| MCPH-02 | Phase 25 | Pending |
+| MCPH-01 | Phase 25 | Complete |
+| MCPH-02 | Phase 25 | Complete |
 | OPER-01 | Phase 26 | Pending |
 
 **Coverage:**
