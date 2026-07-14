@@ -1,0 +1,24 @@
+{{/*
+Service metadata.name stays the literal "mcp-http" (not fullname-prefixed)
+so plan 03 can `kubectl port-forward svc/mcp-http` and in-cluster clients
+can reach http://mcp-http.octoconv.svc.cluster.local:8070 — same
+literal-name convention as service-api.yaml's "api" (D-06). ClusterIP
+only: no ingress/LoadBalancer this phase.
+*/}}
+{{- if .Values.mcpHttp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-http
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-http
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "octoconv.selectorLabels" (dict "component" "mcp-http" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8070
+      targetPort: http
+{{- end }}

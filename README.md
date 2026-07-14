@@ -293,6 +293,37 @@ MCP servers config:
 }
 ```
 
+## MCP over HTTP (in-cluster)
+
+`cmd/mcp-http` exposes the same five tools as `cmd/mcp-server`, but over
+streamable HTTP instead of stdio, for deployment as a cluster service
+(`deploy/chart/octoconv/templates/deployment-mcp-http.yaml`, gated by
+`mcpHttp.enabled`). Key differences from the stdio binary:
+
+- **Transport**: [streamable HTTP](https://modelcontextprotocol.io) on `MCP_HTTP_ADDR`
+  (default `:8070`), via the go-sdk's `mcp.NewStreamableHTTPHandler`.
+- **Auth is per-request, not per-process**: the pod holds no API key of its own
+  (zero-privilege, D-06). Every request must carry
+  `Authorization: ApiKey <key>`; the handler parses it once, rejects
+  missing/malformed headers with `401` before any MCP JSON-RPC code runs, and
+  builds an isolated per-request client bound to that caller's own key. A
+  session-key binding rejects (`403`) any request whose `Mcp-Session-Id`
+  doesn't match the key that created it.
+- **Results are presigned-only**: HTTP mode never writes to the pod's
+  filesystem, so `convert_file`/`download_result` omit `local_path` and
+  return `presigned_url` (+ expiry) instead (D-04).
+- **Config is `OCTOCONV_BASE_URL` + `MCP_HTTP_ADDR` only** — no
+  `OCTOCONV_API_KEY`, no `OCTOCONV_OUTPUT_DIR`. `OCTOCONV_BASE_URL` points at
+  the in-cluster `api` Service (`http://api.<namespace>.svc.cluster.local:8090`).
+- **Network exposure**: the `mcp-http` Service is `ClusterIP` only (no
+  ingress/LoadBalancer), fronted by a dedicated NetworkPolicy that
+  default-denies ingress except `:8070` from within the release namespace.
+  Reach it from outside the cluster with:
+
+  ```bash
+  kubectl -n octoconv port-forward svc/mcp-http 8070:8070
+  ```
+
 ## Roadmap
 
 OctoConv is built and shipped in small, audited milestones — each one closes with a live

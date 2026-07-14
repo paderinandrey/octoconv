@@ -75,6 +75,20 @@ asynqmon:
     repository: "hibiken/asynqmon"
     tag: "0.7.2"
 
+# mcp-http (Phase 25, MCPH-01): streamable-HTTP MCP endpoint. Key-free env —
+# only OCTOCONV_BASE_URL + MCP_HTTP_ADDR (D-06); the pod never reads an API
+# key or DB/S3 secret. Default true so `helm install` brings it up alongside
+# the rest of the app tier (D-05).
+mcpHttp:
+  enabled: true
+  image:
+    repository: "octoconv-mcp-http"
+  replicas: 1
+  addr: ":8070"
+  # FQDN, same convention as s3.endpoint above — must resolve from the
+  # mcp-http pod (D-06).
+  baseURL: "http://api.octoconv.svc.cluster.local:8090"
+
 # Stateful backbone — hand-rolled (D-02), same pinned images as compose.
 postgres:
   image: "postgres:18"
