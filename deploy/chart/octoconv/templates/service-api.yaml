@@ -1,0 +1,22 @@
+{{/*
+Service metadata.name stays the literal "api" (not fullname-prefixed) so
+in-cluster clients (including plan 03's E2E Job) can reach
+http://api.octoconv.svc.cluster.local:8090 — same FQDN convention as
+postgres/redis/minio (D-06). ClusterIP only: no ingress/LoadBalancer this
+phase; OrbStack routes cluster.local from the host per research.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "octoconv.selectorLabels" (dict "component" "api" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090

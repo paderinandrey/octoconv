@@ -1,0 +1,57 @@
+{{/*
+D-04 landmine closure — ships atomically with the METRICS_ADDR=0.0.0.0:9090
+bind in the ConfigMap (same plan, Pitfall 4). Every app pod now binds
+metrics on all interfaces (compose bound 127.0.0.1 only, per-container
+loopback isolation that no longer exists once each binary runs in its own
+pod); this Ingress-only NetworkPolicy is the compensating control.
+
+BLOCKER-FIXED SELECTOR: podSelector matches EXACTLY octoconv.io/tier: app
+and NOTHING else. Do NOT select on app.kubernetes.io/part-of: octoconv —
+postgres/redis/minio also carry part-of (see templates/postgres.yaml /
+minio.yaml / redis.yaml tier-label boundary notes), and matching it here
+would apply this policy to them too, black-holing 5432/6379/9000.
+
+Ingress rules:
+  (a) :9090 (metrics) — allowed ONLY from a "monitoring" namespace. Nothing
+      in this cluster carries that namespace label yet (Prometheus lands in
+      Phase 27), so in-cluster peers cannot currently scrape :9090 — this is
+      the intended in-cluster replacement for the old 127.0.0.1 boundary.
+  (b) :8090 (api http) — allowed from the whole octoconv namespace, so
+      plan 03's in-cluster E2E Job and any other client pod can reach api.
+      Without this rule, attaching an Ingress policy to api's pod would
+      black-hole :8090 for every in-namespace caller (default-deny once any
+      Ingress policy selects a pod).
+
+NOTE: kubelet health-probe traffic (readiness/liveness) is node-local and
+sourced from outside any Pod/Namespace selector this policy can express —
+it is NOT blocked by NetworkPolicy (kube-proxy/kubelet probes bypass the
+CNI's pod-to-pod policy enforcement in standard implementations). If
+OrbStack's CNI is ever found to enforce policy against node-origin probes,
+a follow-up allow-from-node rule would be needed — verify in plan 03's live
+gate.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: octoconv-app-metrics
+spec:
+  podSelector:
+    matchLabels:
+      octoconv.io/tier: app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+      ports:
+        - protocol: TCP
+          port: 8090

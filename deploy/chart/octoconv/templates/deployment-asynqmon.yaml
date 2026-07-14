@@ -1,0 +1,45 @@
+{{/*
+asynqmon — read-only asynq queue-inspection dashboard (OBS-03), gated off
+by default (.Values.asynqmon.enabled). Compose bound it to 127.0.0.1 only
+with no auth layer (internal-only trust model, D-18/T-04-14); k8s has no
+loopback equivalent once it's a Service, so networkpolicy-asynqmon.yaml
+denies all ingress except an ops placeholder namespace (Pitfall 4 applies
+identically to this UI).
+
+Deliberately does NOT carry octoconv.io/tier: app — it is an ops UI, not an
+engine worker, and must not fall under the metrics NetworkPolicy's :9090
+allowance (it has its own, stricter policy instead).
+*/}}
+{{- if .Values.asynqmon.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asynqmon
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: asynqmon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "asynqmon" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "asynqmon" "root" $) | nindent 8 }}
+    spec:
+      containers:
+        - name: asynqmon
+          image: "{{ .Values.asynqmon.image.repository }}:{{ .Values.asynqmon.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: octoconv-secret
+                  key: REDIS_ADDR
+          ports:
+            - name: http
+              containerPort: 8080
+{{- end }}
