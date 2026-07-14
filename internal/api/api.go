@@ -95,6 +95,12 @@ type Server struct {
 	presignTTL                   time.Duration
 	ipRateRPM                    int
 	clientRateRPM                int
+	// operators is the OPERATOR_CLIENT_IDS membership set (D-01, Phase 26):
+	// callers whose resolved client.ID is a key here may reach the
+	// /v1/system/presets subtree via requireOperator. Never nil after
+	// NewServer (an unset/empty env var yields an empty, non-nil set --
+	// fail-closed, T-26-03).
+	operators map[uuid.UUID]struct{}
 }
 
 // Config configures a Server.
@@ -105,6 +111,11 @@ type Config struct {
 	PresignTTL                   time.Duration
 	IPRateLimitRPM               int
 	ClientRateLimitRPM           int
+	// OperatorClientIDs is the parsed OPERATOR_CLIENT_IDS allowlist (D-01).
+	// A nil or empty map means zero operators (fail-closed) -- every caller,
+	// including an otherwise-valid resolved client, is denied the
+	// /v1/system/presets subtree.
+	OperatorClientIDs map[uuid.UUID]struct{}
 }
 
 // NewServer builds an API server. resolver authenticates every /v1 request
@@ -133,6 +144,10 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, p
 	if cfg.ClientRateLimitRPM == 0 {
 		cfg.ClientRateLimitRPM = 120 // per-client, conservative for internal batch + interactive usage
 	}
+	operators := cfg.OperatorClientIDs
+	if operators == nil {
+		operators = map[uuid.UUID]struct{}{}
+	}
 	return &Server{
 		repo:                         repo,
 		storage:                      storage,
@@ -147,5 +162,6 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, p
 		presignTTL:                   cfg.PresignTTL,
 		ipRateRPM:                    cfg.IPRateLimitRPM,
 		clientRateRPM:                cfg.ClientRateLimitRPM,
+		operators:                    operators,
 	}
 }
