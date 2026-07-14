@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,7 +22,10 @@ func NewRepo(pool *pgxpool.Pool) *Repo {
 	return &Repo{pool: pool}
 }
 
-// CreateParams describes a brand-new preset (always inserted at version 1).
+// CreateParams describes a new preset for (scope, client_id, name). Create
+// inserts it at MAX(version)+1 across ALL rows (active and inactive) for that
+// tuple -- a fresh name starts at version 1, and a previously-deactivated
+// name is revived at the next version rather than reusing version 1.
 // Operation is not exposed here: Create always writes OperationConvert
 // (D-05 — this phase only activates the 'convert' operation).
 type CreateParams struct {
@@ -69,13 +73,19 @@ func (r *Repo) Resolve(ctx context.Context, clientID uuid.UUID, name string) (*P
 	return &p, nil
 }
 
-// Create inserts a brand-new preset at version 1, operation defaulting to
-// OperationConvert (D-05). It returns the generated id and version. The
-// presets_scope_owner_chk DDL constraint enforces the scope/client_id
-// invariant (system->NULL, user->non-NULL) rather than Go re-deriving it
-// (T-18-03). If an active version of the same (scope, client_id, name)
-// already exists, Create returns a plain error instructing the operator to
-// use Update instead (versions are immutable, D-04).
+// Create inserts a preset at MAX(version)+1 across ALL rows (active and
+// inactive) for (scope, client_id, name), operation defaulting to
+// OperationConvert (D-05). A fresh name starts at version 1; a previously
+// deactivated name is revived at the next version rather than colliding on
+// the partial unique index, which covers inactive rows too (CR-01). It
+// returns the generated id and version. The presets_scope_owner_chk DDL
+// constraint enforces the scope/client_id invariant (system->NULL,
+// user->non-NULL) rather than Go re-deriving it (T-18-03). If an ACTIVE
+// version of the same (scope, client_id, name) already exists, Create
+// returns a plain error instructing the operator to use Update instead
+// (versions are immutable, D-04). A lost unique-index race (23505) is also
+// mapped to ErrAlreadyExists as a backstop, since the version pre-check and
+// insert are not serialized (T-26-03).
 func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, int, error) {
 	optsJSON := []byte("{}")
 	if p.Options != nil {
@@ -98,13 +108,22 @@ func (r *Repo) Create(ctx context.Context, p CreateParams) (uuid.UUID, int, erro
 		return uuid.Nil, 0, fmt.Errorf("active preset %q already exists for scope %q; use Update instead: %w", p.Name, p.Scope, ErrAlreadyExists)
 	}
 
-	const version = 1
 	var id uuid.UUID
-	if err := r.pool.QueryRow(ctx,
+	var version int
+	err := r.pool.QueryRow(ctx,
 		`INSERT INTO presets (name, version, scope, client_id, operation, target_format, options, description)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		p.Name, version, p.Scope, p.ClientID, OperationConvert, p.TargetFormat, optsJSON, p.Description,
-	).Scan(&id); err != nil {
+		 SELECT $1, COALESCE(MAX(p.version), 0) + 1, $2, $3, $4, $5, $6, $7
+		 FROM presets p
+		 WHERE p.scope = $2 AND p.name = $1
+		   AND (p.client_id = $3 OR ($3::uuid IS NULL AND p.client_id IS NULL))
+		 RETURNING id, version`,
+		p.Name, p.Scope, p.ClientID, OperationConvert, p.TargetFormat, optsJSON, p.Description,
+	).Scan(&id, &version)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return uuid.Nil, 0, ErrAlreadyExists
+		}
 		return uuid.Nil, 0, fmt.Errorf("insert preset: %w", err)
 	}
 	return id, version, nil
