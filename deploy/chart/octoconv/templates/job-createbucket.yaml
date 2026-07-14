@@ -1,0 +1,69 @@
+{{/*
+createbucket — post-install/post-upgrade Helm hook Job (D-05). Mirrors
+compose's one-shot createbucket service exactly: alias the local MinIO,
+then `mc mb --ignore-existing` (idempotent — safe to re-run on every
+upgrade).
+
+WHY post-* NOT pre-*: the `minio` Service is a main-release resource that
+does not exist yet during the pre-install phase — a pre-install Job (or its
+wait-for-minio initContainer) could never resolve/reach it. Stateful deps
+(postgres/redis/minio) stay normal main resources, never hook-deleted, so
+upgrades remain data-safe.
+
+hook-delete-policy before-hook-creation,hook-succeeded is REQUIRED: without
+it, the previous release's completed Job collides by name and `helm
+upgrade` fails outright (verified by plan 03's upgrade-idempotence gate).
+
+NO migrate Job here or anywhere in this chart — schema migration is
+handled exclusively by cmd/api's own unconditional startup db.Migrate call
+(D-05 REFINEMENT, see 24-02-PLAN.md). Adding a second, unlocked migrate
+path would race the api replica's migration on the same postgres-readiness
+instant.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: octoconv-createbucket
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: createbucket
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        app.kubernetes.io/component: createbucket
+    spec:
+      restartPolicy: Never
+      # wait-for-minio: bounded poll on MinIO readiness using the same
+      # pinned mc image as the main container (no extra image reference
+      # needed) — `mc ready` fails fast until MinIO answers, so this loop
+      # blocks the main container from racing an unready MinIO.
+      initContainers:
+        - name: wait-for-minio
+          image: {{ .Values.minio.mcImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >
+              until mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null 2>&1 && mc ready local >/dev/null 2>&1;
+              do echo "waiting for minio..."; sleep 2; done
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+      containers:
+        - name: createbucket
+          image: {{ .Values.minio.mcImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - >
+              mc alias set local http://minio:9000 "$S3_ACCESS_KEY" "$S3_SECRET_KEY" &&
+              mc mb --ignore-existing "local/$S3_BUCKET"
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
