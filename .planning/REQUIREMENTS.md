@@ -26,7 +26,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Operator REST
 
-- [ ] **OPER-01**: system-scope пресеты управляются через REST клиентами из `OPERATOR_CLIENT_IDS` env-allowlist (env-only config, ноль миграций); для не-операторов system-write — 404-no-leak (конвенция проекта с Phase 1)
+- [x] **OPER-01**: system-scope пресеты управляются через REST клиентами из `OPERATOR_CLIENT_IDS` env-allowlist (env-only config, ноль миграций); для не-операторов system-write — 404-no-leak (конвенция проекта с Phase 1)
 
 ## v2 Requirements
 
@@ -60,7 +60,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 | KEDA-03 | Phase 28 | Pending |
 | MCPH-01 | Phase 25 | Complete |
 | MCPH-02 | Phase 25 | Complete |
-| OPER-01 | Phase 26 | Pending |
+| OPER-01 | Phase 26 | Complete |
 
 **Coverage:**
 - v1 requirements: 9 total

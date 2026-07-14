@@ -210,7 +210,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 23. veraPDF ISO 19005 Validation | v1.5 | 3/3 | Complete | 2026-07-13 |
 | 24. Helm Chart Core & Landmine Closure | v1.6 | 0/? | Not started | - |
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
-| 26. Operator System-Presets REST | v1.6 | 2/2 | Complete   | 2026-07-14 |
+| 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 0/? | Not started | - |
 | 28. Autoscale Load-Proof | v1.6 | 0/? | Not started | - |
 
