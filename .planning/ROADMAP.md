@@ -148,7 +148,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   3. The operator gate is env-only (`OPERATOR_CLIENT_IDS` allowlist parsed at API startup) with zero migrations and no second parallel auth system.
 **Plans**: 2 plans
   - [x] 26-01-PLAN.md — Operator-only /v1/system/presets REST surface + OPERATOR_CLIENT_IDS gate
-  - [ ] 26-02-PLAN.md — Gap closure (CR-01): repo.Create version-bump + 23505→ErrAlreadyExists so deactivate→recreate works
+  - [x] 26-02-PLAN.md — Gap closure (CR-01): repo.Create version-bump + 23505→ErrAlreadyExists so deactivate→recreate works
 **Notes**:
   - Standard pattern — skip research-phase. Additive REST handlers + one `RequireOperator` middleware, not a domain change.
   - Key Decision (already resolved by research, record at planning): `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak chosen over a new `is_operator` column + 403, matching the codebase's env-only-config constraint and its 404-never-403 convention. Trade-off accepted: changing the operator set requires an API restart, and there is no per-operator audit trail beyond added logging — the `is_operator` column is documented as a future option (K8SV2-03) to revisit if redeploy-free management or per-operator audit becomes a real requirement.
@@ -210,7 +210,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 23. veraPDF ISO 19005 Validation | v1.5 | 3/3 | Complete | 2026-07-13 |
 | 24. Helm Chart Core & Landmine Closure | v1.6 | 0/? | Not started | - |
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
-| 26. Operator System-Presets REST | v1.6 | 1/1 | Complete   | 2026-07-14 |
+| 26. Operator System-Presets REST | v1.6 | 2/2 | Complete   | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 0/? | Not started | - |
 | 28. Autoscale Load-Proof | v1.6 | 0/? | Not started | - |
 
