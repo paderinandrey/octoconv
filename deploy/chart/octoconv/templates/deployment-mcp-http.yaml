@@ -1,0 +1,63 @@
+{{/*
+mcp-http Deployment (Phase 25, MCPH-01) — streamable-HTTP MCP endpoint,
+gated by mcpHttp.enabled (D-05). Single replica: this is a stateless
+request/response service (D-02 verdict: Stateless mode works), so there is
+no migration-race or session-affinity reason to run more than one.
+
+NO octoconv.io/tier: app label — this pod exposes no /metrics this plan
+(D-05 makes metrics optional/nice-to-have), so it must stay OUT of the
+metrics NetworkPolicy's podSelector (see _helpers.tpl tier-label boundary
+note). It gets its own dedicated networkpolicy-mcp-http.yaml instead.
+
+NO octoconv.commonEnv — that helper injects the full DB/S3/secret env
+surface via envFrom. This pod holds no key of its own (D-03/D-06): the
+explicit env: block below is the ONLY env it receives.
+*/}}
+{{- if .Values.mcpHttp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-http
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp-http
+spec:
+  replicas: {{ .Values.mcpHttp.replicas }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "mcp-http" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "mcp-http" "root" $) | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: mcp-http
+          image: "{{ .Values.mcpHttp.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: OCTOCONV_BASE_URL
+              value: {{ .Values.mcpHttp.baseURL | quote }}
+            - name: MCP_HTTP_ADDR
+              value: {{ .Values.mcpHttp.addr | quote }}
+          ports:
+            - name: http
+              containerPort: 8070
+          # mcp-http serves an unauthenticated /healthz on MCP_HTTP_ADDR
+          # (:8070, cmd/mcp-http/main.go) — same tight-readiness /
+          # tolerant-liveness split as the api Deployment.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8070
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8070
+            periodSeconds: 10
+            failureThreshold: 6
+{{- end }}

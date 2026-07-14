@@ -1,0 +1,40 @@
+{{/*
+ROADMAP SC4 — mcp-http must ship with its Service AND its dedicated
+NetworkPolicy. Mirrors networkpolicy-asynqmon.yaml's per-service shape:
+default-deny ALL ingress to the mcp-http pod except TCP :8070 from within
+the release namespace (same in-namespace allow shape as
+networkpolicy-metrics.yaml's :8090 rule for api) — this lets in-cluster
+callers and plan 03's `kubectl port-forward svc/mcp-http` reach the
+endpoint while everything else (all other ports, all other namespaces)
+stays denied.
+
+NOTE (Phase 24 precedent, 24-03 SC4 / networkpolicy-metrics NOTE): OrbStack
+ships no NetworkPolicy controller, so this policy is environmentally
+UNENFORCED on the local dev cluster — the residual is environmental, not a
+design gap; the manifest is still the correct object to ship and IS
+enforced on any conformant CNI. Per-request `Authorization: ApiKey`
+pass-through (Plan 01, D-03) remains the always-on runtime control
+regardless of NetworkPolicy enforcement.
+*/}}
+{{- if .Values.mcpHttp.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: octoconv-mcp-http
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "mcp-http" "root" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+      ports:
+        - protocol: TCP
+          port: 8070
+{{- end }}
