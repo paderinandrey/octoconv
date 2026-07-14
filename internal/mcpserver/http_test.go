@@ -7,9 +7,9 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"encoding/json"
 	"os"
 	"strings"
 	"sync"

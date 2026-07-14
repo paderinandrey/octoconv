@@ -31,13 +31,21 @@ type ConvertFileInput struct {
 	Opts         map[string]any `json:"opts,omitempty" jsonschema:"engine-specific conversion options; only meaningful alongside target_format, not preset"`
 }
 
+// remoteExpiryNote is the expiry warning attached to remote-mode results
+// (D-04): the presigned URL is the ONLY artifact the caller gets, so it must
+// know the URL is short-lived and how to obtain a fresh one.
+const remoteExpiryNote = "the presigned URL is short-lived; download it promptly, or call download_result with the job_id for a fresh URL"
+
 // ConvertFileOutput is the result of a successful convert_file call. It
-// never carries file bytes (D-07): only a presigned URL and a local path.
+// never carries file bytes (D-07): only a presigned URL and (in local mode)
+// a local path. In remote mode (D-04) local_path is omitted entirely and an
+// expiry note accompanies the presigned URL.
 type ConvertFileOutput struct {
 	JobID        string `json:"job_id" jsonschema:"the id of the created conversion job"`
 	PresignedURL string `json:"presigned_url" jsonschema:"short-lived presigned URL for downloading the converted file directly"`
-	LocalPath    string `json:"local_path" jsonschema:"local filesystem path (inside the server's OUTPUT_DIR) where the converted file was already downloaded"`
+	LocalPath    string `json:"local_path,omitempty" jsonschema:"local filesystem path (inside the server's OUTPUT_DIR) where the converted file was already downloaded; absent in remote (HTTP) mode"`
 	TargetFormat string `json:"target_format" jsonschema:"the target_format that was requested; empty when a preset determined the output format instead"`
+	ExpiryNote   string `json:"expiry_note,omitempty" jsonschema:"remote mode only: reminder that the presigned URL expires and how to get a fresh one"`
 }
 
 // convertFileHandler builds the convert_file tool handler bound to c. It
@@ -69,12 +77,19 @@ func convertFileHandler(c *Client) mcp.ToolHandlerFor[ConvertFileInput, ConvertF
 			return nil, ConvertFileOutput{}, err
 		}
 
-		return nil, ConvertFileOutput{
+		out := ConvertFileOutput{
 			JobID:        result.JobID,
 			PresignedURL: result.DownloadURL,
 			LocalPath:    result.LocalPath,
 			TargetFormat: in.TargetFormat,
-		}, nil
+		}
+		// Remote mode (D-04): LocalPath is already empty (ConvertBlocking
+		// skipped the download); attach the expiry note so the agent knows
+		// the URL is its only, short-lived handle on the result.
+		if c.resultMode == ResultRemote {
+			out.ExpiryNote = remoteExpiryNote
+		}
+		return nil, out, nil
 	}
 }
 
@@ -148,10 +163,12 @@ type DownloadResultInput struct {
 }
 
 // DownloadResultOutput is the result of a successful download_result call.
-// It never carries file bytes (D-07).
+// It never carries file bytes (D-07). In remote mode (D-04) local_path is
+// omitted and the presigned URL (plus expiry note) is the entire result.
 type DownloadResultOutput struct {
-	LocalPath    string `json:"local_path" jsonschema:"local filesystem path (inside OUTPUT_DIR) where the result was downloaded"`
-	PresignedURL string `json:"presigned_url" jsonschema:"the presigned URL the result was downloaded from"`
+	LocalPath    string `json:"local_path,omitempty" jsonschema:"local filesystem path (inside OUTPUT_DIR) where the result was downloaded; absent in remote (HTTP) mode"`
+	PresignedURL string `json:"presigned_url" jsonschema:"the presigned URL for the result"`
+	ExpiryNote   string `json:"expiry_note,omitempty" jsonschema:"remote mode only: reminder that the presigned URL expires and how to get a fresh one"`
 }
 
 // downloadResultHandler builds the download_result tool handler bound to c
@@ -172,6 +189,13 @@ func downloadResultHandler(c *Client) mcp.ToolHandlerFor[DownloadResultInput, Do
 		}
 		if js.DownloadURL == "" {
 			return nil, DownloadResultOutput{}, fmt.Errorf("job %s is done but has no download URL", in.JobID)
+		}
+
+		// Remote mode (D-04): return the presigned URL itself -- never fetch
+		// it, never write a file. The filename hint is meaningless without a
+		// local file and is silently ignored.
+		if c.resultMode == ResultRemote {
+			return nil, DownloadResultOutput{PresignedURL: js.DownloadURL, ExpiryNote: remoteExpiryNote}, nil
 		}
 
 		localPath, err := c.Download(ctx, in.JobID, js.DownloadURL)
