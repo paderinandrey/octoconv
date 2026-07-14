@@ -1,0 +1,58 @@
+{{/*
+webhook-worker Deployment — FIXED 2-replica redundancy (sweeper-host,
+Postgres advisory-lock singleton failover). Mirrors compose's two symmetric
+webhook-worker-1/2 containers (compose ignores deploy.replicas without
+swarm mode, so compose hand-rolled two services; k8s replicas:2 achieves
+the same ≥2-consumer guarantee natively).
+
+PITFALL 2 WARNING: do NOT scale this Deployment to 0 or 1 and do NOT ever
+attach a KEDA ScaledObject to it (Phase 27 explicitly excludes
+webhook-worker from autoscaling) — scaling below 2 replicas silently kills
+the fleet-wide reconciler sweeper that recovers stuck/stale jobs.
+
+TIER LABEL: pod template carries octoconv.io/tier: app (see
+deployment-worker.yaml header for the full rationale — identical here).
+
+Grace 60s (D-09). No resource limit — compose parity (webhook-worker has no
+deploy.resources block in docker-compose.yml either).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-worker
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webhook-worker
+spec:
+  replicas: {{ .Values.webhookWorker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "webhook-worker" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "webhook-worker" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.webhookWorker.terminationGracePeriodSeconds }}
+      containers:
+        - name: webhook-worker
+          image: "{{ .Values.webhookWorker.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: IfNotPresent
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 6

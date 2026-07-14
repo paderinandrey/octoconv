@@ -1,0 +1,74 @@
+{{/*
+chromium-worker Deployment — HTML-to-X engine class (headless Chromium).
+
+TIER LABEL: pod template carries octoconv.io/tier: app (see
+deployment-worker.yaml header for the full rationale — identical here).
+
+Grace 90s (D-09) is ≥ HTML_ENGINE_TIMEOUT (60s, ConfigMap) + margin.
+
+/dev/shm (D-10): k8s pods default to a 64Mi shm, far below Chromium's
+compose shm_size:256m. Even with --disable-dev-shm-usage some Chromium
+internal paths still touch /dev/shm, so an explicit medium:Memory emptyDir
+sized 256Mi recreates the compose behaviour exactly.
+
+startupProbe: heavy Chromium image cold start gets the same generous
+startup budget as document-worker (see that file's header).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromium-worker
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chromium-worker
+spec:
+  replicas: {{ .Values.chromiumWorker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "chromium-worker" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "chromium-worker" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.chromiumWorker.terminationGracePeriodSeconds }}
+      containers:
+        - name: chromium-worker
+          image: "{{ .Values.chromiumWorker.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: IfNotPresent
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: {{ .Values.chromiumWorker.resources.limits.cpu | quote }}
+              memory: {{ .Values.chromiumWorker.resources.limits.memory | quote }}
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.chromiumWorker.shmSize | quote }}
