@@ -1,0 +1,58 @@
+{{/*
+api Deployment — the only app component that self-migrates the schema on
+startup (cmd/api/main.go calls db.Migrate unconditionally; D-05 refinement,
+see 24-02 plan). Single replica keeps that migration race-free.
+
+TIER LABEL: this pod template carries octoconv.io/tier: app (in addition to
+the shared octoconv.labels + component=api) — it is the sole podSelector
+discriminator for networkpolicy-metrics.yaml. The Deployment's own
+selector.matchLabels MUST stay on component=api (NOT tier), so multiple
+tier=app Deployments never collide on the same selector.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "api" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "api" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: "{{ .Values.api.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: http
+              containerPort: 8090
+            - name: metrics
+              containerPort: 9090
+          # api serves /healthz on API_ADDR (:8090) — the only app component
+          # with a real health endpoint (D-08). Readiness is tight so a
+          # transient dependency blip pulls the pod from rotation quickly;
+          # liveness is tolerant so the same blip doesn't trigger a restart
+          # storm on top of the rotation pull.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            periodSeconds: 10
+            failureThreshold: 6

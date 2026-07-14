@@ -1,0 +1,29 @@
+{{/*
+asynqmon has no auth layer (compose relied on the 127.0.0.1-only bind,
+D-18/T-04-14) — once it's a k8s Service it is reachable from any in-cluster
+pod by default, so this policy denies ALL ingress except from an
+ops/monitoring placeholder namespace (Pitfall 4 applies identically to the
+metrics landmine). Only relevant when asynqmon.enabled is true.
+*/}}
+{{- if .Values.asynqmon.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: octoconv-asynqmon
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "asynqmon" "root" $) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}

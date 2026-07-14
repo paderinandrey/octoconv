@@ -1,0 +1,58 @@
+{{/*
+worker Deployment — image-conversion engine class (libvips). Workers expose
+no /healthz; the metrics listener is the only in-process signal, so both
+probes hit :9090 /metrics (D-08) — valid only because METRICS_ADDR is
+0.0.0.0:9090 (ConfigMap) AND networkpolicy-metrics.yaml restricts who can
+reach it; those two ship atomically in this plan (D-04).
+
+TIER LABEL: pod template carries octoconv.io/tier: app (alongside
+octoconv.labels + component=worker) — required so this worker's :9090 is
+covered by networkpolicy-metrics.yaml. Selector stays on component=worker.
+
+Grace 150s (D-09) is ≥ ENGINE_TIMEOUT (120s, ConfigMap) + margin, so an
+in-flight libvips conversion has time to finish before SIGKILL.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "worker" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "worker" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      containers:
+        - name: worker
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: IfNotPresent
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: {{ .Values.worker.resources.limits.cpu | quote }}
+              memory: {{ .Values.worker.resources.limits.memory | quote }}
