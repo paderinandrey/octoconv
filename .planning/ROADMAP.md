@@ -95,7 +95,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 
 **Primary arc (hard-ordered):** 24 → 27 → 28. Phases 25 (MCP HTTP) and 26 (operator presets REST) are fully independent of the KEDA spine and of each other — freely reorderable/interleavable. The queue-depth exposition fix (KEDA-01) is folded into Phase 27 as its first plan (pure Go, hard prerequisite for the ScaledObjects that follow in the same phase).
 
-- [ ] **Phase 24: Helm Chart Core & Landmine Closure** - Full stack deploys via `helm install` on OrbStack k8s; four SEED-004 landmines closed; in-cluster E2E passes as a Job
+- [x] **Phase 24: Helm Chart Core & Landmine Closure** - Full stack deploys via `helm install` on OrbStack k8s; four SEED-004 landmines closed; in-cluster E2E passes as a Job
 - [ ] **Phase 25: MCP Streamable HTTP** - `cmd/mcp-http` streamable-HTTP endpoint with per-request caller-key pass-through, in-cluster Service
 - [ ] **Phase 26: Operator System-Presets REST** - `/v1/system/presets` gated by `OPERATOR_CLIENT_IDS` env allowlist, 404-no-leak for non-operators
 - [ ] **Phase 27: KEDA Autoscaling** - Queue-depth relocated to always-on api; per-engine-class ScaledObjects scale 0→N; webhook-worker fixed at 2 replicas
@@ -114,9 +114,9 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   4. `/metrics` binds `0.0.0.0` (values-only, zero Go-code change) yet is reachable only from the scoped Prometheus/kubelet source via NetworkPolicy — ingress from an unauthorized pod is denied (the in-cluster replacement for the old 127.0.0.1-bind security property, shipped atomically with the bind change).
   5. Each worker Deployment carries a class-appropriate `terminationGracePeriodSeconds` (document ≥ 300s, html ≥ 60s, image ≥ 120s) and dependency-aware liveness/readiness probes (api `/healthz`; workers on the metrics port after the 0.0.0.0 bind).
 **Plans**: 3 plans
-  - [ ] 24-01-PLAN.md — Chart skeleton + full values contract + shared config/secret + stateful deps (Postgres/Redis/MinIO) + offline & server-dry-run gates
-  - [ ] 24-02-PLAN.md — 5 app Deployments (probes D-08, grace D-09, shm/limits D-10) + metrics NetworkPolicy (D-04) + migrate/createbucket hook Jobs (D-05) + Dockerfile.api migrate binary
-  - [ ] 24-03-PLAN.md — Dockerfile.e2e + in-cluster E2E Job (Downward-API podIP) + values-e2e overlay + THE LIVE HARD GATE (D-12): sequential build → helm install → E2E exit 0 → presigned-from-host → NetworkPolicy negative test → upgrade idempotence → teardown
+  - [x] 24-01-PLAN.md — Chart skeleton + full values contract + shared config/secret + stateful deps (Postgres/Redis/MinIO) + offline & server-dry-run gates
+  - [x] 24-02-PLAN.md — 5 app Deployments (probes D-08, grace D-09, shm/limits D-10) + metrics NetworkPolicy (D-04) + migrate/createbucket hook Jobs (D-05) + Dockerfile.api migrate binary
+  - [x] 24-03-PLAN.md — Dockerfile.e2e + in-cluster E2E Job (Downward-API podIP) + values-e2e overlay + THE LIVE HARD GATE (D-12): sequential build → helm install → E2E exit 0 → presigned-from-host → NetworkPolicy negative test → upgrade idempotence → teardown
 **Notes**:
   - OrbStack operational discipline is non-negotiable: pre-build all 5 images once, sequentially, with fixed non-`latest` tags before iterating on the chart (OrbStack shares its image store with the Docker daemon, so locally-built images are pod-visible with no registry, but `:latest` still triggers re-pull attempts — repin/use `imagePullPolicy`). Never run the compose stack and the k8s stack hot simultaneously — three confirmed OrbStack daemon wedges under heavy parallel load are on record for this VM.
   - Research flags: OrbStack-specific k8s networking/FQDN host-resolution behavior and exact Helm hook re-run semantics on `helm upgrade` vs `install` are verified via docs only, not against a live chart — deeper research likely at phase planning. Verify OrbStack k8s version + PVC persistence across `helm uninstall`/reinstall live; do not assume compose-volume-like persistence.
