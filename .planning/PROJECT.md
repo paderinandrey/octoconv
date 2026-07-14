@@ -67,6 +67,7 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ MCP-сервер: cmd/mcp-server (stdio, go-sdk v1.6.1 — первая новая зависимость с v1.0), 5 инструментов, блокирующий convert_file с progress, zero-privilege HTTP-клиент с редакцией ключа — Phase 21 (MCP-01..05, live stdio-гейт ×2; SEED-003 implemented)
 - ✓ CFB-различение: собственный bounded-парсер директории (cycle-guard, fuzz 3.5M/0), три различённых 422 — Phase 22 (CFB-01..02)
 - ✓ Настоящая ISO 19005-2b валидация PDF/A: veraPDF в document-worker (Debian-JRE, amd64 pin), terminal fail-closed, замеренный go/no-go (p95 4.65s/10s) — Phase 23 (PDFA-01..02)
+- ✓ Operator-only REST для system-пресетов: /v1/system/presets за OPERATOR_CLIENT_IDS env-allowlist (fail-closed/fail-loud), byte-identical no-leak 404, ноль миграций; попутно закрыт version-collision в repo.Create (deactivate→recreate) — Phase 26 (OPER-01, verification 5/5)
 
 ### Active
 
@@ -75,7 +76,6 @@ OctoConv — внутренний асинхронный сервис конве
 - [ ] Полный стек разворачивается в k8s одной командой (helm install) и проходит E2E внутри кластера
 - [ ] Каждый engine-class воркер автоскейлится KEDA по глубине своей очереди; 0→N→0 доказано под нагрузкой
 - [ ] MCP доступен как in-cluster HTTP-эндпоинт
-- [ ] system-пресеты управляются через REST (operator-роль)
 
 ### Out of Scope
 
@@ -157,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-14 after v1.6 milestone start*
+*Last updated: 2026-07-14 after Phase 26 completion (operator presets REST)*
