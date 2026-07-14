@@ -1,0 +1,15 @@
+# DEV-ONLY credentials, committed on purpose to mirror docker-compose's
+# internal trust model — MUST be overridden for any non-local deploy.
+#
+# These are the same loud-fake values docker-compose already uses
+# (octo/octo-pass/minioadmin/"dev-only-change-me-in-real-deploys"). This is
+# an internal-only service; there is no external attacker surface for these
+# credentials in the OrbStack dev context. T-24-01 (accepted).
+
+secrets:
+  databaseUrl: "postgres://octo:octo-pass@postgres.octoconv.svc.cluster.local:5432/octo_db"
+  apiKeySalt: "dev-only-change-me-in-real-deploys"
+  webhookSigningSecret: "dev-only-change-me-in-real-deploys"
+  s3AccessKey: "minioadmin"
+  s3SecretKey: "minioadmin"
+  postgresPassword: "octo-pass"

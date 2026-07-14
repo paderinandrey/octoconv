@@ -1,0 +1,11 @@
+OctoConv has been deployed to namespace "{{ .Release.Namespace }}".
+
+In-cluster API URL (for other in-cluster services):
+  http://api.{{ .Release.Namespace }}.svc.cluster.local:8090
+
+Note: /metrics on every pod is NOT publicly exposed — it is intended to be
+scoped by a NetworkPolicy to the observability namespace only (see plan 02).
+Do not assume it is reachable from arbitrary pods in this namespace.
+
+Check pod status:
+  kubectl --context orbstack -n {{ .Release.Namespace }} get pods
