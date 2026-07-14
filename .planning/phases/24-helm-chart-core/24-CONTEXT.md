@@ -21,7 +21,7 @@
 
 ### Landmines (K8S-02)
 - D-04: METRICS_ADDR=0.0.0.0:9090 via env in values ONLY (all five binaries read it via os.Getenv — zero code change) + a NetworkPolicy restricting /metrics ingress to prometheus/keda namespaces (compensates the lost 127.0.0.1 boundary)
-- D-05: migrate as helm hook Job (pre-install,pre-upgrade — idempotent by design); createbucket as post-install/post-upgrade hook Job (mc mb --ignore-existing — idempotent); app Deployments get initContainers or readiness-dependent startup ordering only where strictly needed (postgres/redis reachability via probes+restarts is acceptable k8s-native)
+- D-05 (REFINED at planning, checker-verified): migrate via cmd/api self-migration (existing proven behavior — only api calls db.Migrate; single replica = race-free; a separate hook Job would RACE it against unlocked db.Migrate); createbucket as post-install/post-upgrade hook Job (mc mb --ignore-existing — idempotent); app Deployments get initContainers or readiness-dependent startup ordering only where strictly needed (postgres/redis reachability via probes+restarts is acceptable k8s-native)
 - D-06: S3_ENDPOINT=minio.<namespace>.svc.cluster.local:9000 (FQDN — presigned URLs resolve from pods AND from the OrbStack host per research; no ingress needed)
 - D-07: In-cluster E2E: the suite runs as a k8s Job from a test image; E2E_WEBHOOK_HOST = the Job pod's own IP via Downward API (status.podIP env) — receiver already binds 0.0.0.0; NO S3 dial redirect needed (FQDN resolves in-cluster). Test image: a new Dockerfile.e2e (golang base + repo source, runs go test ./internal/e2e/) built locally like other images
 
