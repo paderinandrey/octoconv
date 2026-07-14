@@ -97,7 +97,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 
 - [x] **Phase 24: Helm Chart Core & Landmine Closure** - Full stack deploys via `helm install` on OrbStack k8s; four SEED-004 landmines closed; in-cluster E2E passes as a Job
 - [x] **Phase 25: MCP Streamable HTTP** - `cmd/mcp-http` streamable-HTTP endpoint with per-request caller-key pass-through, in-cluster Service
-- [ ] **Phase 26: Operator System-Presets REST** - `/v1/system/presets` gated by `OPERATOR_CLIENT_IDS` env allowlist, 404-no-leak for non-operators
+- [x] **Phase 26: Operator System-Presets REST** - `/v1/system/presets` gated by `OPERATOR_CLIENT_IDS` env allowlist, 404-no-leak for non-operators (completed 2026-07-14)
 - [ ] **Phase 27: KEDA Autoscaling** - Queue-depth relocated to always-on api; per-engine-class ScaledObjects scale 0→N; webhook-worker fixed at 2 replicas
 - [ ] **Phase 28: Autoscale Load-Proof** - Timestamped 0→N→0 demonstration under burst load; long document job survives graceful scale-down
 
@@ -208,7 +208,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 23. veraPDF ISO 19005 Validation | v1.5 | 3/3 | Complete | 2026-07-13 |
 | 24. Helm Chart Core & Landmine Closure | v1.6 | 0/? | Not started | - |
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
-| 26. Operator System-Presets REST | v1.6 | 0/? | Not started | - |
+| 26. Operator System-Presets REST | v1.6 | 1/1 | Complete   | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 0/? | Not started | - |
 | 28. Autoscale Load-Proof | v1.6 | 0/? | Not started | - |
 

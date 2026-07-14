@@ -4,14 +4,14 @@ milestone: v1.6
 milestone_name: Kubernetes & KEDA
 status: executing
 stopped_at: Roadmap complete (Phases 24-28, 9/9 requirements mapped), ready to plan Phase 24
-last_updated: "2026-07-14T03:16:14.042Z"
-last_activity: 2026-07-14 -- Phase 25 execution started
+last_updated: "2026-07-14T10:34:59.966Z"
+last_activity: 2026-07-14 -- Phase 26 execution started
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 6
+  total_plans: 7
   completed_plans: 6
-  percent: 20
+  percent: 40
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 25 — mcp-streamable-http
+**Current focus:** Phase 26 — operator-presets-rest
 
 ## Current Position
 
-Phase: 25 (mcp-streamable-http) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 25
-Last activity: 2026-07-14 -- Phase 25 execution started
+Phase: 26 (operator-presets-rest) — EXECUTING
+Plan: 1 of 1
+Status: Executing Phase 26
+Last activity: 2026-07-14 -- Phase 26 execution started
 
 ## Performance Metrics
 
