@@ -52,21 +52,28 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| K8S-01 | TBD | Pending |
-| K8S-02 | TBD | Pending |
-| K8S-03 | TBD | Pending |
-| KEDA-01 | TBD | Pending |
-| KEDA-02 | TBD | Pending |
-| KEDA-03 | TBD | Pending |
-| MCPH-01 | TBD | Pending |
-| MCPH-02 | TBD | Pending |
-| OPER-01 | TBD | Pending |
+| K8S-01 | Phase 24 | Pending |
+| K8S-02 | Phase 24 | Pending |
+| K8S-03 | Phase 24 | Pending |
+| KEDA-01 | Phase 27 | Pending |
+| KEDA-02 | Phase 27 | Pending |
+| KEDA-03 | Phase 28 | Pending |
+| MCPH-01 | Phase 25 | Pending |
+| MCPH-02 | Phase 25 | Pending |
+| OPER-01 | Phase 26 | Pending |
 
 **Coverage:**
 - v1 requirements: 9 total
-- Mapped to phases: 0 (roadmap pending)
-- Unmapped: 9 ⚠️
+- Mapped to phases: 9 ✓
+- Unmapped: 0
+
+**Phase → requirement rollup:**
+- Phase 24 (Helm Chart Core & Landmine Closure): K8S-01, K8S-02, K8S-03
+- Phase 25 (MCP Streamable HTTP): MCPH-01, MCPH-02
+- Phase 26 (Operator System-Presets REST): OPER-01
+- Phase 27 (KEDA Autoscaling): KEDA-01, KEDA-02
+- Phase 28 (Autoscale Load-Proof): KEDA-03
 
 ---
 *Requirements defined: 2026-07-14*
-*Last updated: 2026-07-14 after initial definition*
+*Last updated: 2026-07-14 after roadmap creation (9/9 mapped)*

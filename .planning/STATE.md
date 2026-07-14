@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.6
 milestone_name: Kubernetes & KEDA
 status: planning
-last_updated: "2026-07-13T23:24:59.374Z"
-last_activity: 2026-07-13
+last_updated: "2026-07-14T00:00:00.000Z"
+last_activity: 2026-07-14
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,23 +17,23 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-13 after v1.5 milestone start)
+See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 23 — verapdf-validation
+**Current focus:** Phase 24 — Helm Chart Core & Landmine Closure
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 24 — Helm Chart Core & Landmine Closure
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-13 — Milestone v1.6 started
+Status: Pending (roadmap created, ready to plan Phase 24)
+Last activity: 2026-07-14 — v1.6 roadmap created (Phases 24-28, 9/9 requirements mapped)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 50 (all v1.0–v1.4)
+- Total plans completed: 58 (all v1.0–v1.5)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -60,6 +60,10 @@ Last activity: 2026-07-13 — Milestone v1.6 started
 | 17 | 2 | - | - |
 | 18 | 4 | - | - |
 | 19 | 2 | - | - |
+| 20 | 2 | - | - |
+| 21 | 3 | - | - |
+| 22 | 2 | - | - |
+| 23 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -72,12 +76,13 @@ Last activity: 2026-07-13 — Milestone v1.6 started
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table. v1.5-specific decisions flagged by research, to be recorded as Key Decisions before/at implementation:
+Decisions are logged in PROJECT.md Key Decisions table. v1.6-specific decisions surfaced by research, to be recorded as Key Decisions before/at implementation:
 
-- Phase 20 (Presets REST): `list_presets` scope-merging shape — how to reproduce `Resolve`'s shadow-precedence (client preset hides same-named system preset) across the REST surface (e.g. a `?include_system=true` param merged in the API layer). Not fully designed in any research file; finalize during Phase 20 planning since it determines what the REST surface must expose.
-- Phase 22 (CFB): hand-rolled `ClassifyCFB` over a third-party library (mscfb) — a "why we did NOT add a dependency" Key Decision. Requires (1) sector/entry walk bound cross-checked against reader length, (2) visited-sector set for immediate cycle rejection, (3) fuzz target seeded with Phase 13 fixtures + corrupted variants as a phase-exit gate before merge.
-- Phase 23 (veraPDF): CLI-per-job vs daemon/server-mode — resolve with a live JVM cold-start measurement before committing to either shape (daemon fallback documented either way); veraPDF severity policy (all non-compliance terminal vs Error-severity only) decided and re-validated against v1.3 PDF/A-2b fixtures before merge; `terminalVeraPDFSignatures` confirmed against a real invocation, not training-data assumptions.
-- Phase 21 (MCP): re-verify the pinned `go-sdk` (≥v1.6.1) `mcp.AddTool`/schema-generation API surface against `go.mod` at execution time (SDK actively evolving); verify progress-notification/keepalive/idle-window mechanics live against the actual target MCP host (Claude Code).
+- Phase 24 (Helm Chart Core): flat single chart (no subcharts, no Bitnami/MinIO-Operator deps) — hand-roll Postgres/Redis/MinIO as plain Deployment+PVC+Service matching the compose file's non-HA shape. `METRICS_ADDR=0.0.0.0` bind change and its compensating NetworkPolicy must ship together, never as a follow-up. `S3_ENDPOINT` uses the FQDN `<service>.<namespace>.svc.cluster.local` form. Per-engine-class `terminationGracePeriodSeconds` derived from real worst-case timeouts (image ≥120s, document ≥300s, html ≥60s), never the 30s default.
+- Phase 25 (MCP HTTP): per-request caller-key pass-through auth (Decision 2, resolved — not a single pod-held key). Open Key Decision to fix at planning: `local_path` contract gap for remote callers — three options (omit in HTTP mode / presigned-only / download-proxy tool), no default recommended. Live-verify go-sdk v1.6.1 `Stateless: true` + progress-notification streaming (LOW confidence).
+- Phase 26 (Operator presets REST): `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak (Decision 1, resolved — not an `is_operator` column + 403). Document `is_operator` column as future option (K8SV2-03).
+- Phase 27 (KEDA): Prometheus scaler against relocated `octoconv_queue_depth` (never asynq's internal Redis list keys). Queue-depth exposition relocation (KEDA-01) is the phase's first plan and a hard prerequisite for any ScaledObject. webhook-worker excluded from KEDA entirely — fixed `replicas: 2` (sole host of the advisory-lock sweeper). Per-class `pollingInterval`/`cooldownPeriod` tuning needs execution-time research (demo defaults are starting points only).
+- Phase 28 (Load-Proof): timestamped 0→N→0 evidence is a hard deliverable; the 0→N leg must be proven with the worker at genuine 0 replicas (easy to fake otherwise). Scale-down soak with a long document job in flight validates Phase 24's grace-period choice.
 
 ### Quick Tasks Completed
 
@@ -87,11 +92,16 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.5-specific decisions 
 
 ### Pending Todos
 
-- Plan Phase 20 (Presets REST CRUD & Format Discovery): PRAPI-01, PRAPI-02, PRAPI-03.
+- Plan Phase 24 (Helm Chart Core & Landmine Closure): K8S-01, K8S-02, K8S-03. Highest-risk, most novel, SEED-004-flagged work — must go first (every other v1.6 phase deploys through this chart or reuses its conventions).
 
 ### Blockers/Concerns
 
-None currently blocking. Sequencing note carried into the roadmap: Phase 20 (Presets REST + `GET /v1/formats`) is a hard prerequisite for two of Phase 21 MCP's five tools (`list_presets`, `list_supported_formats`) — MCP holds zero `internal/presets`/`internal/convert` imports, so those endpoints must exist before Phase 21. Phase 22 (CFB) and Phase 23 (veraPDF) are independent of the Presets/MCP track and of each other; veraPDF is sequenced last as the highest-uncertainty item (new JVM runtime, unverified image/latency impact).
+None currently blocking. Sequencing carried into the roadmap:
+
+- Hard-ordered arc: 24 → 27 → 28. The chart must exist and expose a NetworkPolicy-scoped `/metrics` (24) before the queue-depth metric can be relocated and validated at zero replicas (27, first plan = KEDA-01), which must complete before any ScaledObject is written (27), which must complete before the load-proof can meaningfully run (28).
+- Phases 25 (MCP HTTP) and 26 (operator presets REST) are fully independent of the KEDA spine and of each other — freely reorderable/interleavable. Phase 26 needs zero k8s context.
+- Two milestone-critical fail-closed gates, both baked into their phases as deliverables (not follow-ups): (1) queue-depth exposition must move to the always-on api process before any ScaledObject exists — else a worker at 0 replicas has no pod exposing the metric KEDA needs; (2) webhook-worker must be excluded from KEDA entirely — scaling it to zero silently stops the fleet-wide reconciler sweeper.
+- Operational discipline (OrbStack): pre-build all 5 images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (three confirmed daemon wedges on record).
 
 ## Deferred Items
 
@@ -104,12 +114,16 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | tech_debt | WR-03: engine-class string literals duplicated in 4 places — extract exported constants | Closed as DEBT-02, Phase 12 | v1.2 close (2026-07-10) |
 | tech_debt | WR-04: E2E HTTP clients lack per-request timeouts | Closed as DEBT-03, Phase 12 | v1.2 close (2026-07-10) |
 | tech_debt | gofmt nit in internal/queue/queue_test.go (pre-existing since Phase 9/10) | Closed as DEBT-04, Phase 12 | v1.2 close (2026-07-10) |
-| v2_scope | Full ISO 19005 (veraPDF) validation of PDF/A outputs | Now PDFA-01/02, mapped to Phase 23 | v1.3 requirements definition (2026-07-10) |
-| v2_scope | Legacy vs encrypted CFB distinction (directory-stream parsing) | Now CFB-01/02, mapped to Phase 22 | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Full ISO 19005 (veraPDF) validation of PDF/A outputs | Closed as PDFA-01/02, Phase 23 | v1.3 requirements definition (2026-07-10) |
+| v2_scope | Legacy vs encrypted CFB distinction (directory-stream parsing) | Closed as CFB-01/02, Phase 22 | v1.3 requirements definition (2026-07-10) |
 | v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03, carried) | v1.3 requirements definition (2026-07-10) |
 | accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried) | v1.2 requirements definition (2026-07-09) |
+| accepted_risk | `file://` passive subresource read inside chromium-worker (shared UID nobody) | Accepted residual risk (v1.3 Phase 15) | v1.3 close (2026-07-12) |
 | seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
-| seed | SEED-003: MCP-сервер для OctoConv | Now MCP-01..05, mapped to Phase 21 | v1.4 planning (2026-07-12) |
+| seed | SEED-003: MCP-сервер для OctoConv | ✓ Implemented (v1.5 Phase 21, MCP-01..05) | v1.4 planning (2026-07-12) |
+| seed | SEED-004: OctoConv on Kubernetes + KEDA autoscaling | Now K8S/KEDA/MCPH/OPER reqs, mapped to Phases 24-28 | v1.6 requirements definition (2026-07-14) |
+| infra | k8s-валидация в CI (kind/k3d) | Deferred to v2 (K8SV2-01) | v1.6 requirements definition (2026-07-14) |
+| infra | `is_operator` column vs env-allowlist for operators | Deferred to v2 (K8SV2-03) | v1.6 requirements definition (2026-07-14) |
 | tech_debt | CACHED-hit log confirmation for CI docker-build (needs gh auth) | Operator-accepted residual | v1.4 close (2026-07-13) |
 | ops | Branch-protection required-checks (gate/race/docker-build) — manual GitHub UI step | Open operational follow-up | v1.4 close (2026-07-13) |
 | tech_debt | presets D-04 single-active-version: application-transactional only, no DB backstop | Accepted residual | v1.4 close (2026-07-13) |
@@ -117,10 +131,10 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-13 — v1.5 roadmap created
-Stopped at: Roadmap complete (Phases 20-23), ready to plan Phase 20
+Last session: 2026-07-14 — v1.6 roadmap created
+Stopped at: Roadmap complete (Phases 24-28, 9/9 requirements mapped), ready to plan Phase 24
 Resume file: .planning/ROADMAP.md
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Run `/gsd:plan-phase 24` to plan the first v1.6 phase (Helm Chart Core & Landmine Closure).
