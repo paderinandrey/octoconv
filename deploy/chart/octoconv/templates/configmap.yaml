@@ -1,0 +1,41 @@
+{{/*
+Non-secret env contract mirroring docker-compose exactly (S3_ENDPOINT is
+the FQDN per D-06, METRICS_ADDR is 0.0.0.0 per D-04). Keyed for ALL
+binaries — DEBT-05 requires every process to carry the full
+retry/timeout surface even when it only enqueues, so every app Deployment
+in plan 02 pulls this same ConfigMap via envFrom (octoconv.commonEnv).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: octoconv-config
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+data:
+  S3_ENDPOINT: {{ .Values.s3.endpoint | quote }}
+  S3_BUCKET: {{ .Values.s3.bucket | quote }}
+  S3_USE_SSL: {{ .Values.s3.useSSL | quote }}
+  API_ADDR: ":8090"
+  METRICS_ADDR: {{ .Values.metrics.addr | quote }}
+  MAX_UPLOAD_BYTES: "104857600"
+  MAX_IMAGE_PIXELS: "100000000"
+  MAX_DOCUMENT_UNCOMPRESSED_BYTES: "524288000"
+  RATE_LIMIT_IP_RPM: "60"
+  RATE_LIMIT_CLIENT_RPM: "120"
+  WORKER_CONCURRENCY: "4"
+  DOCUMENT_WORKER_CONCURRENCY: "2"
+  HTML_WORKER_CONCURRENCY: "2"
+  WEBHOOK_WORKER_CONCURRENCY: "4"
+  ENGINE_TIMEOUT: "120s"
+  IMAGE_MAX_RETRY: "4"
+  DOCUMENT_ENGINE_TIMEOUT: "300s"
+  DOCUMENT_MAX_RETRY: "3"
+  HTML_ENGINE_TIMEOUT: "60s"
+  HTML_MAX_RETRY: "3"
+  VERAPDF_TIMEOUT: "60s"
+  WEBHOOK_PRESIGN_TTL: "6h"
+  RECONCILER_QUEUED_STALE_AFTER: "90s"
+  RECONCILER_ACTIVE_STALE_AFTER: "5m"
+  RECONCILER_SWEEP_INTERVAL: "1m"
+  RECONCILER_MAX_RECOVERIES: "3"
+  STORAGE_TTL: "168h"
