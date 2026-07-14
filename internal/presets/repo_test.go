@@ -465,3 +465,70 @@ func TestCreateDuplicateReturnsErrAlreadyExists(t *testing.T) {
 		t.Fatalf("second Create = %v, want errors.Is(err, ErrAlreadyExists)", err)
 	}
 }
+
+// TestCreateAfterDeactivateBumpsVersion is the CR-01 gap-closure regression
+// test (26-REVIEW.md): a Create -> Deactivate -> Create cycle for the SAME
+// (scope, client_id, name) must succeed with a bumped version rather than
+// colliding on the partial unique index (which also covers inactive rows).
+// Covers both scopes to prove the fix is generic, not system-only.
+func TestCreateAfterDeactivateBumpsVersion(t *testing.T) {
+	r := newTestRepo(t)
+	ctx := context.Background()
+
+	assertRevival := func(t *testing.T, scope string, clientID *uuid.UUID, name string) {
+		t.Helper()
+
+		id1, v1, err := r.Create(ctx, CreateParams{Name: name, Scope: scope, ClientID: clientID, TargetFormat: "webp"})
+		if err != nil || v1 != 1 {
+			t.Fatalf("first Create: id=%v version=%d err=%v, want version=1 err=nil", id1, v1, err)
+		}
+
+		if err := r.Deactivate(ctx, scope, clientID, name); err != nil {
+			t.Fatalf("Deactivate: %v", err)
+		}
+
+		id2, v2, err := r.Create(ctx, CreateParams{Name: name, Scope: scope, ClientID: clientID, TargetFormat: "avif"})
+		if err != nil {
+			t.Fatalf("second Create (after deactivate) = %v, want nil error (name must be recreatable)", err)
+		}
+		if v2 != 2 {
+			t.Fatalf("second Create version = %d, want 2 (bumped past the deactivated v1)", v2)
+		}
+		if id2 == id1 {
+			t.Fatalf("second Create returned the same id %s as the deactivated row, want a new row", id2)
+		}
+
+		got, err := r.Get(ctx, scope, clientID, name)
+		if err != nil {
+			t.Fatalf("Get after recreate: %v", err)
+		}
+		if got.Version != 2 || got.TargetFormat != "avif" {
+			t.Fatalf("Get after recreate = %+v, want version 2 / avif", got)
+		}
+
+		var activeCount, totalCount int
+		if err := r.pool.QueryRow(ctx,
+			`SELECT count(*) FILTER (WHERE is_active), count(*)
+			 FROM presets WHERE scope = $1 AND name = $2
+			   AND (client_id = $3 OR ($3::uuid IS NULL AND client_id IS NULL))`,
+			scope, name, clientID,
+		).Scan(&activeCount, &totalCount); err != nil {
+			t.Fatalf("count rows: %v", err)
+		}
+		if activeCount != 1 {
+			t.Fatalf("active row count = %d, want 1", activeCount)
+		}
+		if totalCount != 2 {
+			t.Fatalf("total row count = %d, want 2 (no hard delete of the deactivated v1)", totalCount)
+		}
+	}
+
+	t.Run("system scope", func(t *testing.T) {
+		assertRevival(t, ScopeSystem, nil, uniqueName(t, "revive-system"))
+	})
+
+	t.Run("user scope", func(t *testing.T) {
+		clientA := createTestClient(t, r)
+		assertRevival(t, ScopeUser, &clientA, uniqueName(t, "revive-user"))
+	})
+}
