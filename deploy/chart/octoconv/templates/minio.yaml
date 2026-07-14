@@ -1,0 +1,108 @@
+{{/*
+MinIO — S3-compatible object storage. Deployment (single replica, single
+RWO PVC, Recreate strategy — same rationale as postgres.yaml).
+
+TIER-LABEL BOUNDARY: see templates/postgres.yaml — this pod template MUST
+NOT carry octoconv.io/tier: app (reserved for plan 02's app Deployments).
+
+Image is a concrete RELEASE tag (D-02), never :latest — verify pullable at
+execution: `docker pull {{ .Values.minio.image }}`.
+
+Service metadata.name stays the literal "minio" (FQDN contract, D-06: the
+ConfigMap's S3_ENDPOINT is minio.octoconv.svc.cluster.local:9000).
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.minio.storage | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "minio" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "minio" "root" $) | nindent 8 }}
+    spec:
+      containers:
+        - name: minio
+          image: {{ .Values.minio.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - server
+            - /data
+            - --console-address
+            - ":9001"
+          env:
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.minio.rootUser | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              value: {{ .Values.minio.rootPassword | quote }}
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          # mc is not present in the minio/minio image (only in minio/mc) —
+          # use the HTTP health endpoint instead of compose's `mc ready local` exec.
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 10
+      volumes:
+        - name: minio-data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "octoconv.selectorLabels" (dict "component" "minio" "root" $) | nindent 4 }}
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
