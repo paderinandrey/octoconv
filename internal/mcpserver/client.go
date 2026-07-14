@@ -54,13 +54,18 @@ type Client struct {
 	convertTimeout time.Duration
 	pollInterval   time.Duration
 	s3DialAddr     string
+	resultMode     ResultMode
 }
 
-// NewClient builds a Client from cfg, ensuring OutputDir exists so Download
-// can always write into it.
+// NewClient builds a Client from cfg. In local mode it ensures OutputDir
+// exists so Download can always write into it; in remote mode (D-04) the
+// filesystem is never touched -- no directory is created, since remote
+// results are presigned-only and Download is never called.
 func NewClient(cfg Config) (*Client, error) {
-	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create output dir: %w", err)
+	if cfg.ResultMode != ResultRemote {
+		if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create output dir: %w", err)
+		}
 	}
 	return &Client{
 		baseURL:        strings.TrimRight(cfg.BaseURL, "/"),
@@ -70,7 +75,19 @@ func NewClient(cfg Config) (*Client, error) {
 		convertTimeout: cfg.ConvertTimeout,
 		pollInterval:   cfg.PollInterval,
 		s3DialAddr:     cfg.S3DialAddr,
+		resultMode:     cfg.ResultMode,
 	}, nil
+}
+
+// NewClientForKey builds a per-request Client from base, substituting apiKey
+// as the caller's own credential (D-03: per-request caller-key pass-through).
+// Every other knob (BaseURL, timeouts, poll interval, result mode) is reused
+// from base unchanged. base is received by value, so the substitution never
+// mutates shared state -- two concurrent requests with different keys get two
+// fully isolated Clients.
+func NewClientForKey(base Config, apiKey string) (*Client, error) {
+	base.APIKey = apiKey
+	return NewClient(base)
 }
 
 // JobStatus is the decoded shape of GET /v1/jobs/{id}.
@@ -365,6 +382,12 @@ func (c *Client) ConvertBlocking(ctx context.Context, filePath, target, preset, 
 
 		switch job.Status {
 		case statusDone:
+			// Remote mode (D-04): the result is presigned-only -- never
+			// download server-side, never touch the filesystem. The caller
+			// fetches the URL directly.
+			if c.resultMode == ResultRemote {
+				return ConvertResult{JobID: jobID, DownloadURL: job.DownloadURL}, nil
+			}
 			localPath, err := c.Download(ctx, jobID, job.DownloadURL)
 			if err != nil {
 				return ConvertResult{}, err

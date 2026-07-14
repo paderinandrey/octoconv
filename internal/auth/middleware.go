@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 )
 
 // authScheme is the required Authorization header scheme token.
@@ -21,12 +20,11 @@ const authScheme = "ApiKey"
 func Middleware(resolver ClientResolver) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fields := strings.Fields(r.Header.Get("Authorization"))
-			if len(fields) != 2 || !strings.EqualFold(fields[0], authScheme) {
+			key, ok := ParseAPIKey(r.Header.Get("Authorization"))
+			if !ok {
 				writeError(w, http.StatusUnauthorized, "missing or malformed Authorization header")
 				return
 			}
-			key := fields[1]
 
 			client, err := resolver.ResolveClient(r.Context(), key)
 			if err != nil {

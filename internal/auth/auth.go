@@ -4,9 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/apaderin/octoconv/internal/clients"
 )
+
+// ParseAPIKey parses an Authorization header value against the project's
+// "ApiKey <key>" scheme: exactly two whitespace-delimited fields, the first
+// case-insensitively equal to "ApiKey". It is the single shared parse used
+// by both the REST Middleware and cmd/mcp-http (Phase 25, D-03) -- no
+// divergent copies. ok is false for a missing, malformed, or wrong-scheme
+// header; the raw key is returned only when ok is true.
+func ParseAPIKey(header string) (key string, ok bool) {
+	fields := strings.Fields(header)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], authScheme) {
+		return "", false
+	}
+	return fields[1], true
+}
 
 // ClientResolver resolves a raw API key presented by a caller to the client
 // it belongs to. It is a narrow, consumer-owned interface: internal/api

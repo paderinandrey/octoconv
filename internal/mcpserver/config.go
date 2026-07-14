@@ -23,6 +23,22 @@ const (
 	defaultPollEvery = time.Second
 )
 
+// ResultMode selects how tool results are shaped: local (stdio) mode
+// downloads results into OUTPUT_DIR and returns a local path alongside the
+// presigned URL; remote (HTTP) mode is presigned-only -- no server-side
+// download, no local path, no filesystem writes (D-04, Phase 25).
+type ResultMode string
+
+const (
+	// ResultLocal is the zero value, so every existing caller (the stdio
+	// binary, all pre-Phase-25 tests) keeps today's behavior without any
+	// change: results are downloaded into OUTPUT_DIR and carry a local path.
+	ResultLocal ResultMode = ""
+	// ResultRemote is HTTP mode: results carry only the presigned URL (plus
+	// an expiry note); the server never writes files (D-04, MCPH-02).
+	ResultRemote ResultMode = "remote"
+)
+
 // Config is the env-driven configuration for the MCP client (D-03).
 // OCTOCONV_BASE_URL and OCTOCONV_API_KEY are required; everything else has a
 // documented default. S3DialAddr is an optional escape hatch (empty is a
@@ -36,6 +52,11 @@ type Config struct {
 	ConvertTimeout time.Duration
 	PollInterval   time.Duration
 	S3DialAddr     string
+	// ResultMode selects local (zero value; stdio) vs remote (HTTP,
+	// presigned-only) result shaping. Not read from the environment: the
+	// binary chooses its own mode (stdio leaves it zero; mcp-http sets
+	// ResultRemote explicitly).
+	ResultMode ResultMode
 }
 
 // Load reads Config from the environment, failing fast (naming the missing
