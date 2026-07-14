@@ -96,3 +96,12 @@ None - no external service configuration required.
 ---
 *Phase: 26-operator-presets-rest*
 *Completed: 2026-07-14*
+
+## Self-Check: PASSED
+
+- FOUND: internal/presets/repo.go
+- FOUND: internal/presets/repo_test.go
+- FOUND: .planning/phases/26-operator-presets-rest/26-02-SUMMARY.md
+- FOUND commit: 2f23da5 (test — RED)
+- FOUND commit: 1a6728a (fix — GREEN)
+- FOUND commit: 1344b87 (docs — SUMMARY)
