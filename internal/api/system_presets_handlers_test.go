@@ -2,14 +2,17 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
+	"github.com/apaderin/octoconv/internal/presets"
 )
 
 // TestParseOperatorClientIDs covers the fail-closed empty-input case, the
@@ -146,5 +149,134 @@ func TestRequireOperator_EmptyAllowlistDeniesEveryone(t *testing.T) {
 	}
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// --- Task 2: five-verb operator vs non-operator vs unset-allowlist matrix (D-06) ---
+
+// systemPresetCase describes one of the five /v1/system/presets verbs
+// exercised by the matrix below.
+type systemPresetCase struct {
+	name   string
+	method string
+	path   string
+	body   map[string]any
+}
+
+func systemPresetCases() []systemPresetCase {
+	return []systemPresetCase{
+		{name: "create", method: http.MethodPost, path: "/v1/system/presets", body: map[string]any{"name": "sys1", "target_format": "webp"}},
+		{name: "list", method: http.MethodGet, path: "/v1/system/presets"},
+		{name: "show", method: http.MethodGet, path: "/v1/system/presets/sys1"},
+		{name: "update", method: http.MethodPut, path: "/v1/system/presets/sys1", body: map[string]any{"target_format": "avif"}},
+		{name: "deactivate", method: http.MethodDelete, path: "/v1/system/presets/sys1"},
+	}
+}
+
+// TestSystemPresets_OperatorSucceedsForAllVerbs verifies an operator (the
+// resolved caller's id present in OperatorClientIDs) can create/list/show/
+// update/deactivate system-scope presets via /v1/system/presets (OPER-01/
+// SC1), and that no response body ever leaks operator-ness (Claude's
+// Discretion, D-06).
+func TestSystemPresets_OperatorSucceedsForAllVerbs(t *testing.T) {
+	now := time.Now().UTC()
+	admin := &fakePresetAdmin{
+		getResult: &presets.Preset{
+			Name: "sys1", Version: 1, Scope: presets.ScopeSystem, TargetFormat: "webp",
+			CreatedAt: now, UpdatedAt: now, IsActive: true,
+		},
+	}
+	// Operator set is built from the resolver's fixed client id AFTER the
+	// resolver exists (D-06 action note), so the operator-success case
+	// naturally includes the resolved caller.
+	resolver := newFakeResolver()
+	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), admin, resolver, healthyDeps(), Config{
+		MaxUploadBytes:    1 << 20,
+		OperatorClientIDs: map[uuid.UUID]struct{}{resolver.client.ID: {}},
+	})
+
+	wantStatus := map[string]int{
+		"create":     http.StatusCreated,
+		"list":       http.StatusOK,
+		"show":       http.StatusOK,
+		"update":     http.StatusOK,
+		"deactivate": http.StatusOK,
+	}
+
+	for _, tc := range systemPresetCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			req := presetJSONReq(t, tc.method, tc.path, tc.body)
+			rec := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != wantStatus[tc.name] {
+				t.Fatalf("%s: status = %d, want %d; body=%s", tc.name, rec.Code, wantStatus[tc.name], rec.Body.String())
+			}
+
+			var obj map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &obj); err == nil {
+				for _, leak := range []string{"operator", "is_operator", "operator_id"} {
+					if _, present := obj[leak]; present {
+						t.Errorf("%s: response body leaks operator-ness via %q: %v", tc.name, leak, obj)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSystemPresets_NonOperatorNoLeak404 verifies a resolved caller NOT in
+// the allowlist gets a byte-identical no-leak 404 on every verb (OPER-01/
+// SC2) and that presetAdmin is never reached (requireOperator short-
+// circuits before any handler runs).
+func TestSystemPresets_NonOperatorNoLeak404(t *testing.T) {
+	otherOperator := uuid.New()
+	admin := &fakePresetAdmin{}
+	resolver := newFakeResolver()
+	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), admin, resolver, healthyDeps(), Config{
+		MaxUploadBytes:    1 << 20,
+		OperatorClientIDs: map[uuid.UUID]struct{}{otherOperator: {}},
+	})
+
+	wantRec := httptest.NewRecorder()
+	writeError(wantRec, http.StatusNotFound, noSuchPreset)
+
+	for _, tc := range systemPresetCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			req := presetJSONReq(t, tc.method, tc.path, tc.body)
+			rec := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s: status = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
+			}
+			if !bytes.Equal(rec.Body.Bytes(), wantRec.Body.Bytes()) {
+				t.Errorf("%s: body = %q, want byte-identical to noSuchPreset 404 %q", tc.name, rec.Body.String(), wantRec.Body.String())
+			}
+			if admin.lastCreateParams != nil {
+				t.Errorf("%s: presetAdmin.Create must never be reached for a non-operator", tc.name)
+			}
+		})
+	}
+}
+
+// TestSystemPresets_EmptyAllowlistDeniesEveryone verifies an empty/unset
+// OPERATOR_CLIENT_IDS denies every verb, including for the resolved test
+// client itself (OPER-01/SC3, fail-closed).
+func TestSystemPresets_EmptyAllowlistDeniesEveryone(t *testing.T) {
+	admin := &fakePresetAdmin{}
+	resolver := newFakeResolver()
+	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), admin, resolver, healthyDeps(), Config{MaxUploadBytes: 1 << 20})
+
+	for _, tc := range systemPresetCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			req := presetJSONReq(t, tc.method, tc.path, tc.body)
+			rec := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s: status = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

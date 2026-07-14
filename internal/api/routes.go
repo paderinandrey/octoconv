@@ -46,6 +46,19 @@ func (s *Server) Routes() chi.Router {
 			r.Put("/{name}", s.handleUpdatePreset)
 			r.Delete("/{name}", s.handleDeactivatePreset)
 		})
+		// /v1/system/presets (OPER-01, D-02/D-03): a distinct literal path
+		// segment under /v1, not nested under /v1/presets/{name} -- no chi
+		// routing conflict. Gated by requireOperator, which runs AFTER
+		// auth.Middleware has already resolved the caller; a non-operator
+		// gets the uniform no-leak 404, never 403.
+		r.Route("/system/presets", func(r chi.Router) {
+			r.Use(s.requireOperator)
+			r.Post("/", s.handleCreateSystemPreset)
+			r.Get("/", s.handleListSystemPresets)
+			r.Get("/{name}", s.handleShowSystemPreset)
+			r.Put("/{name}", s.handleUpdateSystemPreset)
+			r.Delete("/{name}", s.handleDeactivateSystemPreset)
+		})
 	})
 	return r
 }

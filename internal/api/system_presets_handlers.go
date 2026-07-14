@@ -1,13 +1,16 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/apaderin/octoconv/internal/auth"
+	"github.com/apaderin/octoconv/internal/presets"
 )
 
 // ParseOperatorClientIDs parses the OPERATOR_CLIENT_IDS env value (D-01): a
@@ -61,4 +64,160 @@ func (s *Server) requireOperator(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// The five handlers below mirror presets_handlers.go's user-scope handlers
+// exactly in error-mapping discipline, but hardcode presets.ScopeSystem and
+// a nil clientID -- they manage system rows DIRECTLY via Get/List/Create/
+// Update/Deactivate, never the merged-view GetForClient/ListForClient (D-02/
+// D-03). They reuse presetRequest/newPresetResponse/decodePresetRequest/
+// validPresetName/noSuchPreset/invalidPresetName from presets_handlers.go
+// without redeclaring them. Every route these serve sits behind
+// requireOperator (routes.go), so reaching this code already proves the
+// caller is an authorized operator.
+
+// handleCreateSystemPreset creates a system-scope preset (D-02/D-04):
+// duplicate active name -> 409, invalid opts -> 422, invalid name -> 400.
+func (s *Server) handleCreateSystemPreset(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	req, ok := decodePresetRequest(w, r)
+	if !ok {
+		return
+	}
+	if !validPresetName(req.Name) {
+		writeError(w, http.StatusBadRequest, invalidPresetName)
+		return
+	}
+	if err := presets.ValidateOptsJSON(req.Options); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+		return
+	}
+
+	if _, _, err := s.presetAdmin.Create(ctx, presets.CreateParams{
+		Name:         req.Name,
+		Scope:        presets.ScopeSystem,
+		ClientID:     nil,
+		TargetFormat: req.TargetFormat,
+		Options:      req.Options,
+		Description:  req.Description,
+	}); err != nil {
+		if errors.Is(err, presets.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, "preset already exists")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create preset")
+		return
+	}
+
+	created, err := s.presetAdmin.Get(ctx, presets.ScopeSystem, nil, req.Name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load created preset")
+		return
+	}
+	writeJSON(w, http.StatusCreated, newPresetResponse(created))
+}
+
+// handleListSystemPresets returns every system-scope preset (D-02); active
+// only by default, ?all=true includes inactive versions.
+func (s *Server) handleListSystemPresets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	includeInactive := r.URL.Query().Get("all") == "true"
+	list, err := s.presetAdmin.List(ctx, presets.ScopeSystem, nil, includeInactive)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list presets")
+		return
+	}
+
+	resp := make([]presetResponse, 0, len(list))
+	for i := range list {
+		resp = append(resp, newPresetResponse(&list[i]))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleShowSystemPreset returns the active system-scope preset named
+// {name}; ErrNotFound -> the uniform no-leak 404 (D-02/D-03).
+func (s *Server) handleShowSystemPreset(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	name := chi.URLParam(r, "name")
+	if !validPresetName(name) {
+		writeError(w, http.StatusBadRequest, invalidPresetName)
+		return
+	}
+
+	p, err := s.presetAdmin.Get(ctx, presets.ScopeSystem, nil, name)
+	if errors.Is(err, presets.ErrNotFound) {
+		writeError(w, http.StatusNotFound, noSuchPreset)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load preset")
+		return
+	}
+	writeJSON(w, http.StatusOK, newPresetResponse(p))
+}
+
+// handleUpdateSystemPreset bumps the version of the system-scope preset
+// named {name} (D-02/D-03, bump-on-update); ErrNotFound -> the uniform
+// no-leak 404.
+func (s *Server) handleUpdateSystemPreset(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	name := chi.URLParam(r, "name")
+	if !validPresetName(name) {
+		writeError(w, http.StatusBadRequest, invalidPresetName)
+		return
+	}
+
+	req, ok := decodePresetRequest(w, r)
+	if !ok {
+		return
+	}
+	if err := presets.ValidateOptsJSON(req.Options); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+		return
+	}
+
+	if _, err := s.presetAdmin.Update(ctx, presets.ScopeSystem, nil, name, req.TargetFormat, req.Options, req.Description); err != nil {
+		if errors.Is(err, presets.ErrNotFound) {
+			writeError(w, http.StatusNotFound, noSuchPreset)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to update preset")
+		return
+	}
+
+	updated, err := s.presetAdmin.Get(ctx, presets.ScopeSystem, nil, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load updated preset")
+		return
+	}
+	writeJSON(w, http.StatusOK, newPresetResponse(updated))
+}
+
+// handleDeactivateSystemPreset soft-deactivates the system-scope preset
+// named {name} -- no hard delete (D-02/D-03); ErrNotFound -> the uniform
+// no-leak 404.
+func (s *Server) handleDeactivateSystemPreset(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	name := chi.URLParam(r, "name")
+	if !validPresetName(name) {
+		writeError(w, http.StatusBadRequest, invalidPresetName)
+		return
+	}
+
+	if err := s.presetAdmin.Deactivate(ctx, presets.ScopeSystem, nil, name); err != nil {
+		if errors.Is(err, presets.ErrNotFound) {
+			writeError(w, http.StatusNotFound, noSuchPreset)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to deactivate preset")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "is_active": false})
 }
