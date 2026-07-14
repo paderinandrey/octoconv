@@ -130,7 +130,10 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   2. Auth is per-request caller-key pass-through — two distinct client keys reaching the same Service each resolve to their own `clients` row (per-client rate limiting and preset scoping preserved; the pod stores no key — zero-privilege intact), reusing shared hash-compare auth logic, not a duplicated code path.
   3. The `convert_file` result is remote-usable in HTTP mode per the chosen `local_path` contract, decided and recorded at phase planning.
   4. `cmd/mcp-http` ships as a chart template gated by `mcpHttp.enabled`, with its Service and NetworkPolicy, `Stateless: true`, pinned to a single replica.
-**Plans**: TBD
+**Plans**: 3 plans
+  - [ ] 25-01-PLAN.md — internal/mcpserver refactor (per-request Client, ResultMode remote/local) + cmd/mcp-http binary + 401 middleware + D-02 stateless spike + unit tests
+  - [ ] 25-02-PLAN.md — Dockerfile.mcp-http + gated chart Deployment/Service + offline/dry-run gates + README HTTP section
+  - [ ] 25-03-PLAN.md — LIVE HARD GATE on OrbStack k8s (D-08): install, scripted MCP-over-HTTP session, presigned host-dial SC3 recheck, 401 case, teardown
 **Notes**:
   - Key Decision to fix at phase planning — the `local_path` contract gap for remote callers (`local_path` refers to the pod's ephemeral filesystem, meaningless to a remote caller). Three options to weigh, no default recommended: (1) omit `local_path` entirely in HTTP mode (gate on a `SkipLocalDownload`-style flag; smallest diff, but response shape becomes transport-dependent); (2) return presigned-URL-only for the HTTP transport (specialization of #1 with clearer intent); (3) add a download-proxy tool that streams bytes back over the MCP transport (most capability, but binary streaming + size limits + a second code path).
   - Research flags: go-sdk v1.6.1's `Stateless: true` interaction with `convert_file`'s in-flight progress-notification streaming is flagged LOW confidence — live-verify before committing to the stateless design; also confirm server-side Streamable HTTP is actually present at the pinned version.
