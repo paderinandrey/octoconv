@@ -9,9 +9,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 ### Kubernetes / Helm
 
-- [ ] **K8S-01**: `helm install` разворачивает полный стек на OrbStack k8s (api, worker, document-worker, chromium-worker, webhook-worker×2 (+mcp-http добавится в чарт в Phase 25) + Postgres/Redis/MinIO StatefulSets + createbucket hook Job + миграции через самомиграцию api при старте — существующий механизм); E2E-набор проходит внутри кластера как Job
-- [ ] **K8S-02**: Все четыре SEED-004 мины закрыты: METRICS_ADDR → 0.0.0.0 (values-only, ноль изменений Go-кода) + NetworkPolicy; in-cluster E2E-Job получает свой pod-IP через Downward API (закрывает host-gateway и S3-dial-redirect разом); ordering: миграции через api self-migration, createbucket через post-install hook; FQDN `S3_ENDPOINT` (`minio.<ns>.svc.cluster.local:9000`) — presigned URL резолвится и из подов, и с OrbStack-хоста
-- [ ] **K8S-03**: Probes на всех сервисах (api — /healthz; воркеры — metrics-порт после 0.0.0.0-бинда); per-class `terminationGracePeriodSeconds` ≥ engine-таймаута класса (document ≥ 300s, html ≥ 60s, image ≥ 120s)
+- [x] **K8S-01**: `helm install` разворачивает полный стек на OrbStack k8s (api, worker, document-worker, chromium-worker, webhook-worker×2 (+mcp-http добавится в чарт в Phase 25) + Postgres/Redis/MinIO StatefulSets + createbucket hook Job + миграции через самомиграцию api при старте — существующий механизм); E2E-набор проходит внутри кластера как Job
+- [x] **K8S-02**: Все четыре SEED-004 мины закрыты: METRICS_ADDR → 0.0.0.0 (values-only, ноль изменений Go-кода) + NetworkPolicy; in-cluster E2E-Job получает свой pod-IP через Downward API (закрывает host-gateway и S3-dial-redirect разом); ordering: миграции через api self-migration, createbucket через post-install hook; FQDN `S3_ENDPOINT` (`minio.<ns>.svc.cluster.local:9000`) — presigned URL резолвится и из подов, и с OrbStack-хоста
+- [x] **K8S-03**: Probes на всех сервисах (api — /healthz; воркеры — metrics-порт после 0.0.0.0-бинда); per-class `terminationGracePeriodSeconds` ≥ engine-таймаута класса (document ≥ 300s, html ≥ 60s, image ≥ 120s)
 
 ### KEDA
 
@@ -52,9 +52,9 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| K8S-01 | Phase 24 | Pending |
-| K8S-02 | Phase 24 | Pending |
-| K8S-03 | Phase 24 | Pending |
+| K8S-01 | Phase 24 | Complete |
+| K8S-02 | Phase 24 | Complete |
+| K8S-03 | Phase 24 | Complete |
 | KEDA-01 | Phase 27 | Pending |
 | KEDA-02 | Phase 27 | Pending |
 | KEDA-03 | Phase 28 | Pending |
