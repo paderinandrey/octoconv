@@ -85,6 +85,15 @@ func main() {
 	resolver := auth.NewResolver(clientRepo, salt)
 	presetRepo := presets.NewRepo(pool)
 
+	// D-01/OPER-01: OPERATOR_CLIENT_IDS is parsed once, here, at startup.
+	// A malformed entry aborts startup loudly (fail-loud, T-26-03) -- it
+	// must never silently shrink the intended operator set. Empty/unset is
+	// not an error: it yields zero operators (fail-closed).
+	operatorIDs, err := api.ParseOperatorClientIDs(os.Getenv("OPERATOR_CLIENT_IDS"))
+	if err != nil {
+		log.Fatalf("OPERATOR_CLIENT_IDS: %v", err)
+	}
+
 	// D-04: surface a startup-visible warning when the webhook SSRF guard's
 	// RFC1918 private-IP block is relaxed, so a relaxed safety posture is
 	// obvious from logs without reading .env or source (loopback/link-local/
@@ -104,6 +113,7 @@ func main() {
 		MaxDocumentUncompressedBytes: uint64(envInt64("MAX_DOCUMENT_UNCOMPRESSED_BYTES", 500<<20)), // D-04: 500 MiB default
 		IPRateLimitRPM:               int(envInt64("RATE_LIMIT_IP_RPM", 60)),
 		ClientRateLimitRPM:           int(envInt64("RATE_LIMIT_CLIENT_RPM", 120)),
+		OperatorClientIDs:            operatorIDs,
 	})
 
 	addr := os.Getenv("API_ADDR")

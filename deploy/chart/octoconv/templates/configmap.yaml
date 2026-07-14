@@ -39,3 +39,4 @@ data:
   RECONCILER_SWEEP_INTERVAL: "1m"
   RECONCILER_MAX_RECOVERIES: "3"
   STORAGE_TTL: "168h"
+  OPERATOR_CLIENT_IDS: {{ .Values.api.operatorClientIds | default "" | quote }}
