@@ -2,13 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.6
 milestone_name: Kubernetes & KEDA
-status: planning
-last_updated: "2026-07-14T00:00:00.000Z"
-last_activity: 2026-07-14
+status: executing
+stopped_at: Roadmap complete (Phases 24-28, 9/9 requirements mapped), ready to plan Phase 24
+last_updated: "2026-07-14T00:52:03.134Z"
+last_activity: 2026-07-14 -- Phase 24 execution started
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
+  total_plans: 3
   completed_plans: 0
   percent: 0
 ---
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 24 — Helm Chart Core & Landmine Closure
+**Current focus:** Phase 24 — helm-chart-core
 
 ## Current Position
 
-Phase: 24 — Helm Chart Core & Landmine Closure
-Plan: —
-Status: Pending (roadmap created, ready to plan Phase 24)
-Last activity: 2026-07-14 — v1.6 roadmap created (Phases 24-28, 9/9 requirements mapped)
+Phase: 24 (helm-chart-core) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 24
+Last activity: 2026-07-14 -- Phase 24 execution started
 
 ## Performance Metrics
 
