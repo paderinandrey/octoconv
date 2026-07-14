@@ -154,6 +154,39 @@ func TestMiddleware_ResolverError_InternalServerError(t *testing.T) {
 	assertJSONErrorBody(t, rec, presentedKey)
 }
 
+// TestParseAPIKey covers the shared ApiKey scheme parser used by both the
+// REST Middleware and cmd/mcp-http (Phase 25): exactly two fields, the first
+// case-insensitively equal to "ApiKey".
+func TestParseAPIKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		header  string
+		wantKey string
+		wantOK  bool
+	}{
+		{"valid", "ApiKey secret-123", "secret-123", true},
+		{"case-insensitive scheme", "apikey secret-123", "secret-123", true},
+		{"upper scheme", "APIKEY secret-123", "secret-123", true},
+		{"empty header", "", "", false},
+		{"bare token", "secret-123", "", false},
+		{"wrong scheme", "Bearer secret-123", "", false},
+		{"scheme only", "ApiKey", "", false},
+		{"three fields", "ApiKey secret extra", "", false},
+		{"extra whitespace ok", "ApiKey   secret-123", "secret-123", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, ok := ParseAPIKey(tc.header)
+			if ok != tc.wantOK {
+				t.Fatalf("ParseAPIKey(%q) ok = %v, want %v", tc.header, ok, tc.wantOK)
+			}
+			if key != tc.wantKey {
+				t.Fatalf("ParseAPIKey(%q) key = %q, want %q", tc.header, key, tc.wantKey)
+			}
+		})
+	}
+}
+
 // assertJSONErrorBody asserts the response is JSON with Content-Type
 // application/json, has a non-empty "error" field, and never echoes the
 // presented raw key back to the caller.
