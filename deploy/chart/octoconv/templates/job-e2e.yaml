@@ -1,0 +1,77 @@
+{{- if .Values.e2e.enabled }}
+{{/*
+octoconv-e2e — in-cluster E2E Job (D-07/D-12, K8S-01/K8S-02). A plain Job,
+NOT a Helm hook: it runs on demand as part of THE LIVE HARD GATE (plan 03),
+not on every install/upgrade. Gated on .Values.e2e.enabled (default false in
+values.yaml) so it never renders in a normal install/upgrade — only when
+explicitly layered with values-e2e.yaml.
+
+E2E_WEBHOOK_HOST = the Job pod's own IP via the Downward API (status.podIP)
+closes the host-gateway landmine (K8S-02): webhook-worker dials this pod
+directly over the flat pod network, no host.docker.internal equivalent
+needed. E2E_S3_DIAL_ADDR is intentionally OMITTED — S3_ENDPOINT is the
+in-cluster-resolvable MinIO FQDN (D-06), so no dial redirect is needed;
+this closes the second half of the same landmine.
+
+The suite runs in full EXCEPT TestPDFANonCompliantE2E (compose-only veraPDF
+fault-injection shim — see 24-03-PLAN.md "Scoped E2E run" note), excluded
+via -test.skip baked into Dockerfile.e2e's ENTRYPOINT.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: octoconv-e2e
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: e2e
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        app.kubernetes.io/component: e2e
+    spec:
+      restartPolicy: Never
+      # wait-for-api: the suite hits api's HTTP surface immediately on
+      # start; api reaching /healthz=200 also proves its startup
+      # db.Migrate has already applied the schema (D-05 refinement), so
+      # this poll doubles as the schema-readiness gate.
+      initContainers:
+        - name: wait-for-api
+          image: "busybox:1.36.1"
+          command:
+            - /bin/sh
+            - -c
+            - >
+              until wget -q -T5 -O- http://api.octoconv.svc.cluster.local:8090/healthz >/dev/null 2>&1;
+              do echo "waiting for api..."; sleep 3; done
+      containers:
+        - name: e2e
+          image: "{{ .Values.e2e.image }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: E2E_BASE_URL
+              value: "http://api.octoconv.svc.cluster.local:8090"
+            - name: E2E_WEBHOOK_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: octoconv-secret
+                  key: DATABASE_URL
+            - name: API_KEY_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: octoconv-secret
+                  key: API_KEY_SALT
+            - name: WEBHOOK_SIGNING_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: octoconv-secret
+                  key: WEBHOOK_SIGNING_SECRET
+          # E2E_S3_DIAL_ADDR intentionally OMITTED — see header note.
+{{- end }}
