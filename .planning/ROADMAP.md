@@ -146,7 +146,9 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   1. An operator client (ID present in `OPERATOR_CLIENT_IDS`) can create/list/show/update/deactivate system-scope presets via a `/v1/system/presets` route group, reusing the already scope-agnostic `PresetAdmin` interface unchanged.
   2. A non-operator client hitting the same routes receives the same uniform 404 the codebase already uses for cross-client access — never 403 — preserving the no-leak discipline held since Phase 1.
   3. The operator gate is env-only (`OPERATOR_CLIENT_IDS` allowlist parsed at API startup) with zero migrations and no second parallel auth system.
-**Plans**: TBD
+**Plans**: 2 plans
+  - [x] 26-01-PLAN.md — Operator-only /v1/system/presets REST surface + OPERATOR_CLIENT_IDS gate
+  - [ ] 26-02-PLAN.md — Gap closure (CR-01): repo.Create version-bump + 23505→ErrAlreadyExists so deactivate→recreate works
 **Notes**:
   - Standard pattern — skip research-phase. Additive REST handlers + one `RequireOperator` middleware, not a domain change.
   - Key Decision (already resolved by research, record at planning): `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak chosen over a new `is_operator` column + 403, matching the codebase's env-only-config constraint and its 404-never-403 convention. Trade-off accepted: changing the operator set requires an API restart, and there is no per-operator audit trail beyond added logging — the `is_operator` column is documented as a future option (K8SV2-03) to revisit if redeploy-free management or per-operator audit becomes a real requirement.
