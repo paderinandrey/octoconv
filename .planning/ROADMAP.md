@@ -96,7 +96,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 **Primary arc (hard-ordered):** 24 → 27 → 28. Phases 25 (MCP HTTP) and 26 (operator presets REST) are fully independent of the KEDA spine and of each other — freely reorderable/interleavable. The queue-depth exposition fix (KEDA-01) is folded into Phase 27 as its first plan (pure Go, hard prerequisite for the ScaledObjects that follow in the same phase).
 
 - [x] **Phase 24: Helm Chart Core & Landmine Closure** - Full stack deploys via `helm install` on OrbStack k8s; four SEED-004 landmines closed; in-cluster E2E passes as a Job
-- [ ] **Phase 25: MCP Streamable HTTP** - `cmd/mcp-http` streamable-HTTP endpoint with per-request caller-key pass-through, in-cluster Service
+- [x] **Phase 25: MCP Streamable HTTP** - `cmd/mcp-http` streamable-HTTP endpoint with per-request caller-key pass-through, in-cluster Service
 - [ ] **Phase 26: Operator System-Presets REST** - `/v1/system/presets` gated by `OPERATOR_CLIENT_IDS` env allowlist, 404-no-leak for non-operators
 - [ ] **Phase 27: KEDA Autoscaling** - Queue-depth relocated to always-on api; per-engine-class ScaledObjects scale 0→N; webhook-worker fixed at 2 replicas
 - [ ] **Phase 28: Autoscale Load-Proof** - Timestamped 0→N→0 demonstration under burst load; long document job survives graceful scale-down
@@ -131,9 +131,9 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   3. The `convert_file` result is remote-usable in HTTP mode per the chosen `local_path` contract, decided and recorded at phase planning.
   4. `cmd/mcp-http` ships as a chart template gated by `mcpHttp.enabled`, with its Service and NetworkPolicy, `Stateless: true`, pinned to a single replica.
 **Plans**: 3 plans
-  - [ ] 25-01-PLAN.md — internal/mcpserver refactor (per-request Client, ResultMode remote/local) + cmd/mcp-http binary + 401 middleware + D-02 stateless spike + unit tests
-  - [ ] 25-02-PLAN.md — Dockerfile.mcp-http + gated chart Deployment/Service + offline/dry-run gates + README HTTP section
-  - [ ] 25-03-PLAN.md — LIVE HARD GATE on OrbStack k8s (D-08): install, scripted MCP-over-HTTP session, presigned host-dial SC3 recheck, 401 case, teardown
+  - [x] 25-01-PLAN.md — internal/mcpserver refactor (per-request Client, ResultMode remote/local) + cmd/mcp-http binary + 401 middleware + D-02 stateless spike + unit tests
+  - [x] 25-02-PLAN.md — Dockerfile.mcp-http + gated chart Deployment/Service + offline/dry-run gates + README HTTP section
+  - [x] 25-03-PLAN.md — LIVE HARD GATE on OrbStack k8s (D-08): install, scripted MCP-over-HTTP session, presigned host-dial SC3 recheck, 401 case, teardown
 **Notes**:
   - Key Decision to fix at phase planning — the `local_path` contract gap for remote callers (`local_path` refers to the pod's ephemeral filesystem, meaningless to a remote caller). Three options to weigh, no default recommended: (1) omit `local_path` entirely in HTTP mode (gate on a `SkipLocalDownload`-style flag; smallest diff, but response shape becomes transport-dependent); (2) return presigned-URL-only for the HTTP transport (specialization of #1 with clearer intent); (3) add a download-proxy tool that streams bytes back over the MCP transport (most capability, but binary streaming + size limits + a second code path).
   - Research flags: go-sdk v1.6.1's `Stateless: true` interaction with `convert_file`'s in-flight progress-notification streaming is flagged LOW confidence — live-verify before committing to the stateless design; also confirm server-side Streamable HTTP is actually present at the pinned version.
