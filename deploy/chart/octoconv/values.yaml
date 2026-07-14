@@ -31,6 +31,10 @@ api:
   image:
     repository: "octoconv-api"
   replicas: 1
+  # OPER-01/D-01: comma-separated operator client UUIDs authorized for
+  # /v1/system/presets; empty = no operators, fail-closed. Parsed once at
+  # API startup -- changing this value requires an API restart.
+  operatorClientIds: ""
 
 worker:
   image:
