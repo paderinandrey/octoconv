@@ -1,0 +1,25 @@
+# E2E overlay — layered ON TOP of values-local.yaml, NEVER standalone:
+#
+#   helm upgrade octoconv deploy/chart/octoconv \
+#     -f deploy/chart/octoconv/values-local.yaml \
+#     -f deploy/chart/octoconv/values-e2e.yaml --wait --timeout 10m
+#
+# Enables the in-cluster E2E Job (templates/job-e2e.yaml, gated on
+# e2e.enabled) and relaxes ONLY the api's SSRF/rate-limit guards to mirror
+# docker-compose.e2e.yml's already-accepted trust model (T-24-09).
+# validateCallbackURL (the guard these open) runs exclusively inside the api
+# process at job-creation time — these relaxations stay OFF webhook-worker.
+
+e2e:
+  enabled: true
+
+api:
+  extraEnv:
+    WEBHOOK_ALLOW_PRIVATE_IPS: "true"
+    WEBHOOK_ALLOW_INSECURE_HTTP: "true"
+    # The e2e suite's status polling (many jobs back-to-back, single
+    # in-cluster client IP) exceeds the production RATE_LIMIT_* defaults
+    # (60 ip-rpm / 120 client-rpm, ConfigMap) — mirrors
+    # docker-compose.e2e.yml's identical relaxation.
+    RATE_LIMIT_IP_RPM: "6000"
+    RATE_LIMIT_CLIENT_RPM: "6000"

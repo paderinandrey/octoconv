@@ -1,0 +1,26 @@
+# Build stage — compiles the internal/e2e package into a standalone test
+# binary (`go test -c`), mirroring Dockerfile.api's base-image pattern. No
+# libvips/LibreOffice/chromium: the e2e binary is an HTTP + Postgres client
+# that drives the already-deployed stack, it never runs conversions itself.
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go test -c -o /out/e2e.test ./internal/e2e
+
+# Runtime stage
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/e2e.test /usr/local/bin/e2e.test
+# The compiled test reads fixtures via filepath.Join("testdata", ...)
+# relative to its working directory — ship testdata alongside the binary.
+COPY --from=build /src/internal/e2e/testdata /work/testdata
+WORKDIR /work
+USER nobody
+# -test.skip=TestPDFANonCompliantE2E: that test depends on the compose-only
+# veraPDF soffice fault-injection shim (docker-compose.e2e.yml), which is
+# out of scope for the in-cluster Job — see 24-03-PLAN.md "Scoped E2E run".
+ENTRYPOINT ["/usr/local/bin/e2e.test", "-test.v", "-test.timeout=20m", "-test.skip=TestPDFANonCompliantE2E"]
