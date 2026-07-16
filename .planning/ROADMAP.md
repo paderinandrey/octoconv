@@ -98,7 +98,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 - [x] **Phase 24: Helm Chart Core & Landmine Closure** - Full stack deploys via `helm install` on OrbStack k8s; four SEED-004 landmines closed; in-cluster E2E passes as a Job
 - [x] **Phase 25: MCP Streamable HTTP** - `cmd/mcp-http` streamable-HTTP endpoint with per-request caller-key pass-through, in-cluster Service
 - [x] **Phase 26: Operator System-Presets REST** - `/v1/system/presets` gated by `OPERATOR_CLIENT_IDS` env allowlist, 404-no-leak for non-operators (completed 2026-07-14)
-- [ ] **Phase 27: KEDA Autoscaling** - Queue-depth relocated to always-on api; per-engine-class ScaledObjects scale 0→N; webhook-worker fixed at 2 replicas
+- [x] **Phase 27: KEDA Autoscaling** - Queue-depth relocated to always-on api; per-engine-class ScaledObjects scale 0→N; webhook-worker fixed at 2 replicas (completed 2026-07-16)
 - [ ] **Phase 28: Autoscale Load-Proof** - Timestamped 0→N→0 demonstration under burst load; long document job survives graceful scale-down
 
 ## Phase Details
@@ -165,7 +165,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 **Plans**: 3 plans
   - [x] 27-01-PLAN.md — KEDA-01 pure Go: relocate queue-depth collector to always-on api (all 4 queues) + per-class asynq ShutdownTimeout + compose-E2E validation (D-01/D-02/D-03)
   - [x] 27-02-PLAN.md — KEDA-02 chart: in-chart Prometheus + api :9090 Service port + NetworkPolicy Prometheus-admission fix + 3 gated ScaledObjects (image/document/html) + keda/prometheus values (D-04..D-10)
-  - [ ] 27-03-PLAN.md — KEDA-02 live gate on OrbStack: helm-install KEDA v2.20.1, scale-from-zero proof (SC1 metric at 0 replicas, SC2 all-three 0→1, webhook-worker fixed 2), teardown (D-11/D-12/D-13)
+  - [x] 27-03-PLAN.md — KEDA-02 live gate on OrbStack: helm-install KEDA v2.20.1, scale-from-zero proof (SC1 metric at 0 replicas, SC2 all-three 0→1, webhook-worker fixed 2), teardown (D-11/D-12/D-13)
 **Notes**:
   - KEDA-01 (queue-depth exposition relocation) is folded in as this phase's first plan: it is pure Go with no chart/manifest changes and can be validated against the existing compose E2E suite before any k8s work touches it. It is the single most load-bearing fix this milestone must not skip — it must be resolved before any `ScaledObject` manifest is written (otherwise a worker at 0 replicas has no pod exposing the metric KEDA needs to scale it back up).
   - Research flags: exact KEDA Prometheus-scaler tuning for this project's real task-duration distributions needs execution-time research; demo-tuned starting values (`pollingInterval` ~5-15s, `cooldownPeriod` ~60s) are a starting point, not production values. Confirm asynq v0.26.0's `Server.Shutdown()` deadline semantics so grace-period behavior holds through asynq's own shutdown path.
@@ -214,7 +214,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 24. Helm Chart Core & Landmine Closure | v1.6 | 0/? | Not started | - |
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
 | 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
-| 27. KEDA Autoscaling | v1.6 | 2/3 | In Progress|  |
+| 27. KEDA Autoscaling | v1.6 | 3/3 | Complete   | 2026-07-16 |
 | 28. Autoscale Load-Proof | v1.6 | 0/? | Not started | - |
 
 ---
