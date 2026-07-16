@@ -4,8 +4,8 @@ milestone: v1.6
 milestone_name: Kubernetes & KEDA
 status: executing
 stopped_at: Phase 27 context gathered
-last_updated: "2026-07-16T20:23:03.770Z"
-last_activity: 2026-07-16 -- Phase 27 planning complete
+last_updated: "2026-07-16T20:26:50.075Z"
+last_activity: 2026-07-16 -- Phase 27 execution started
 progress:
   total_phases: 5
   completed_phases: 3
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 27 — keda autoscaling
+**Current focus:** Phase 27 — keda-autoscaling
 
 ## Current Position
 
-Phase: 27
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-16 -- Phase 27 planning complete
+Phase: 27 (keda-autoscaling) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 27
+Last activity: 2026-07-16 -- Phase 27 execution started
 
 ## Performance Metrics
 
