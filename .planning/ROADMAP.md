@@ -162,7 +162,10 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   2. KEDA (v2.20.x, helm-installed) `ScaledObject`s for the image, document, and html workers scale each from `minReplicaCount 0` on its own queue-depth signal, driven by the Prometheus scaler (never asynq's internal Redis list keys).
   3. webhook-worker has no `ScaledObject` at all and runs a fixed `replicas: 2` Deployment — a fail-closed hard gate (never scaled to zero, since it is the sole host of the fleet-wide Postgres-advisory-lock sweeper), shipped in this same phase, not deferred.
   4. Autoscaling is gated behind a `keda.enabled` chart flag; `pollingInterval`/`cooldownPeriod` are tuned per engine class (image: fast/bursty, shorter cooldown; document/html: slow tasks, longer cooldown so one long task doesn't read as sustained load or premature idleness).
-**Plans**: TBD
+**Plans**: 3 plans
+  - [ ] 27-01-PLAN.md — KEDA-01 pure Go: relocate queue-depth collector to always-on api (all 4 queues) + per-class asynq ShutdownTimeout + compose-E2E validation (D-01/D-02/D-03)
+  - [ ] 27-02-PLAN.md — KEDA-02 chart: in-chart Prometheus + api :9090 Service port + NetworkPolicy Prometheus-admission fix + 3 gated ScaledObjects (image/document/html) + keda/prometheus values (D-04..D-10)
+  - [ ] 27-03-PLAN.md — KEDA-02 live gate on OrbStack: helm-install KEDA v2.20.1, scale-from-zero proof (SC1 metric at 0 replicas, SC2 all-three 0→1, webhook-worker fixed 2), teardown (D-11/D-12/D-13)
 **Notes**:
   - KEDA-01 (queue-depth exposition relocation) is folded in as this phase's first plan: it is pure Go with no chart/manifest changes and can be validated against the existing compose E2E suite before any k8s work touches it. It is the single most load-bearing fix this milestone must not skip — it must be resolved before any `ScaledObject` manifest is written (otherwise a worker at 0 replicas has no pod exposing the metric KEDA needs to scale it back up).
   - Research flags: exact KEDA Prometheus-scaler tuning for this project's real task-duration distributions needs execution-time research; demo-tuned starting values (`pollingInterval` ~5-15s, `cooldownPeriod` ~60s) are a starting point, not production values. Confirm asynq v0.26.0's `Server.Shutdown()` deadline semantics so grace-period behavior holds through asynq's own shutdown path.
@@ -211,7 +214,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 24. Helm Chart Core & Landmine Closure | v1.6 | 0/? | Not started | - |
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
 | 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
-| 27. KEDA Autoscaling | v1.6 | 0/? | Not started | - |
+| 27. KEDA Autoscaling | v1.6 | 0/3 | Planned | - |
 | 28. Autoscale Load-Proof | v1.6 | 0/? | Not started | - |
 
 ---
