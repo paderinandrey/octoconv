@@ -219,8 +219,24 @@ assert_eq "0" "${WEBHOOK_SO_COUNT_START:-0}" "ScaledObjects targeting webhook-wo
 # ---------------------------------------------------------------------------
 log "STEP 6: SC1 -- octoconv_queue_depth resolves at genuinely 0 replicas"
 
-IMAGE_REPLICAS_BEFORE=$(kubectl get deployment worker -n "$NAMESPACE" -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
-IMAGE_REPLICAS_BEFORE="${IMAGE_REPLICAS_BEFORE:-0}"
+# The worker Deployment's chart-owned spec.replicas defaults to 1 (helm
+# renders it that way before KEDA's HPA takes ownership). KEDA only scales
+# it down to minReplicaCount=0 once it has observed the queue empty across
+# its cooldownPeriod (60s for image) from ScaledObject creation -- this is
+# expected startup behavior, not a failure, so poll rather than assert
+# immediately. Bounded to cooldownPeriod (60s) + generous margin.
+echo "waiting for worker (image) to settle at 0 replicas (KEDA cooldownPeriod=60s + margin)..."
+IMAGE_REPLICAS_BEFORE="1"
+waited=0
+while [ "$waited" -lt 150 ]; do
+	IMAGE_REPLICAS_BEFORE=$(kubectl get deployment worker -n "$NAMESPACE" -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
+	IMAGE_REPLICAS_BEFORE="${IMAGE_REPLICAS_BEFORE:-0}"
+	if [ "$IMAGE_REPLICAS_BEFORE" = "0" ]; then
+		break
+	fi
+	sleep 5
+	waited=$((waited + 5))
+done
 assert_eq "0" "$IMAGE_REPLICAS_BEFORE" "worker (image) Deployment status.replicas before any job"
 
 EXTERNAL_METRIC_NAME=""
@@ -289,7 +305,8 @@ assert_nonempty "$CLIENT_KEY" "minted gate client + API key"
 # postJob submits one real conversion job of the given class's type and
 # returns the job_id. HTTP_STATUS is set as a side effect (curl -w).
 postJob() {
-	local filename="$1" target="$2" content_type="$3" out_file="/tmp/keda-gate-post-${filename}.json"
+	local filename="$1" target="$2" content_type="$3"
+	local out_file="/tmp/keda-gate-post-${filename}.json"
 	HTTP_STATUS=$(curl -s -o "$out_file" -w '%{http_code}' -X POST "$API_BASE/v1/jobs" \
 		-H "Authorization: ApiKey $CLIENT_KEY" \
 		-F "target=$target" \
