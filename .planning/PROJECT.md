@@ -68,6 +68,7 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ CFB-различение: собственный bounded-парсер директории (cycle-guard, fuzz 3.5M/0), три различённых 422 — Phase 22 (CFB-01..02)
 - ✓ Настоящая ISO 19005-2b валидация PDF/A: veraPDF в document-worker (Debian-JRE, amd64 pin), terminal fail-closed, замеренный go/no-go (p95 4.65s/10s) — Phase 23 (PDFA-01..02)
 - ✓ Operator-only REST для system-пресетов: /v1/system/presets за OPERATOR_CLIENT_IDS env-allowlist (fail-closed/fail-loud), byte-identical no-leak 404, ноль миграций; попутно закрыт version-collision в repo.Create (deactivate→recreate) — Phase 26 (OPER-01, verification 5/5)
+- ✓ KEDA-автоскейл per engine-class: queue-depth экспозиция перенесена на always-on api (все 4 очереди; воркеры больше не регистрируют коллектор), per-class asynq ShutdownTimeout (8s-дефолт делал grace-периоды мёртвыми), in-chart Prometheus + 3 ScaledObject (minReplicaCount 0, pending+active PromQL, двойной флаг keda.enabled&&prometheus.enabled), webhook-worker жёстко 2 реплики без ScaledObject; live-гейт scripts/keda-gate.sh 18/18 на OrbStack (SC1 через external metrics API при 0 реплик, все 3 класса 0→1, image полный цикл →0) — Phase 27 (KEDA-01/02, verification 8/8; залповый 0→N→0 под нагрузкой — Phase 28)
 
 ### Active
 
@@ -157,4 +158,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-14 after Phase 26 completion (operator presets REST)*
+*Last updated: 2026-07-17 after Phase 27 completion (KEDA autoscaling)*
