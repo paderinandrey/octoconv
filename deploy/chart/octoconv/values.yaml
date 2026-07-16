@@ -134,3 +134,28 @@ prometheus:
     limits:
       cpu: "500m"
       memory: "256Mi"
+
+# Phase 27 (KEDA-02): per-class ScaledObject trigger values. Gated on BOTH
+# keda.enabled AND prometheus.enabled together (scaledobject-*.yaml) — a
+# ScaledObject's trigger points at the in-chart Prometheus Service, so it
+# must never render unless that Service also renders. Default false (D-10).
+# webhook class deliberately has NO block here — it is hard-excluded from
+# autoscaling (D-09), fixed at replicas: 2 in webhookWorker above.
+# These are demo starting values; production tuning is Phase 28.
+keda:
+  enabled: false
+  image:
+    threshold: "5"
+    maxReplicaCount: 4
+    pollingInterval: 5
+    cooldownPeriod: 60
+  document:
+    threshold: "1"
+    maxReplicaCount: 2
+    pollingInterval: 15
+    cooldownPeriod: 120
+  html:
+    threshold: "2"
+    maxReplicaCount: 2
+    pollingInterval: 10
+    cooldownPeriod: 90

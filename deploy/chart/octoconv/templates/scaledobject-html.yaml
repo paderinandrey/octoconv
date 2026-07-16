@@ -1,0 +1,40 @@
+{{/*
+KEDA ScaledObject — html worker (Chromium PDF rendering). Scales the
+`chromium-worker` Deployment from 0 on
+sum(octoconv_queue_depth{queue="html", state=~"pending|active"}) via the
+Prometheus scaler (D-04 — pending+active only, never
+retry/scheduled/archived).
+
+CO-DEPENDENCY GUARD: see scaledobject-image.yaml header — gated on BOTH
+keda.enabled AND prometheus.enabled together.
+*/}}
+{{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-html-scaledobject
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: chromium-worker
+  minReplicaCount: 0
+  maxReplicaCount: {{ .Values.keda.html.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.html.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.html.cooldownPeriod }}
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.{{ .Values.global.namespace }}.svc.cluster.local:9090
+        query: sum(octoconv_queue_depth{queue="html", state=~"pending|active"})
+        threshold: {{ .Values.keda.html.threshold | quote }}
+        # An empty PromQL result (genuinely empty queue) is treated as 0,
+        # NOT a scaler failure — false would make a routine api restart
+        # spuriously trip fallback.replicas across this class (Pitfall 4).
+        ignoreNullValues: "true"
+{{- end }}

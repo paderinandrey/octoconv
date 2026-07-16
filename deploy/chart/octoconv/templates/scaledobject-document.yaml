@@ -1,0 +1,40 @@
+{{/*
+KEDA ScaledObject — document worker (LibreOffice/PDF pipeline). Scales the
+`document-worker` Deployment from 0 on
+sum(octoconv_queue_depth{queue="document", state=~"pending|active"}) via
+the Prometheus scaler (D-04 — pending+active only, never
+retry/scheduled/archived).
+
+CO-DEPENDENCY GUARD: see scaledobject-image.yaml header — gated on BOTH
+keda.enabled AND prometheus.enabled together.
+*/}}
+{{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-document-scaledobject
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: document-worker
+  minReplicaCount: 0
+  maxReplicaCount: {{ .Values.keda.document.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.document.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.document.cooldownPeriod }}
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.{{ .Values.global.namespace }}.svc.cluster.local:9090
+        query: sum(octoconv_queue_depth{queue="document", state=~"pending|active"})
+        threshold: {{ .Values.keda.document.threshold | quote }}
+        # An empty PromQL result (genuinely empty queue) is treated as 0,
+        # NOT a scaler failure — false would make a routine api restart
+        # spuriously trip fallback.replicas across this class (Pitfall 4).
+        ignoreNullValues: "true"
+{{- end }}
