@@ -47,6 +47,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
@@ -1168,6 +1169,18 @@ func assertDownloadIsImage(t *testing.T, downloadURL, wantFormat string) {
 func TestQueueDepthMetricRelocationE2E(t *testing.T) {
 	cfg := e2eSetup(t)
 
+	// asynq only adds a queue name to its "asynq:queues" registry set on the
+	// FIRST real enqueue (internal/rdb, e.g. EnqueueUnique/ScheduleUnique) —
+	// never at asynq.NewServer(Queues: ...) startup. GetQueueInfo/CurrentStats
+	// returns errors.NotFound (silently skipped by queueDepthCollector.Collect)
+	// for any queue that has never had a task, which a freshly-created compose
+	// stack has for all four queues. seedQueueRegistry primes just the
+	// registry membership directly against Redis — zero tasks are created, no
+	// worker ever processes anything — purely so CurrentStats' pre-check finds
+	// the queue "known" and returns real (zero-valued) counts, matching what
+	// happens naturally in production the moment the first job is submitted.
+	seedQueueRegistry(t, "image", "document", "html", "webhook")
+
 	u, err := url.Parse(cfg.baseURL)
 	if err != nil {
 		t.Fatalf("parse E2E_BASE_URL %q: %v", cfg.baseURL, err)
@@ -1224,5 +1237,35 @@ func TestQueueDepthMetricRelocationE2E(t *testing.T) {
 	}
 	if strings.Contains(string(workerBody), "octoconv_queue_depth") {
 		t.Fatalf("image worker :9191/metrics still contains octoconv_queue_depth — collector was NOT relocated off the worker (Task 1 regression)")
+	}
+}
+
+// seedQueueRegistry adds each given queue name to asynq's "asynq:queues"
+// Redis SET (base.AllQueues) directly, without creating any task. This is
+// the ONLY state asynq's CurrentStats pre-check ("does this queue exist")
+// consults; it is otherwise populated lazily on a queue's first real
+// enqueue. SADD is idempotent, so re-running this against an already-seeded
+// stack is a harmless no-op. REDIS_ADDR defaults to localhost:6379, matching
+// the host-published port docker-compose.yml already exposes (unrelated to
+// the E2E-only metrics port overrides).
+func seedQueueRegistry(t *testing.T, queues ...string) {
+	t.Helper()
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb.Close()
+
+	ctx := context.Background()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		t.Fatalf("seedQueueRegistry: redis ping %s: %v", addr, err)
+	}
+	members := make([]interface{}, len(queues))
+	for i, q := range queues {
+		members[i] = q
+	}
+	if err := rdb.SAdd(ctx, "asynq:queues", members...).Err(); err != nil {
+		t.Fatalf("seedQueueRegistry: SADD asynq:queues %v: %v", queues, err)
 	}
 }
