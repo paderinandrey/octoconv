@@ -119,3 +119,18 @@ minio:
 e2e:
   image: "octoconv-e2e"
   enabled: false
+
+# Phase 27 (KEDA-02): minimal in-chart Prometheus (Deployment+ConfigMap+
+# Service), scraping api's relocated octoconv_queue_depth metric so KEDA's
+# Prometheus scaler has something to query. Default false (D-10) — base
+# chart installs on a cluster without KEDA CRDs or Prometheus at all.
+prometheus:
+  enabled: false
+  image: "prom/prometheus:v3.13.1"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"

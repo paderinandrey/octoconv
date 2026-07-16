@@ -1,0 +1,91 @@
+{{/*
+In-chart minimal Prometheus (D-11) — a Deployment+ConfigMap+Service combo,
+same single-file convention as redis.yaml, gated behind prometheus.enabled
+(D-10, default false — base chart installs on a cluster without KEDA CRDs
+or Prometheus). Scrapes api's relocated octoconv_queue_depth (plan 01) so
+KEDA's Prometheus scaler (scaledobject-*.yaml) has a metric to query.
+
+PITFALL 1: this pod is a scrape SOURCE, not a metrics target — it deliberately
+does NOT carry octoconv.io/tier: app (see _helpers.tpl tier-label boundary
+note / deployment-mcp-http.yaml precedent). Giving it the tier label would
+subject Prometheus itself to the metrics NetworkPolicy's :9090 ingress
+restriction, which is backwards: Prometheus is the caller, api is the callee.
+Instead it gets its own app.kubernetes.io/component: prometheus label, which
+networkpolicy-metrics.yaml's corrected :9090 rule admits by podSelector.
+*/}}
+{{- if .Values.prometheus.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
+    spec:
+      containers:
+        - name: prometheus
+          image: {{ .Values.prometheus.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+          resources:
+            requests:
+              cpu: {{ .Values.prometheus.resources.requests.cpu | quote }}
+              memory: {{ .Values.prometheus.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.prometheus.resources.limits.cpu | quote }}
+              memory: {{ .Values.prometheus.resources.limits.memory | quote }}
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: octoconv-api
+        metrics_path: /metrics
+        static_configs:
+          - targets:
+              - api.{{ .Values.global.namespace }}.svc.cluster.local:9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "octoconv.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 4 }}
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090
+{{- end }}
