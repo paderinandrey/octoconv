@@ -456,22 +456,27 @@ Read directly from `/Users/apaderin/go/pkg/mod/github.com/hibiken/asynq@v0.26.0/
 | A4 | The external metric name for a single-trigger prometheus ScaledObject follows the `s0-prometheus`-shaped pattern | Pitfall 5 | Low — the research explicitly recommends discovering the name live via `kubectl get scaledobject ... -o jsonpath='{.status.externalMetricNames}'` rather than hardcoding, specifically because this pattern wasn't independently confirmed; the mitigation already accounts for the uncertainty |
 | A5 | `docker exec`/`docker compose exec` shelling from the Go e2e test is the right mechanism for D-03's compose-E2E metrics assertion (vs. a compose override or log-inspection fallback) | Pitfall 3 | Medium — this is presented as a recommendation with fallbacks, not a locked decision; the planner must choose one concrete mechanism, and `wget`/`curl` presence in the minimal runtime images (`debian:bookworm-slim` + `ca-certificates`) was flagged as unverified this session — verify at execution time before committing to this approach |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All three questions below were resolved during Phase 27 planning; each carries an inline `RESOLVED:` pointer to the plan/task that closes it.
 
 1. **Should Phase 27 fix asynq's `ShutdownTimeout` gap, or explicitly defer it to Phase 28?**
    - What we know: the gap is real and code-verified (see asynq Server Shutdown Semantics section); the fix is cheap and touches files KEDA-01 already edits.
    - What's unclear: whether the user/planner wants Phase 27's scope to stay strictly "queue-depth relocation + ScaledObjects" or absorb this adjacent fix now.
    - Recommendation: fix now (Pattern 2) — it's the same files, same plan, and removes a confirmed Phase 28 blocker. If deferred, it must be an explicit, documented decision (e.g., a new item in Phase 28's own CONTEXT.md), not a silent gap discovered mid-Phase-28.
+   - **RESOLVED: fix now.** Plan 27-01 Task 2 sets a per-class `asynq.Config.ShutdownTimeout` in all four worker mains (image `ENGINE_TIMEOUT`+10s, document `DOCUMENT_ENGINE_TIMEOUT`+10s, html `HTML_ENGINE_TIMEOUT`+10s, webhook flat 30s), each strictly under its pod `terminationGracePeriodSeconds` — absorbing Pattern 2 into this phase per orchestrator guidance.
 
 2. **Exact mechanism for D-03's compose-E2E metrics reachability (Pitfall 3).**
    - What we know: the naive HTTP-GET approach fails (loopback-bound port); `docker compose exec` shelling is the leading candidate but depends on `wget`/`curl` being present in the minimal runtime images, which was not verified this session.
    - What's unclear: whether `wget`/`curl` exist in `debian:bookworm-slim` + `ca-certificates`-only images (`Dockerfile.api`, worker Dockerfiles) — if neither is present, a different mechanism (log-inspection, or a validation-only compose override) is needed.
    - Recommendation: verify `wget`/`curl` presence in the built images as the FIRST step of implementing D-03 (`docker run --rm octoconv-api:dev which curl wget`), before writing the assertion; fall back to log-line inspection (`docker compose logs api | grep '📊 metrics listening'` combined with a unit test for the collector wiring) if neither tool is present.
+   - **RESOLVED: validation-only compose override + host-run Go test.** Plan 27-01 Task 3 rejects the docker-exec approach (minimal images ship no curl/wget) and instead publishes the loopback-bound metrics ports to the host ONLY in `docker-compose.e2e.yml` (`METRICS_ADDR: "0.0.0.0:9090"`, `api` → `9190:9090`, `worker` → `9191:9090`); the host-run `TestQueueDepthMetricRelocationE2E` GETs those ports directly. Base `docker-compose.yml` keeps the loopback bind.
 
 3. **Prometheus in-chart namespace: confirmed `octoconv` namespace (matching D-11), but the exact Service name for `serverAddress` is a naming choice, not yet fixed.**
    - What we know: D-11 says "inside our chart" (same Helm release, `octoconv` namespace); the chart's existing naming convention uses short literal Service names (`api`, presumably `postgres`/`redis`/`minio` — not independently re-verified this session but consistent with `service-api.yaml`'s comment about staying un-prefixed for FQDN simplicity).
    - What's unclear: exact chosen name (e.g., `prometheus` vs `octoconv-prometheus`) — cosmetic, but must be consistent between the Service template, the ScaledObjects' `serverAddress`, and the NetworkPolicy fix (Pitfall 1)'s `podSelector` label.
    - Recommendation: planner picks a short literal name (e.g., `prometheus`, matching the `api`/likely `postgres`/`redis`/`minio` convention) and uses it consistently across all three touch points in one plan, to avoid a three-way naming drift.
+   - **RESOLVED: literal `prometheus`.** Plan 27-02 Task 1 names the Service `prometheus` (ClusterIP :9090), and it is referenced consistently across all touch points in the same plan: the ScaledObjects' `serverAddress: http://prometheus.{{ .Values.global.namespace }}.svc.cluster.local:9090` (Task 2) and the NetworkPolicy `podSelector` `app.kubernetes.io/component: prometheus` (Task 1).
 
 ## Sources
 
