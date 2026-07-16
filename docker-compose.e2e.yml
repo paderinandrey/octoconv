@@ -13,6 +13,15 @@
 #
 # The production docker-compose.yml keeps the SSRF guard fully engaged;
 # nothing in this override file is copied there.
+#
+# KEDA-01/D-03 (Phase 27 Plan 01): the api.ports and worker.ports/environment
+# blocks below publish the loopback-bound METRICS_ADDR to the host so the Go
+# E2E test (TestQueueDepthMetricRelocationE2E) can GET :9090/metrics directly
+# — the runtime images ship no curl/wget/shell fetch tool, so a plain host-run
+# HTTP GET against a host-published port is the only reachability mechanism
+# available. VALIDATION-ONLY: base docker-compose.yml keeps METRICS_ADDR at
+# 127.0.0.1:9090 (loopback, unpublished) in production; these overrides are
+# never copied there.
 services:
   api:
     environment:
@@ -25,6 +34,9 @@ services:
       # keeps the real limits; only tests relax them.
       RATE_LIMIT_IP_RPM: "6000"
       RATE_LIMIT_CLIENT_RPM: "6000"
+      # KEDA-01/D-03: bind /metrics to all interfaces so the host-published
+      # port below is reachable; validation-only, never shipped to production.
+      METRICS_ADDR: "0.0.0.0:9090"
     # validateCallbackURL runs inside the api process at job-creation time
     # (net.LookupHost), so api itself needs the host-gateway alias too — not
     # just the webhook-worker services which actually deliver the webhook
@@ -37,6 +49,22 @@ services:
     # not a webhook-worker concern; do NOT add them to webhook-worker-1/-2.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ports:
+      # KEDA-01/D-03: host-published metrics port proving api now serves
+      # octoconv_queue_depth for all four queues (relocation assertion).
+      - "9190:9090"
+
+  # KEDA-01/D-03 (Phase 27 Plan 01): image worker's metrics port, published so
+  # TestQueueDepthMetricRelocationE2E can assert it NO LONGER serves
+  # octoconv_queue_depth (relocation proof) while still returning HTTP 200
+  # (endpoint retained). Representative spot-check for all four workers — see
+  # 27-01-PLAN.md's scope note; the other three workers' collector removal is
+  # proven statically by Task 1's `grep -rl`/`go vet` gate.
+  worker:
+    environment:
+      METRICS_ADDR: "0.0.0.0:9090"
+    ports:
+      - "9191:9090"
 
   # webhook-worker-1/-2 deliver webhooks (HandleWebhookDeliver, Phase 16) —
   # they are the processes that actually dial the E2E test's host-bound

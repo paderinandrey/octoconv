@@ -36,6 +36,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1144,5 +1145,84 @@ func assertDownloadIsImage(t *testing.T, downloadURL, wantFormat string) {
 	}
 	if detected != wantFormat {
 		t.Fatalf("downloaded image format = %q, want %q", detected, wantFormat)
+	}
+}
+
+// TestQueueDepthMetricRelocationE2E is the live half of D-03 (KEDA-01, Phase
+// 27 Plan 01): it proves the octoconv_queue_depth collector relocation
+// (Task 1) against a live compose stack, BEFORE any k8s work. The runtime
+// images ship no curl/wget/shell fetch tool (RESEARCH.md Pitfall 3), so
+// reachability is via docker-compose.e2e.yml's host-published, 0.0.0.0-bound
+// metrics ports (api :9190, image worker :9191) rather than docker-exec.
+//
+// Scope note (checker WARNING 2, documented per 27-01-PLAN.md): only the
+// image worker's absence of the metric is live-checked here, not all four
+// worker binaries. This is deliberate and sufficient — the collector removal
+// in Task 1 is a mechanically identical 3-line deletion applied to all four
+// worker mains, and Task 1's acceptance criteria already statically prove
+// (via `grep -rl "NewQueueDepthCollector" cmd/` returning exactly
+// cmd/api/main.go, plus a no-unused-import `go vet`) that document/chromium/
+// webhook workers no longer register the collector. Publishing three more
+// host ports to live-assert the identical deletion would add compose surface
+// and CI wiring for zero additional coverage.
+func TestQueueDepthMetricRelocationE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+
+	u, err := url.Parse(cfg.baseURL)
+	if err != nil {
+		t.Fatalf("parse E2E_BASE_URL %q: %v", cfg.baseURL, err)
+	}
+	metricsHost := u.Hostname()
+	if metricsHost == "" {
+		metricsHost = "localhost"
+	}
+
+	apiMetricsURL := fmt.Sprintf("http://%s:9190/metrics", metricsHost)
+	workerMetricsURL := fmt.Sprintf("http://%s:9191/metrics", metricsHost)
+
+	// (a) api :9190 must expose octoconv_queue_depth for all four queues —
+	// the relocated single source of truth KEDA will scrape.
+	apiResp, err := e2eHTTP.Get(apiMetricsURL)
+	if err != nil {
+		t.Fatalf("GET %s (api metrics port unreachable — check docker-compose.e2e.yml publishes 9190:9090 with METRICS_ADDR=0.0.0.0:9090): %v", apiMetricsURL, err)
+	}
+	defer apiResp.Body.Close()
+	if apiResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(apiResp.Body, 1024))
+		t.Fatalf("GET %s status = %d, want 200; body=%s", apiMetricsURL, apiResp.StatusCode, body)
+	}
+	apiBody, err := io.ReadAll(apiResp.Body)
+	if err != nil {
+		t.Fatalf("read api metrics body: %v", err)
+	}
+	apiBodyStr := string(apiBody)
+	if !strings.Contains(apiBodyStr, "octoconv_queue_depth") {
+		t.Fatalf("api :9190/metrics does not contain octoconv_queue_depth at all — collector not registered on api (Task 1 regression)")
+	}
+	for _, q := range []string{"image", "document", "html", "webhook"} {
+		label := fmt.Sprintf("queue=%q", q)
+		if !strings.Contains(apiBodyStr, label) {
+			t.Errorf("api :9190/metrics missing octoconv_queue_depth series for %s", label)
+		}
+	}
+
+	// (b) image worker :9191 must return HTTP 200 (endpoint retained) but must
+	// NOT contain octoconv_queue_depth (relocation proof — worker no longer
+	// serves it).
+	workerResp, err := e2eHTTP.Get(workerMetricsURL)
+	if err != nil {
+		t.Fatalf("GET %s (worker metrics port unreachable — check docker-compose.e2e.yml publishes 9191:9090 with METRICS_ADDR=0.0.0.0:9090): %v", workerMetricsURL, err)
+	}
+	defer workerResp.Body.Close()
+	if workerResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(workerResp.Body, 1024))
+		t.Fatalf("GET %s status = %d, want 200 (endpoint should be retained even without the collector); body=%s", workerMetricsURL, workerResp.StatusCode, body)
+	}
+	workerBody, err := io.ReadAll(workerResp.Body)
+	if err != nil {
+		t.Fatalf("read worker metrics body: %v", err)
+	}
+	if strings.Contains(string(workerBody), "octoconv_queue_depth") {
+		t.Fatalf("image worker :9191/metrics still contains octoconv_queue_depth — collector was NOT relocated off the worker (Task 1 regression)")
 	}
 }
