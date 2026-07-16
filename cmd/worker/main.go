@@ -80,6 +80,12 @@ func main() {
 		Concurrency:    envInt("WORKER_CONCURRENCY", 4),
 		Queues:         map[string]int{queue.QueueImage: 4},
 		RetryDelayFunc: queue.RetryDelayFunc,
+		// Pattern 2: asynq defaults ShutdownTimeout to 8s, silently capping
+		// the graceful window regardless of the pod's
+		// terminationGracePeriodSeconds (150s for image, Phase 24). Aligning
+		// it to ENGINE_TIMEOUT+margin lets a genuinely long in-flight
+		// conversion survive SIGTERM instead of being aborted+requeued.
+		ShutdownTimeout: envDuration("ENGINE_TIMEOUT", 120*time.Second) + 10*time.Second,
 	})
 
 	// KEDA-01/D-01: the queue-depth collector now lives solely on the

@@ -105,6 +105,13 @@ func main() {
 		Concurrency:    envInt("WEBHOOK_WORKER_CONCURRENCY", 4),
 		Queues:         map[string]int{queue.QueueWebhook: 1},
 		RetryDelayFunc: queue.RetryDelayFunc,
+		// Pattern 2: asynq defaults ShutdownTimeout to 8s, silently capping
+		// the graceful window regardless of the pod's
+		// terminationGracePeriodSeconds (60s for webhook, Phase 24). A flat
+		// 30s (not derived from an env var — no single clean one exists here;
+		// per-attempt HTTP timeout is 10s) covers one delivery attempt plus
+		// presign/Postgres read with margin, staying under the pod grace.
+		ShutdownTimeout: 30 * time.Second,
 	})
 
 	// KEDA-01/D-01/D-02: the queue-depth collector now lives solely on the

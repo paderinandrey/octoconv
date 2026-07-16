@@ -85,6 +85,13 @@ func main() {
 		Concurrency:    envInt("DOCUMENT_WORKER_CONCURRENCY", 2),
 		Queues:         map[string]int{queue.QueueDocument: 1},
 		RetryDelayFunc: queue.RetryDelayFunc,
+		// Pattern 2: asynq defaults ShutdownTimeout to 8s, silently capping
+		// the graceful window regardless of the pod's
+		// terminationGracePeriodSeconds (330s for document, Phase 24).
+		// Aligning it to DOCUMENT_ENGINE_TIMEOUT+margin lets a genuinely long
+		// in-flight LibreOffice conversion survive SIGTERM instead of being
+		// aborted+requeued.
+		ShutdownTimeout: envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second) + 10*time.Second,
 	})
 
 	// KEDA-01/D-01: the queue-depth collector now lives solely on the

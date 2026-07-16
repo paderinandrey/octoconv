@@ -77,6 +77,12 @@ func main() {
 		Concurrency:    envInt("HTML_WORKER_CONCURRENCY", 2),
 		Queues:         map[string]int{queue.QueueHTML: 1},
 		RetryDelayFunc: queue.RetryDelayFunc,
+		// Pattern 2: asynq defaults ShutdownTimeout to 8s, silently capping
+		// the graceful window regardless of the pod's
+		// terminationGracePeriodSeconds (90s for html, Phase 24). Aligning it
+		// to HTML_ENGINE_TIMEOUT+margin lets a genuinely long in-flight
+		// chromium render survive SIGTERM instead of being aborted+requeued.
+		ShutdownTimeout: envDuration("HTML_ENGINE_TIMEOUT", 60*time.Second) + 10*time.Second,
 	})
 
 	// KEDA-01/D-01: the queue-depth collector now lives solely on the
