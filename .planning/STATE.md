@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.6
 milestone_name: Kubernetes & KEDA
-status: executing
-stopped_at: Phase 27 context gathered
-last_updated: "2026-07-16T20:26:50.075Z"
+status: ready_to_plan
+stopped_at: Phase 27 complete (3/3) — ready to discuss Phase 28
+last_updated: 2026-07-16T22:29:13.442Z
 last_activity: 2026-07-16 -- Phase 27 execution started
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 11
-  completed_plans: 8
+  completed_plans: 11
   percent: 60
 ---
 
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 27 — keda-autoscaling
+**Current focus:** Phase 28 — autoscale load proof
 
 ## Current Position
 
-Phase: 27 (keda-autoscaling) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 27
-Last activity: 2026-07-16 -- Phase 27 execution started
+Phase: 28
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-16
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 60 (all v1.0–v1.5)
+- Total plans completed: 63 (all v1.0–v1.5)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -66,6 +66,7 @@ Last activity: 2026-07-16 -- Phase 27 execution started
 | 22 | 2 | - | - |
 | 23 | 3 | - | - |
 | 26 | 2 | - | - |
+| 27 | 3 | - | - |
 
 **Recent Trend:**
 
