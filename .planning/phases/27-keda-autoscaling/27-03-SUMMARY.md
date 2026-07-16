@@ -182,3 +182,12 @@ None — no external service configuration required. KEDA is installed and remov
 ---
 *Phase: 27-keda-autoscaling*
 *Completed: 2026-07-17*
+
+## Self-Check: PASSED
+
+- `scripts/keda-gate.sh`: FOUND (executable)
+- `.planning/phases/27-keda-autoscaling/27-03-SUMMARY.md`: FOUND
+- Commit `d49959d` (feat, Task 1): FOUND
+- Commit `6971aba` (fix, Task 2): FOUND
+- Commit `98f87cd` (docs, SUMMARY): FOUND
+- Worktree clean, no untracked files; cluster verified clean post-teardown (0 releases, 0 keda CRDs, compose down)
