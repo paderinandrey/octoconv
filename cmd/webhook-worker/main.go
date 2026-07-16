@@ -15,12 +15,10 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
-	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/reconciler"
 	"github.com/apaderin/octoconv/internal/storage"
@@ -109,9 +107,13 @@ func main() {
 		RetryDelayFunc: queue.RetryDelayFunc,
 	})
 
-	// Register the queue-depth collector so /metrics reports per-queue task
-	// counts by state (OBS-01); read-only, pull-based on scrape.
-	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt), queue.QueueWebhook))
+	// KEDA-01/D-01/D-02: the queue-depth collector now lives solely on the
+	// always-on api process (cmd/api/main.go), registered for all four
+	// queues including webhook — webhook-worker is never KEDA-scaled (it is
+	// the sole host of the advisory-lock sweeper, fixed replicas: 2), but its
+	// depth must stay observable from the relocated single source of truth.
+	// /metrics here still serves the promauto-registered job/duration
+	// metrics; the endpoint itself is unchanged.
 
 	log.Printf("🐙 webhook-worker starting (queue=%s)", queue.QueueWebhook)
 	if err := srv.Start(mux); err != nil {
