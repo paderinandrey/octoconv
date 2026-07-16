@@ -20,3 +20,8 @@ spec:
     - name: http
       port: 8090
       targetPort: 8090
+    # Prometheus (prometheus.yaml, gated prometheus.enabled) scrapes this
+    # port to feed KEDA's Prometheus scaler (Phase 27, D-11).
+    - name: metrics
+      port: 9090
+      targetPort: 9090

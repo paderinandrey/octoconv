@@ -13,3 +13,13 @@ secrets:
   s3AccessKey: "minioadmin"
   s3SecretKey: "minioadmin"
   postgresPassword: "octo-pass"
+
+# Phase 27 (KEDA-02): local dev overlay enables the in-chart Prometheus and
+# KEDA ScaledObjects so `helm template ... -f values-local.yaml` renders the
+# full KEDA topology. prometheus.enabled=true above already satisfies the
+# co-dependency `and` guard on the ScaledObjects.
+prometheus:
+  enabled: true
+
+keda:
+  enabled: true
