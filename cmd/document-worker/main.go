@@ -14,13 +14,11 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
-	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
 	"github.com/apaderin/octoconv/internal/worker"
@@ -87,11 +85,21 @@ func main() {
 		Concurrency:    envInt("DOCUMENT_WORKER_CONCURRENCY", 2),
 		Queues:         map[string]int{queue.QueueDocument: 1},
 		RetryDelayFunc: queue.RetryDelayFunc,
+		// Pattern 2: asynq defaults ShutdownTimeout to 8s, silently capping
+		// the graceful window regardless of the pod's
+		// terminationGracePeriodSeconds (330s for document, Phase 24).
+		// Aligning it to DOCUMENT_ENGINE_TIMEOUT+margin lets a genuinely long
+		// in-flight LibreOffice conversion survive SIGTERM instead of being
+		// aborted+requeued.
+		ShutdownTimeout: envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second) + 10*time.Second,
 	})
 
-	// Register the queue-depth collector so /metrics reports per-queue task
-	// counts by state (OBS-01); read-only, pull-based on scrape.
-	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt), queue.QueueDocument))
+	// KEDA-01/D-01: the queue-depth collector now lives solely on the
+	// always-on api process (cmd/api/main.go) — a worker Deployment scaled to
+	// genuine 0 replicas by KEDA would otherwise have no pod exposing the
+	// metric KEDA needs to scale it back up. /metrics here still serves the
+	// promauto-registered job/duration metrics; the endpoint itself is
+	// unchanged.
 
 	log.Printf("🐙 document-worker starting (queue=%s)", queue.QueueDocument)
 	if err := srv.Start(mux); err != nil {

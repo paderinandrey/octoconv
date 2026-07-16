@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hibiken/asynq"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/apaderin/octoconv/internal/clients"
 	"github.com/apaderin/octoconv/internal/db"
 	"github.com/apaderin/octoconv/internal/jobs"
+	"github.com/apaderin/octoconv/internal/metrics"
 	"github.com/apaderin/octoconv/internal/presets"
 	"github.com/apaderin/octoconv/internal/queue"
 	"github.com/apaderin/octoconv/internal/storage"
@@ -76,6 +79,17 @@ func main() {
 	}
 	rdb := redis.NewClient(&redis.Options{Addr: redisOpt.Addr})
 	defer rdb.Close()
+
+	// KEDA-01/D-01/D-02: the queue-depth collector now lives solely on the
+	// always-on api process, registered for ALL FOUR engine-class queues (not
+	// just image) — a worker Deployment scaled to genuine 0 replicas by KEDA
+	// would otherwise have no pod exposing the metric KEDA needs to scale it
+	// back up. webhook is included even though webhook-worker is never
+	// KEDA-scaled (D-01 in PROJECT.md), so its depth stays observable.
+	// Matching every worker's existing precedent, the Inspector is never
+	// closed — Collect() is pull-based/lazy, invoked once per scrape.
+	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt),
+		queue.QueueImage, queue.QueueDocument, queue.QueueHTML, queue.QueueWebhook))
 
 	salt := []byte(os.Getenv("API_KEY_SALT"))
 	if len(salt) == 0 {

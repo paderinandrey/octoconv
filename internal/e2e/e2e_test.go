@@ -36,6 +36,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,6 +47,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
@@ -1144,5 +1146,126 @@ func assertDownloadIsImage(t *testing.T, downloadURL, wantFormat string) {
 	}
 	if detected != wantFormat {
 		t.Fatalf("downloaded image format = %q, want %q", detected, wantFormat)
+	}
+}
+
+// TestQueueDepthMetricRelocationE2E is the live half of D-03 (KEDA-01, Phase
+// 27 Plan 01): it proves the octoconv_queue_depth collector relocation
+// (Task 1) against a live compose stack, BEFORE any k8s work. The runtime
+// images ship no curl/wget/shell fetch tool (RESEARCH.md Pitfall 3), so
+// reachability is via docker-compose.e2e.yml's host-published, 0.0.0.0-bound
+// metrics ports (api :9190, image worker :9191) rather than docker-exec.
+//
+// Scope note (checker WARNING 2, documented per 27-01-PLAN.md): only the
+// image worker's absence of the metric is live-checked here, not all four
+// worker binaries. This is deliberate and sufficient — the collector removal
+// in Task 1 is a mechanically identical 3-line deletion applied to all four
+// worker mains, and Task 1's acceptance criteria already statically prove
+// (via `grep -rl "NewQueueDepthCollector" cmd/` returning exactly
+// cmd/api/main.go, plus a no-unused-import `go vet`) that document/chromium/
+// webhook workers no longer register the collector. Publishing three more
+// host ports to live-assert the identical deletion would add compose surface
+// and CI wiring for zero additional coverage.
+func TestQueueDepthMetricRelocationE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+
+	// asynq only adds a queue name to its "asynq:queues" registry set on the
+	// FIRST real enqueue (internal/rdb, e.g. EnqueueUnique/ScheduleUnique) —
+	// never at asynq.NewServer(Queues: ...) startup. GetQueueInfo/CurrentStats
+	// returns errors.NotFound (silently skipped by queueDepthCollector.Collect)
+	// for any queue that has never had a task, which a freshly-created compose
+	// stack has for all four queues. seedQueueRegistry primes just the
+	// registry membership directly against Redis — zero tasks are created, no
+	// worker ever processes anything — purely so CurrentStats' pre-check finds
+	// the queue "known" and returns real (zero-valued) counts, matching what
+	// happens naturally in production the moment the first job is submitted.
+	seedQueueRegistry(t, "image", "document", "html", "webhook")
+
+	u, err := url.Parse(cfg.baseURL)
+	if err != nil {
+		t.Fatalf("parse E2E_BASE_URL %q: %v", cfg.baseURL, err)
+	}
+	metricsHost := u.Hostname()
+	if metricsHost == "" {
+		metricsHost = "localhost"
+	}
+
+	apiMetricsURL := fmt.Sprintf("http://%s:9190/metrics", metricsHost)
+	workerMetricsURL := fmt.Sprintf("http://%s:9191/metrics", metricsHost)
+
+	// (a) api :9190 must expose octoconv_queue_depth for all four queues —
+	// the relocated single source of truth KEDA will scrape.
+	apiResp, err := e2eHTTP.Get(apiMetricsURL)
+	if err != nil {
+		t.Fatalf("GET %s (api metrics port unreachable — check docker-compose.e2e.yml publishes 9190:9090 with METRICS_ADDR=0.0.0.0:9090): %v", apiMetricsURL, err)
+	}
+	defer apiResp.Body.Close()
+	if apiResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(apiResp.Body, 1024))
+		t.Fatalf("GET %s status = %d, want 200; body=%s", apiMetricsURL, apiResp.StatusCode, body)
+	}
+	apiBody, err := io.ReadAll(apiResp.Body)
+	if err != nil {
+		t.Fatalf("read api metrics body: %v", err)
+	}
+	apiBodyStr := string(apiBody)
+	if !strings.Contains(apiBodyStr, "octoconv_queue_depth") {
+		t.Fatalf("api :9190/metrics does not contain octoconv_queue_depth at all — collector not registered on api (Task 1 regression)")
+	}
+	for _, q := range []string{"image", "document", "html", "webhook"} {
+		label := fmt.Sprintf("queue=%q", q)
+		if !strings.Contains(apiBodyStr, label) {
+			t.Errorf("api :9190/metrics missing octoconv_queue_depth series for %s", label)
+		}
+	}
+
+	// (b) image worker :9191 must return HTTP 200 (endpoint retained) but must
+	// NOT contain octoconv_queue_depth (relocation proof — worker no longer
+	// serves it).
+	workerResp, err := e2eHTTP.Get(workerMetricsURL)
+	if err != nil {
+		t.Fatalf("GET %s (worker metrics port unreachable — check docker-compose.e2e.yml publishes 9191:9090 with METRICS_ADDR=0.0.0.0:9090): %v", workerMetricsURL, err)
+	}
+	defer workerResp.Body.Close()
+	if workerResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(workerResp.Body, 1024))
+		t.Fatalf("GET %s status = %d, want 200 (endpoint should be retained even without the collector); body=%s", workerMetricsURL, workerResp.StatusCode, body)
+	}
+	workerBody, err := io.ReadAll(workerResp.Body)
+	if err != nil {
+		t.Fatalf("read worker metrics body: %v", err)
+	}
+	if strings.Contains(string(workerBody), "octoconv_queue_depth") {
+		t.Fatalf("image worker :9191/metrics still contains octoconv_queue_depth — collector was NOT relocated off the worker (Task 1 regression)")
+	}
+}
+
+// seedQueueRegistry adds each given queue name to asynq's "asynq:queues"
+// Redis SET (base.AllQueues) directly, without creating any task. This is
+// the ONLY state asynq's CurrentStats pre-check ("does this queue exist")
+// consults; it is otherwise populated lazily on a queue's first real
+// enqueue. SADD is idempotent, so re-running this against an already-seeded
+// stack is a harmless no-op. REDIS_ADDR defaults to localhost:6379, matching
+// the host-published port docker-compose.yml already exposes (unrelated to
+// the E2E-only metrics port overrides).
+func seedQueueRegistry(t *testing.T, queues ...string) {
+	t.Helper()
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb.Close()
+
+	ctx := context.Background()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		t.Fatalf("seedQueueRegistry: redis ping %s: %v", addr, err)
+	}
+	members := make([]interface{}, len(queues))
+	for i, q := range queues {
+		members[i] = q
+	}
+	if err := rdb.SAdd(ctx, "asynq:queues", members...).Err(); err != nil {
+		t.Fatalf("seedQueueRegistry: SADD asynq:queues %v: %v", queues, err)
 	}
 }
