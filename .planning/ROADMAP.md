@@ -181,7 +181,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
   4. The full 0→N→0 timeline is captured as timestamped evidence — queue depth and pod count plotted on the same time axis (steady state → burst → time-to-first-replica → time-to-drain → time-to-scale-to-zero).
 **Plans**: 3 plans
   - [x] 28-01-PLAN.md — Chart fixes: WR-02 field-level replicas omission on the 3 scaled Deployments (D-10) + document ScaledObject scaleDown-stabilization override + document-worker extraEnv + values-loadproof.yaml overlay
-  - [ ] 28-02-PLAN.md — Tooling: gen_heavy_docx.py (D-07) + render_evidence.py (D-02) + keda-load-proof.sh gate (burst sampler D-01/D-04, N→0 D-06, SC3 downscale-soak D-08/D-09)
+  - [x] 28-02-PLAN.md — Tooling: gen_heavy_docx.py (D-07) + render_evidence.py (D-02) + keda-load-proof.sh gate (burst sampler D-01/D-04, N→0 D-06, SC3 downscale-soak D-08/D-09)
   - [ ] 28-03-PLAN.md — Live run: SC3 calibration (D-07) + full 0→N→0 gate run + committed timestamped evidence (D-03) + human-verify acceptance
 **Notes**:
   - Timestamped-evidence requirement is a hard deliverable, not a nice-to-have: the acceptance is "доказано с таймстампами" — an explicit causal chain (queue-depth graph + pod count over time), not merely "it scaled." Both legs must be shown; the 0→N leg is the one that is easy to fake and must be proven with the worker at true 0 replicas.
@@ -218,7 +218,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
 | 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 3/3 | Complete    | 2026-07-16 |
-| 28. Autoscale Load-Proof | v1.6 | 1/3 | In Progress|  |
+| 28. Autoscale Load-Proof | v1.6 | 2/3 | In Progress|  |
 
 ---
 
