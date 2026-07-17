@@ -4,8 +4,8 @@ milestone: v1.7
 milestone_name: Audio Engine & Hardening
 status: executing
 stopped_at: Phase 29 context gathered
-last_updated: "2026-07-17T22:14:49.627Z"
-last_activity: 2026-07-17 -- Phase 29 planning complete
+last_updated: "2026-07-17T22:15:49.560Z"
+last_activity: 2026-07-17 -- Phase 29 execution started
 progress:
   total_phases: 5
   completed_phases: 0
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-17 after v1.7 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 29 — v1.6 Hardening Tail (roadmap created, ready to plan)
+**Current focus:** Phase 29 — v1-6-hardening-tail
 
 ## Current Position
 
-Phase: 29 — v1.6 Hardening Tail (Not started)
-Plan: —
-Status: Ready to execute
-Last activity: 2026-07-17 -- Phase 29 planning complete
+Phase: 29 (v1-6-hardening-tail) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 29
+Last activity: 2026-07-17 -- Phase 29 execution started
 
 ## Performance Metrics
 
