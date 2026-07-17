@@ -160,11 +160,14 @@ teardown() {
 		wait "$SAMPLER_PID" 2>/dev/null || true
 	fi
 	if [ -n "$SNAPSHOT_PID" ]; then
-		# WR-04: kill the whole process group (own group via `set -m` at the
-		# snapshotLoop launch site) so a reparented `kubectl -w` pipeline
-		# cannot survive this EXIT trap.
+		# WR-04 / 29-REVIEW WR-01: kill the whole process group (own group via
+		# parent `set -m` at the snapshotLoop launch site) so a reparented
+		# `kubectl -w` pipeline cannot survive this EXIT trap.
 		kill -- -"$SNAPSHOT_PID" >/dev/null 2>&1 || true
 		wait "$SNAPSHOT_PID" 2>/dev/null || true
+		# Belt-and-suspenders (macOS process-group semantics are unreliable):
+		# deterministically reap any orphaned watch by its exact command shape.
+		[ -n "$BUSY_POD" ] && pkill -f "kubectl get pod ${BUSY_POD} .* -w" >/dev/null 2>&1 || true
 	fi
 	if [ -n "$BUSY_POD" ]; then
 		kubectl annotate pod "$BUSY_POD" -n "$NAMESPACE" \
@@ -916,6 +919,9 @@ echo "termination capture: ${term_captured:-none-yet} (watcher lines: $(grep -c 
 # pipeline running and still appending to $SC3_TIMESTAMPS_FILE.
 kill -- -"$SNAPSHOT_PID" >/dev/null 2>&1 || true
 wait "$SNAPSHOT_PID" 2>/dev/null || true
+# Belt-and-suspenders (see teardown): deterministically reap any orphaned
+# watch by exact command shape, independent of process-group semantics.
+[ -n "$BUSY_POD" ] && pkill -f "kubectl get pod ${BUSY_POD} .* -w" >/dev/null 2>&1 || true
 SNAPSHOT_PID=""
 
 # Live read first (pod object may still exist in Terminating): prefer
