@@ -87,6 +87,12 @@ services:
       MAX_IMAGE_PIXELS: "100000000"
       MAX_DOCUMENT_UNCOMPRESSED_BYTES: "524288000"
       API_KEY_SALT: "dev-only-change-me-in-real-deploys"
+      # OPER-01/D-01: comma-separated operator client UUIDs authorized for
+      # /v1/system/presets; empty = no operators, fail-closed (mirrors
+      # deploy/chart/octoconv/values.yaml's api.operatorClientIds comment).
+      # Parsed once at API startup -- changing this value requires an api
+      # container restart/recreate to take effect (D-05).
+      OPERATOR_CLIENT_IDS: "${OPERATOR_CLIENT_IDS:-}"
       RATE_LIMIT_IP_RPM: "60"
       RATE_LIMIT_CLIENT_RPM: "120"
       # queue.NewClient() (constructed by cmd/api/main.go) reads these vars
