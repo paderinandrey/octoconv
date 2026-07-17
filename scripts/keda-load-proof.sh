@@ -603,6 +603,14 @@ IMAGE_REPLICAS_FINAL=$(waitForReplicasAtMost worker 0 180) || {
 PASS_COUNT=$((PASS_COUNT + 1))
 echo "PASS: SC2 -- worker (image) full-cycled back to 0 replicas (observed: $IMAGE_REPLICAS_FINAL)"
 
+# Let the sampler record the scaled-to-zero steady state for a few more
+# ticks before stopping it: waitForReplicasAtMost returns the INSTANT it
+# first observes 0, which can land between sampler ticks -- killing the
+# sampler immediately would leave the CSV's last row still showing N
+# replicas and the PNG timeline without its time-to-scale-to-zero marker
+# (D-01/D-06: the sampler must capture time-to-drain AND time-to-zero).
+sleep 15
+
 # Stop the sampler cleanly so the CSV has a clean end marker, then render
 # the D-02 PNG.
 if [ -n "$SAMPLER_PID" ]; then
@@ -905,9 +913,17 @@ JOB_FINISHED_AT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/oct
 	"SELECT finished_at FROM jobs WHERE id='${LONG_JOB_ID}';" | tr -d '[:space:]')
 assert_nonempty "$JOB_FINISHED_AT" "D-09(3): jobs.finished_at captured for long job $LONG_JOB_ID"
 
+# Also record the SHORT job's finished_at: (Killing event ts) minus
+# (short job finished_at) is the OBSERVED 2->1 settling time under the
+# 15s scaleDownStabilizationSeconds override -- the live answer to
+# 28-RESEARCH.md Open Question 1, recorded as tuning input (SUMMARY).
+SHORT_JOB_FINISHED_AT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
+	"SELECT finished_at FROM jobs WHERE id='${SHORT_JOB_ID}';" | tr -d '[:space:]' || true)
+
 {
 	echo ""
 	echo "# D-09 triple-check raw evidence"
+	echo "short_job_finished_at=$SHORT_JOB_FINISHED_AT"
 	echo "sigterm_killing_event_ts=$SIGTERM_TS"
 	echo "pod_terminated_reason=$POD_TERM_REASON"
 	echo "pod_terminated_exit_code=$POD_TERM_EXIT"
