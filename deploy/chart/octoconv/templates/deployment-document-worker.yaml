@@ -47,6 +47,18 @@ spec:
           image: "{{ .Values.documentWorker.image.repository }}:{{ .Values.global.imageTag }}"
           imagePullPolicy: IfNotPresent
           {{- include "octoconv.commonEnv" . | nindent 10 }}
+          {{- if .Values.documentWorker.extraEnv }}
+          # extraEnv (Phase 28 D-08): explicit `env:` entries always take
+          # precedence over envFrom-sourced values for the same key
+          # (k8s-documented behaviour) — this is how values-loadproof.yaml
+          # forces DOCUMENT_WORKER_CONCURRENCY=1 without editing the
+          # ConfigMap's production default ("2").
+          env:
+            {{- range $k, $v := .Values.documentWorker.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
           ports:
             - name: metrics
               containerPort: 9090

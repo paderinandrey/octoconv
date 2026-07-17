@@ -154,6 +154,7 @@ keda:
     maxReplicaCount: 2
     pollingInterval: 15
     cooldownPeriod: 120
+    scaleDownStabilizationSeconds: null   # NEW (D-10/Pattern 1) — production default OFF (K8s 300s HPA default preserved); load-proof gate overrides via values-loadproof.yaml
   html:
     threshold: "2"
     maxReplicaCount: 2
