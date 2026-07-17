@@ -22,6 +22,15 @@
 #   D-07: /v1/formats and /v1/presets require auth -- unauthenticated ->
 #     401, proving /v1 rate-limited group membership.
 #
+# Phase 29 (HARD-02/OPER-01, D-04/D-05) extends this same script with an
+# operator system-scope section rather than a new script: mints an
+# operator + a regular client, exports the operator's UUID into
+# OPERATOR_CLIENT_IDS and force-recreates the compose api service so
+# cmd/api/main.go re-reads it, then proves operator CRUD on
+# /v1/system/presets, a byte-identical no-leak 404 for a non-operator
+# (real vs genuinely-nonexistent preset name), and that a system preset
+# created by the operator is usable in a job by any (non-operator) client.
+#
 # This script's exit code IS the gate: any failed assertion aborts non-zero
 # (set -e) with a loud FAIL message. It does not tear the stack down on
 # success (matches Phase 16/17/18 live-gate precedent) -- rerun freely,
@@ -359,6 +368,158 @@ http_json GET "/v1/presets" "$WORKDIR/resp-presets-noauth.json" "-"
 assert_eq "401" "$HTTP_STATUS" "GET /v1/presets unauthenticated -> 401 (D-07)"
 
 # ---------------------------------------------------------------------------
+# Phase 29 HARD-02/OPER-01 (D-04/D-05): operator system-presets acceptance.
+#
+# Mints an operator + a regular (non-operator) client, exports the
+# operator's UUID into OPERATOR_CLIENT_IDS, force-recreates the compose api
+# service so cmd/api/main.go re-reads the env (D-05, closes WR-03's
+# compose-passthrough gap), then drives /v1/system/presets:
+#   - operator CRUD (create/list/show/update/deactivate) all succeed
+#   - a non-operator's 404 for a real, active system preset is
+#     byte-identical to its 404 for a genuinely-nonexistent name -- no
+#     existence oracle leak (T-29-11)
+#   - a system preset created by the operator over REST is usable in a job
+#     submitted by the regular (non-operator) client (T-29-10: management
+#     is gated, ordinary job-time preset resolution is not)
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Phase 29 HARD-02/OPER-01: operator system-presets acceptance ==="
+
+# http_post_job issues a multipart POST to /v1/jobs; sets HTTP_STATUS and
+# writes the response body to the given path (mirrors presets-acceptance.sh's
+# http_post -- http_json above is JSON-body-only and cannot express -F).
+http_post_job() {
+	local out_file="$1"
+	shift
+	HTTP_STATUS=$(curl -s -o "$out_file" -w '%{http_code}' -X POST "$API_BASE/v1/jobs" "$@")
+}
+
+cp internal/e2e/testdata/sample.png "$WORKDIR/sample.png"
+
+OPERATOR_OUT=$(go run ./cmd/manage-clients create "presets-rest-acceptance-operator-$SUFFIX")
+REGULAR_OUT=$(go run ./cmd/manage-clients create "presets-rest-acceptance-regular-$SUFFIX")
+
+OPERATOR_ID=$(printf '%s\n' "$OPERATOR_OUT" | awk -F': ' '/^client id:/{print $2}')
+OPERATOR_KEY=$(printf '%s\n' "$OPERATOR_OUT" | awk -F': ' '/^api key/{print $2}')
+REGULAR_ID=$(printf '%s\n' "$REGULAR_OUT" | awk -F': ' '/^client id:/{print $2}')
+REGULAR_KEY=$(printf '%s\n' "$REGULAR_OUT" | awk -F': ' '/^api key/{print $2}')
+
+[ -n "$OPERATOR_ID" ] && [ -n "$OPERATOR_KEY" ] || {
+	echo "FAIL: could not parse operator client id/key from: $OPERATOR_OUT" >&2
+	exit 1
+}
+[ -n "$REGULAR_ID" ] && [ -n "$REGULAR_KEY" ] || {
+	echo "FAIL: could not parse regular client id/key from: $REGULAR_OUT" >&2
+	exit 1
+}
+echo "PASS: minted operator client ($OPERATOR_ID) and regular client ($REGULAR_ID)"
+
+echo "--- exporting OPERATOR_CLIENT_IDS and force-recreating compose api service (D-05) ---"
+export OPERATOR_CLIENT_IDS="$OPERATOR_ID"
+docker compose -p octoconv -f docker-compose.yml -f docker-compose.e2e.yml up -d --force-recreate api
+
+echo "--- waiting for /healthz after api recreate ---"
+healthy=""
+for i in $(seq 1 30); do
+	code=$(curl -s -o /tmp/presets-rest-acceptance-healthz2.json -w '%{http_code}' "$API_BASE/healthz" || true)
+	if [ "$code" = "200" ]; then
+		healthy=1
+		break
+	fi
+	sleep 2
+done
+if [ -z "$healthy" ]; then
+	echo "FAIL: /healthz never returned 200 after api recreate (60s)" >&2
+	exit 1
+fi
+echo "PASS: /healthz ready after api recreate ($(cat /tmp/presets-rest-acceptance-healthz2.json))"
+
+NAME_OP_A="opsys-a-$SUFFIX"
+NAME_OP_B="opsys-b-$SUFFIX"
+
+# --- Operator CRUD lifecycle on NAME_OP_A: create -> list -> show -> update
+# -> deactivate. ---
+http_json POST "/v1/system/presets" "$WORKDIR/resp-opsys-create.json" "$OPERATOR_KEY" \
+	"{\"name\":\"$NAME_OP_A\",\"target_format\":\"webp\"}"
+assert_eq "201" "$HTTP_STATUS" "operator CREATE $NAME_OP_A -> 201"
+BODY_OPSYS_CREATE=$(cat "$WORKDIR/resp-opsys-create.json")
+assert_contains "$BODY_OPSYS_CREATE" '"version":1' "operator CREATE body has version:1"
+assert_contains "$BODY_OPSYS_CREATE" '"scope":"system"' "operator CREATE body has scope:system"
+
+http_json GET "/v1/system/presets" "$WORKDIR/resp-opsys-list.json" "$OPERATOR_KEY"
+assert_eq "200" "$HTTP_STATUS" "operator LIST /v1/system/presets -> 200"
+assert_contains "$(cat "$WORKDIR/resp-opsys-list.json")" "\"$NAME_OP_A\"" "operator LIST contains $NAME_OP_A"
+
+http_json GET "/v1/system/presets/$NAME_OP_A" "$WORKDIR/resp-opsys-show.json" "$OPERATOR_KEY"
+assert_eq "200" "$HTTP_STATUS" "operator SHOW $NAME_OP_A -> 200"
+assert_contains "$(cat "$WORKDIR/resp-opsys-show.json")" '"target_format":"webp"' "operator SHOW $NAME_OP_A has target_format:webp"
+
+http_json PUT "/v1/system/presets/$NAME_OP_A" "$WORKDIR/resp-opsys-update.json" "$OPERATOR_KEY" \
+	"{\"target_format\":\"png\"}"
+assert_eq "200" "$HTTP_STATUS" "operator UPDATE $NAME_OP_A -> 200"
+assert_contains "$(cat "$WORKDIR/resp-opsys-update.json")" '"version":2' "operator UPDATE bumps version to 2"
+
+http_json DELETE "/v1/system/presets/$NAME_OP_A" "$WORKDIR/resp-opsys-deactivate.json" "$OPERATOR_KEY"
+assert_eq "200" "$HTTP_STATUS" "operator DEACTIVATE $NAME_OP_A -> 200"
+assert_contains "$(cat "$WORKDIR/resp-opsys-deactivate.json")" '"is_active":false' "operator DEACTIVATE body reports is_active:false"
+
+# --- Operator creates NAME_OP_B and leaves it active, for the cross-client
+# job-usability check below. ---
+http_json POST "/v1/system/presets" "$WORKDIR/resp-opsys-b-create.json" "$OPERATOR_KEY" \
+	"{\"name\":\"$NAME_OP_B\",\"target_format\":\"webp\"}"
+assert_eq "201" "$HTTP_STATUS" "operator CREATE $NAME_OP_B -> 201"
+
+# --- Non-operator byte-identical no-leak 404 (D-04/T-29-11): the regular
+# client's 404 for the REAL, active NAME_OP_B preset must be
+# indistinguishable from its 404 for a genuinely-nonexistent name --
+# requireOperator's gate must never leak an existence oracle. ---
+http_json GET "/v1/system/presets/$NAME_OP_B" "$WORKDIR/resp-nonop-real.json" "$REGULAR_KEY"
+assert_eq "404" "$HTTP_STATUS" "non-operator GET real system preset $NAME_OP_B -> 404"
+
+NONEXISTENT_SYS_NAME="opsys-nonexistent-$SUFFIX"
+http_json GET "/v1/system/presets/$NONEXISTENT_SYS_NAME" "$WORKDIR/resp-nonop-nonexistent.json" "$REGULAR_KEY"
+assert_eq "404" "$HTTP_STATUS" "non-operator GET nonexistent system preset -> 404"
+
+BODY_NONOP_REAL=$(cat "$WORKDIR/resp-nonop-real.json")
+BODY_NONOP_NONEXISTENT=$(cat "$WORKDIR/resp-nonop-nonexistent.json")
+assert_eq "$BODY_NONOP_REAL" "$BODY_NONOP_NONEXISTENT" "non-operator 404 (real vs nonexistent system preset) byte-identical (no leak, T-29-11)"
+
+# --- Non-operator LIST also gets the uniform no-leak 404, never a 403 or an
+# empty 200 -- requireOperator gates every verb on the subtree identically
+# (T-29-10). ---
+http_json GET "/v1/system/presets" "$WORKDIR/resp-nonop-list.json" "$REGULAR_KEY"
+assert_eq "404" "$HTTP_STATUS" "non-operator LIST /v1/system/presets -> 404 (T-29-10, no 403)"
+assert_eq "$BODY_NONOP_REAL" "$(cat "$WORKDIR/resp-nonop-list.json")" "non-operator LIST 404 body also byte-identical to the no-leak 404 (no leak)"
+
+# --- Cross-client job usability (D-04): NAME_OP_B, created by the operator
+# over REST, is usable in a job submitted by the REGULAR (non-operator)
+# client -- system scope is not gated by operator status at job-submit
+# time, only management of the presets themselves is (T-29-10 scope). ---
+http_post_job "$WORKDIR/resp-opsys-job.json" \
+	-H "Authorization: ApiKey $REGULAR_KEY" \
+	-F "preset=$NAME_OP_B" \
+	-F "file=@$WORKDIR/sample.png;type=image/png"
+assert_eq "202" "$HTTP_STATUS" "regular client POST job with operator-created system preset $NAME_OP_B -> 202"
+
+JOB_ID_OPSYS=$(grep -o '"job_id":"[^"]*"' "$WORKDIR/resp-opsys-job.json" | head -1 | cut -d'"' -f4)
+[ -n "$JOB_ID_OPSYS" ] || {
+	echo "FAIL: no job_id in operator-system-preset job response: $(cat "$WORKDIR/resp-opsys-job.json")" >&2
+	exit 1
+}
+
+echo "--- polling job $JOB_ID_OPSYS for done ---"
+status=""
+for i in $(seq 1 60); do
+	http_json GET "/v1/jobs/$JOB_ID_OPSYS" "$WORKDIR/resp-opsys-job-poll.json" "$REGULAR_KEY"
+	status=$(grep -o '"status":"[^"]*"' "$WORKDIR/resp-opsys-job-poll.json" | head -1 | cut -d'"' -f4)
+	if [ "$status" = "done" ] || [ "$status" = "failed" ]; then
+		break
+	fi
+	sleep 2
+done
+assert_eq "done" "$status" "job using operator-created system preset $NAME_OP_B reaches done"
+
+# ---------------------------------------------------------------------------
 # Done.
 # ---------------------------------------------------------------------------
 echo ""
@@ -370,5 +531,9 @@ echo "D-04 (no id/client_id leak in response DTO): PASS"
 echo "D-10 (merged list/show incl. read-only system presets): PASS"
 echo "D-06/PRAPI-03 (registry-derived /v1/formats, known pair png->webp): PASS"
 echo "D-07 (unauthenticated /v1/formats and /v1/presets -> 401): PASS"
+echo "HARD-02/D-04 (operator CRUD on /v1/system/presets: create/list/show/update/deactivate): PASS"
+echo "HARD-02/D-05 (OPERATOR_CLIENT_IDS compose passthrough + api force-recreate picks it up): PASS"
+echo "HARD-02/T-29-11 (non-operator 404 byte-identical: real vs nonexistent system preset, LIST too): PASS"
+echo "HARD-02/T-29-10 (operator-created system preset usable in a job by a non-operator client): PASS"
 echo ""
 echo "Stack left running for inspection (compose project: octoconv)."
