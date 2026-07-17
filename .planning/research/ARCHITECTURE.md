@@ -1,373 +1,333 @@
 # Architecture Research
 
-**Domain:** Kubernetes + KEDA deployment of an existing Go/asynq/Postgres/Redis/MinIO conversion service (OctoConv v1.6)
-**Researched:** 2026-07-14
-**Confidence:** HIGH (all findings grounded in direct reads of `cmd/*/main.go`, `docker-compose*.yml`, `internal/e2e/e2e_test.go`, `internal/mcpserver/*.go`, `internal/api/presets_handlers.go`, migrations, `.github/workflows/ci.yml`); MEDIUM for OrbStack-specific networking claims (verified via one WebSearch against OrbStack's own docs, not independently tested against this repo's actual chart)
-
-This is **integration-design** research, not generic "how do Kubernetes apps look" research: every finding below is anchored to a real file in this repository. Where the four SEED-004 "landmines" have a code-verified zero-code-change fix, that is stated as fact, not inferred.
+**Domain:** Async file-conversion microservice — adding a 4th engine class (offline audio transcription via whisper.cpp) to an established Go/asynq/Postgres/S3 pipeline, plus a v1.6 hardening tail.
+**Researched:** 2026-07-17
+**Confidence:** HIGH (every claim below is grounded in direct reads of the real `octoconv` codebase — `internal/convert`, `internal/queue`, `internal/worker`, `internal/api`, `internal/reconciler`, `internal/metrics`, `cmd/*-worker`, `deploy/chart/octoconv`, `docker-compose.yml`, `.github/workflows/ci.yml` — cross-referenced against three prior engine-class additions: image (v1.0), document (v1.2), html (v1.3). whisper.cpp CLI/model facts are MEDIUM confidence, WebSearch-verified since there is no existing in-repo precedent for that specific tool.)
 
 ## Standard Architecture
 
 ### System Overview
 
+octoconv already has a proven, three-times-replicated "engine-class" pattern. Audio is not a new architecture — it is the pattern's 4th instantiation. Everything below shows the SAME shape with `audio` slotted in wherever `image`/`document`/`html` currently appear.
+
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│ Namespace: octoconv (Helm release: octoconv, chart: deploy/chart/octoconv)│
-├──────────────────────────────────────────────────────────────────────────┤
-│  Deployments (existing binaries, one container image each)               │
-│  ┌────────┐ ┌────────┐ ┌──────────────┐ ┌────────────────┐ ┌───────────┐ │
-│  │  api   │ │ worker │ │document-worker│ │chromium-worker │ │webhook-wkr│ │
-│  │ (1..N) │ │ (KEDA) │ │    (KEDA)     │ │    (KEDA)      │ │ (fixed=2) │ │
-│  └───┬────┘ └───┬────┘ └──────┬───────┘ └───────┬────────┘ └─────┬─────┘ │
-│      │          │             │                 │                │       │
-│  ┌───┴──────────┴─────────────┴─────────────────┴────────────────┴────┐ │
-│  │        Service: octoconv-api (ClusterIP, LB via OrbStack)          │ │
-│  └─────────────────────────────────────────────────────────────────────┘ │
-│  ┌────────────┐  ┌──────────────┐                                        │
-│  │ mcp-http   │  │ asynqmon      │  NEW (Phase D) / existing-but-relocated│
-│  │ (1 replica)│  │ (dashboard)   │                                        │
-│  └────────────┘  └──────────────┘                                        │
-├──────────────────────────────────────────────────────────────────────────┤
-│  Jobs / Hooks                                                            │
-│  ┌──────────────────┐   ┌───────────────────┐   ┌──────────────────────┐ │
-│  │ migrate (Helm     │   │ createbucket (Helm │   │ e2e-test (manual Job,│ │
-│  │ pre-install/      │   │ pre-install/       │   │ NOT a hook — run     │ │
-│  │ pre-upgrade hook) │   │ pre-upgrade hook)  │   │ on demand)            │ │
-│  └──────────────────┘   └───────────────────┘   └──────────────────────┘ │
-├──────────────────────────────────────────────────────────────────────────┤
-│  KEDA (Active KEDA namespace, chart-conditional keda.enabled)             │
-│  ScaledObject×3 (image/document/html queues) → Prometheus scaler         │
-│  querying octoconv_queue_depth{queue=...,state="pending"}                │
-│  webhook-worker: fixed 2 replicas, NOT KEDA-managed (redundancy, not      │
-│  elasticity — matches the existing "≥2-consumer" design intent)          │
-├──────────────────────────────────────────────────────────────────────────┤
-│  Stateful dependencies (own templates, not subcharts — see rationale)     │
-│  ┌──────────┐  ┌───────┐  ┌───────┐                                     │
-│  │ postgres │  │ redis │  │ minio │  each: Deployment + PVC + ClusterIP │
-│  └──────────┘  └───────┘  └───────┘  Service with an FQDN-stable name   │
-└──────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│  cmd/api  (single always-on process)                                      │
+│  handleCreateJob: multipart → Sniff/SniffContainer/LooksLikeHTML/(NEW:    │
+│  audio magic-bytes) → convert.Default.EngineFor(detected,target) →        │
+│  S3 upload → jobs.Create (Postgres, status=queued) → route by `engine`    │
+│  switch → EnqueueImageConvert|EnqueueDocumentConvert|EnqueueHTMLConvert|   │
+│  (NEW) EnqueueAudioTranscribe                                             │
+│  Also hosts: queue-depth Prometheus collector (ALL queues, incl. audio)   │
+└───────────────────────────┬───────────────────────────────────────────────┘
+                             │ asynq / Redis — 5 queues total after this milestone
+        ┌───────────┬───────┼────────┬──────────┬──────────────┐
+        ▼           ▼       ▼        ▼          ▼              ▼
+   image queue  document  html    webhook   (NEW) audio    (existing)
+                  queue    queue   queue        queue
+        │           │       │        │          │
+        ▼           ▼       ▼        ▼          ▼
+  cmd/worker  cmd/document- cmd/    cmd/     (NEW)
+  (libvips)   worker (LO)  chromium-webhook- cmd/audio-worker
+                            worker  worker×2  (ffmpeg + whisper.cpp)
+        │           │       │        │          │
+        └───────────┴───────┴────────┴──────────┘
+                             │ all write back through the SAME
+                             ▼ jobs/storage/queue interfaces
+                    Postgres (system of record) + S3/MinIO (uploads/results)
 ```
+
+Cross-cutting singletons every engine class plugs into automatically once registered:
+- `convert.Default` registry (`internal/convert/convert.go`) — format-pair → `Converter` lookup, engine-class grouping for `GET /v1/formats`.
+- `internal/reconciler` — routes stale-job recovery by `jobs.engine` string; unrecognized engines are a fail-closed skip today (`EngineAudio` must be added as a new `case`, not fall through to `default`).
+- `internal/metrics.NewQueueDepthCollector` — registered once in `cmd/api/main.go` with an explicit queue-name list; audio's queue name must be added to that call site.
+- Helm chart: ConfigMap (`commonEnv`) + per-class Deployment + per-class ScaledObject, all keyed off `.Values.<class>.*` — audio needs its own block, not a reuse of an existing one.
 
 ### Component Responsibilities
 
-| Component | Responsibility | File/Chart Location |
-|-----------|-----------------|----------------------|
-| `deploy/chart/octoconv/templates/deployment-{api,worker,document-worker,chromium-worker,webhook-worker}.yaml` | One Deployment template per existing binary, `{{ .Values.<svc>.replicas }}` (worker/document-worker/chromium-worker default low, overridden by KEDA once `keda.enabled`); env sourced from a shared `configmap.yaml` + `secret.yaml` | NEW |
-| `deploy/chart/octoconv/templates/job-migrate.yaml`, `job-createbucket.yaml` | Helm hooks (`pre-install,pre-upgrade`) running `cmd/migrate` and an `mc mb --ignore-existing` one-shot against the chart's own MinIO Service | NEW |
-| `deploy/chart/octoconv/templates/scaledobject-*.yaml` | KEDA `ScaledObject` per engine-class queue, `keda.enabled` gate | NEW |
-| `deploy/chart/octoconv/templates/deployment-mcp-http.yaml` | Runs `cmd/mcp-http` (new binary) behind a ClusterIP Service | NEW |
-| `deploy/chart/octoconv/templates/{postgres,redis,minio}.yaml` | Deployment + PVC + Service for each stateful dependency | NEW |
-| `cmd/mcp-http/main.go` | New thin entrypoint: identical wiring to `cmd/mcp-server/main.go` (`mcpserver.Load()` → `NewClient` → `NewServer`) but runs `mcp.NewStreamableHTTPHandler` over `net/http` instead of `&mcp.StdioTransport{}` | NEW |
-| `Dockerfile.mcp-http` | New image; `cmd/mcp-server` has never been containerized (no existing `Dockerfile.mcp-server`) | NEW |
-| `internal/api/system_presets_handlers.go` | New handlers reusing the **already scope-agnostic** `PresetAdmin` interface with `Scope: presets.ScopeSystem, ClientID: nil` | NEW |
-| `internal/api/middleware` (or inline in `routes.go`) | New `RequireOperator` gate checking `client.ID` against an env allowlist | NEW |
-| `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` | Add a real `/healthz` (Postgres/Redis/S3 ping) alongside the existing `promhttp.Handler()` on the metrics listener | MODIFIED (small) |
-| `internal/e2e/e2e_test.go` | **Zero changes** — `E2E_WEBHOOK_HOST` and `E2E_S3_DIAL_ADDR` are already env-driven escape hatches; only the Job manifest wiring them changes | UNCHANGED |
+| Component | Responsibility | New or Modified for Audio |
+|-----------|----------------|----------------------------|
+| `internal/convert/whisper.go` (NEW) | `AudioConverter` implementing `Converter`: `Pairs()` = cross-product of 4 source audio formats × 4 target transcript formats; `Convert()` shells out to `ffmpeg` then `whisper-cli`; `Engine()` returns `EngineAudio` | NEW |
+| `internal/convert/convert.go` | Adds `EngineAudio = "audio"` const (single source of truth, per its own doc comment) | MODIFIED |
+| `internal/convert/converters.go` | One-line `Default.Register(AudioConverter{})` in `init()` | MODIFIED |
+| `internal/convert/audiosniff.go` (NEW, or extend `sniff.go`) | Magic-byte signatures for wav/ogg/m4a + the ID3/frame-sync dual-path mp3 detector | NEW |
+| `internal/convert/sniff.go` | `MIMEType()` gains cases for mp3/wav/m4a/ogg (inputs) and txt/srt/vtt/json (outputs) | MODIFIED |
+| `internal/convert/dimensions.go` | No change — `HasDimensionLimit` already scopes to the closed `dimensionParsers` map; audio formats are absent from it, so the pixel-dimension check is automatically bypassed (same free-ride as documents/html today) | UNCHANGED (verify only) |
+| `internal/queue/queue.go` | `TypeAudioTranscribe`, `QueueAudio = convert.EngineAudio`, `NewAudioTranscribeTask`, `audioRetrySchedule`/`AudioRetryDelay`, `audioBackoffSum`/`AudioUniqueTTL`, `RetryDelayFunc` switch case | MODIFIED |
+| `internal/queue/client.go` | `audioMaxRetry`/`audioUniqueTTL` fields, `AUDIO_MAX_RETRY`/`AUDIO_ENGINE_TIMEOUT` env reads in `NewClient`, `EnqueueAudioTranscribe` method | MODIFIED |
+| `cmd/audio-worker/main.go` (NEW) | Mirrors `cmd/document-worker/main.go` structure exactly: connect Postgres/S3/Redis, build `worker.Handler` via `worker.NewHandler`, register `queue.TypeAudioTranscribe` on the mux, `AUDIO_WORKER_CONCURRENCY`, `ShutdownTimeout = AUDIO_ENGINE_TIMEOUT + margin`, own `/metrics` listener | NEW |
+| `internal/worker/worker.go` | `HandleAudioTranscribe` (mirrors `HandleDocumentConvert`), `isAudioTerminal` (mirrors `isDocumentTerminal`/`isHTMLTerminal` — timeout-is-terminal), `terminalWhisperSignatures`/`terminalFFmpegSignatures` slices | MODIFIED |
+| `internal/api/api.go` | `Enqueuer` interface gains `EnqueueAudioTranscribe` | MODIFIED |
+| `internal/api/handlers.go` | `handleCreateJob`'s engine-routing `switch` gains an `EngineAudio` case; content-type-parity/dimension logic already generalizes (no format-specific branching needed beyond the switch) | MODIFIED |
+| `internal/reconciler/reconciler.go` | `enqueuer` interface gains `EnqueueAudioTranscribe`; `sweep()`'s engine-routing `switch` gains an `EngineAudio` case (else it silently fails closed into `unroutable_engine`, which is safe but wrong) | MODIFIED |
+| `cmd/api/main.go` | `queue.QueueAudio` added to the `NewQueueDepthCollector(...)` call's queue list | MODIFIED |
+| `Dockerfile.audio-worker` (NEW) | Multi-stage: Go build stage (unchanged shape) + whisper.cpp build stage (clone+cmake, NOT an apt package) + baked-in pinned ggml model + `ffmpeg` via apt in the runtime stage + `USER nobody` | NEW |
+| `docker-compose.yml` | New `audio-worker` service block (mirrors `document-worker`'s shape: env, resource limits); `api`/other services' `queue.NewClient()`-read env vars gain the audio pair per the existing "every process reads every class's vars" convention (DEBT-05 precedent) | MODIFIED |
+| `.github/workflows/ci.yml` | `docker-build` and `e2e` jobs' bake `set:` lists gain `audio-worker.cache-to`/`cache-from` entries | MODIFIED |
+| `deploy/chart/octoconv/values.yaml` | New `audioWorker:` block (image, replicas, terminationGracePeriodSeconds, resources) + new `keda.audio:` block (threshold, maxReplicaCount, pollingInterval, cooldownPeriod) | MODIFIED |
+| `deploy/chart/octoconv/templates/configmap.yaml` | `AUDIO_ENGINE_TIMEOUT`, `AUDIO_MAX_RETRY`, `AUDIO_WORKER_CONCURRENCY` keys | MODIFIED |
+| `deploy/chart/octoconv/templates/deployment-audio-worker.yaml` (NEW) | Mirrors `deployment-document-worker.yaml` (probes on `:9090/metrics`, `octoconv.io/tier: app` label, conditional `spec.replicas` per the WR-02-fixed pattern if that fix lands first) | NEW |
+| `deploy/chart/octoconv/templates/scaledobject-audio.yaml` (NEW) | Mirrors `scaledobject-document.yaml`; PromQL `sum(octoconv_queue_depth{queue="audio", state=~"pending|active"})`; **must carry the WR-01 fix** (`ignoreNullValues: "false"`, or the alert-based compensating control) from day one — do not reintroduce the bug this milestone is also fixing | NEW |
 
-## Recommended Chart Structure
+## Recommended Project Structure
 
 ```
+cmd/
+├── audio-worker/                    # NEW — mirrors cmd/document-worker exactly
+│   └── main.go
+internal/
+├── convert/
+│   ├── convert.go                   # MODIFIED: + EngineAudio const
+│   ├── converters.go                # MODIFIED: + Default.Register(AudioConverter{})
+│   ├── whisper.go                   # NEW: AudioConverter (Pairs/Convert/Engine)
+│   ├── audiosniff.go                # NEW: mp3/wav/m4a/ogg magic-byte signatures
+│   ├── sniff.go                     # MODIFIED: + MIMEType cases (in+out formats)
+│   └── exec.go                      # UNCHANGED: runCommand reused verbatim for
+│                                     #   BOTH ffmpeg and whisper-cli invocations
+├── queue/
+│   ├── queue.go                     # MODIFIED: audio task/queue/retry/TTL, mirrors
+│   │                                 #   Document*/HTML* blocks structurally
+│   └── client.go                    # MODIFIED: audioMaxRetry/audioUniqueTTL, Enqueue*
+├── worker/
+│   └── worker.go                    # MODIFIED: HandleAudioTranscribe, isAudioTerminal,
+│                                     #   terminalWhisperSignatures/terminalFFmpegSignatures
+├── api/
+│   ├── api.go                       # MODIFIED: Enqueuer + EnqueueAudioTranscribe
+│   └── handlers.go                  # MODIFIED: engine-routing switch + EngineAudio
+├── reconciler/
+│   └── reconciler.go                # MODIFIED: enqueuer interface + sweep() switch
+└── metrics/                         # UNCHANGED — queue_collector.go is already
+                                      #   generic (takes ...queues); only the CALL
+                                      #   SITE in cmd/api/main.go changes
+Dockerfile.audio-worker              # NEW
+docker-compose.yml                   # MODIFIED: + audio-worker service
+.github/workflows/ci.yml             # MODIFIED: + audio-worker bake cache entries
 deploy/chart/octoconv/
-├── Chart.yaml                     # single chart, apiVersion v2, no chart deps (see rationale below)
-├── values.yaml                    # see shape below
-├── values-orbstack.yaml           # local-dev overrides (LoadBalancer type, image.pullPolicy=Never)
-├── templates/
-│   ├── _helpers.tpl               # fullname/labels helpers + shared env-block templates
-│   ├── configmap.yaml             # non-secret env: S3_BUCKET, METRICS_ADDR, *_MAX_RETRY, *_ENGINE_TIMEOUT...
-│   ├── secret.yaml                # DATABASE_URL, API_KEY_SALT, WEBHOOK_SIGNING_SECRET, S3 creds, OCTOCONV_API_KEY (mcp)
-│   ├── deployment-api.yaml
-│   ├── deployment-worker.yaml
-│   ├── deployment-document-worker.yaml
-│   ├── deployment-chromium-worker.yaml
-│   ├── deployment-webhook-worker.yaml   # replicas: 2 fixed, NOT templated by KEDA
-│   ├── deployment-mcp-http.yaml         # conditional: .Values.mcpHttp.enabled
-│   ├── deployment-asynqmon.yaml
-│   ├── service-*.yaml                   # one per component that needs one (api, mcp-http, asynqmon, postgres, redis, minio)
-│   ├── postgres.yaml                    # Deployment + PVC + Service (own template, not a subchart)
-│   ├── redis.yaml
-│   ├── minio.yaml
-│   ├── job-migrate.yaml                 # helm.sh/hook: pre-install,pre-upgrade
-│   ├── job-createbucket.yaml            # helm.sh/hook: pre-install,pre-upgrade, hook-weight after migrate
-│   ├── scaledobject-image.yaml          # {{ if .Values.keda.enabled }}
-│   ├── scaledobject-document.yaml
-│   ├── scaledobject-html.yaml
-│   ├── networkpolicy-metrics.yaml       # restrict :9090 ingress to the scraper's namespace/pod selector
-│   └── networkpolicy-mcp.yaml           # restrict mcp-http ingress to trusted in-cluster callers
-└── crds/                                # NOT needed — KEDA CRDs are installed by the KEDA operator itself,
-                                          # this chart only creates ScaledObject *instances*
-```
-
-### values.yaml shape
-
-```yaml
-global:
-  imageTag: "dev"          # single tag for all first-party images (built with the same commit)
-  namespace: octoconv
-
-image:
-  registry: ""              # empty for OrbStack local images (no push needed, see Pitfalls)
-  pullPolicy: Never          # OrbStack builds land directly in its containerd/moby store
-
-metrics:
-  addr: "0.0.0.0:9090"       # overrides compose's 127.0.0.1:9090 default — see Landmine 1
-
-s3:
-  # FQDN, not short Service name — resolvable from BOTH in-cluster pods AND the
-  # OrbStack host (see Landmine 4). Namespace must match .Release.Namespace.
-  endpoint: "octoconv-minio.octoconv.svc.cluster.local:9000"
-
-api:
-  replicas: 1
-  resources: {...}
-
-worker:
-  replicas: 1                # baseline before KEDA takes over; ignored once ScaledObject is active
-document-worker:
-  replicas: 1
-chromium-worker:
-  replicas: 1
-webhook-worker:
-  replicas: 2                 # fixed redundancy — NEVER templated by KEDA (see Component Responsibilities)
-
-keda:
-  enabled: false               # off by default; chart installs cleanly even without the KEDA operator present
-  image:
-    pollingInterval: 15
-    minReplicaCount: 0
-    maxReplicaCount: 8
-
-mcpHttp:
-  enabled: false               # Phase D ships this off-by-default until validated
-
-operator:
-  clientIds: []                # OPERATOR_CLIENT_IDS allowlist for system-presets REST (Q5)
+├── values.yaml                      # MODIFIED: + audioWorker, keda.audio blocks
+└── templates/
+    ├── configmap.yaml               # MODIFIED: + AUDIO_* keys
+    ├── deployment-audio-worker.yaml # NEW
+    └── scaledobject-audio.yaml      # NEW
 ```
 
 ### Structure Rationale
 
-- **Single chart, not per-service charts**: every component already deploys from one repo/one commit (`global.imageTag`), and the compose file's own structure (`docker-compose.yml`) is a single-file, single-stack description that this chart should mirror 1:1 for maintainability — a multi-chart umbrella would just re-add complexity the compose file never had.
-- **Postgres/Redis/MinIO as own templates, not Bitnami/official subcharts**: `docker-compose.yml` pins `postgres:18`, `redis:8`, `minio/minio:latest` directly with hand-rolled healthchecks and a single PVC each — no StatefulSet features (ordinal identity, headless Service) are actually used anywhere in the current architecture (single-instance stateful deps, not a Postgres/Redis cluster). Pulling in Bitnami subcharts would import a large surface of unused configurability (replication, TLS, metrics exporters) for zero benefit at this milestone's scope, and would fight the project's own "minimize new dependency surface" bias. Recommendation: three flat Deployment+PVC+Service templates, revisit subcharts only if genuine HA/replication requirements emerge (explicitly out of scope per `PROJECT.md`'s "Kubernetes + KEDA" framing as an infra-validation milestone, not a production-HA milestone).
-- **KEDA ScaledObjects live in the SAME chart**, gated by `keda.enabled`, not a separate chart: they are `ScaledObject` custom resources, not the KEDA operator itself (the operator is a cluster-wide prerequisite, installed once via its own Helm chart, exactly like `cert-manager` or an ingress controller — outside this chart's concern). Keeping the `ScaledObject` *instances* in this chart means `helm install octoconv` and `helm install octoconv --set keda.enabled=true` are the only two states an operator needs to reason about, matching SEED-004's framing ("KEDA: ScaledObjects per engine-class... на УЖЕ СУЩЕСТВУЮЩУЮ Prometheus-метрику").
-- **`webhook-worker` is a fixed-replica Deployment, deliberately NOT KEDA-managed**: its ×2 replication exists for delivery redundancy and singleton-sweeper failover (Postgres advisory lock — `PROJECT.md` Key Decision, Phase 16), not for elastic throughput scaling. A KEDA `ScaledObject` targeting it would risk scaling to 1 or 0 replicas under low webhook-queue depth, silently breaking the "≥2 consumers" redundancy guarantee the whole webhook architecture depends on. This is a genuine engine-class-vs-consumer-topology distinction worth flagging explicitly for the roadmap.
+Every "NEW" file above has a direct, structurally-identical sibling already in the tree (`document-worker`/`chromium-worker` for the Dockerfile+cmd+chart pair, `libreoffice.go`/`chromium.go` for the Converter, `DocumentRetryDelay`/`HTMLRetryDelay` for the queue plumbing). This is deliberate: the codebase's own doc comments repeatedly say "mirrors X exactly" when a new engine class is added, and code review (26/27/28-REVIEW.md) rewards that consistency and flags drift. The audio class should be built by copy-adapt from `document-worker`, not from `image`/`worker` — document/html are the closer analogues because both (a) run an external binary that can legitimately hang on bad input (timeout-should-be-terminal), and (b) need a heavier, non-trivial-to-install runtime dependency baked into a dedicated Dockerfile (LibreOffice / chromium-headless-shell / whisper.cpp+ffmpeg), unlike the `worker`/libvips class which is a single lightweight CLI already in Debian's apt repo.
 
 ## Architectural Patterns
 
-### Pattern 1: Zero-code-change env override for METRICS_ADDR (Landmine 1)
+### Pattern 1: Engine-class routing (the load-bearing pattern — apply verbatim)
 
-**What:** `os.Getenv("METRICS_ADDR")` is read identically in all five binaries — `cmd/api/main.go:129`, `cmd/worker/main.go:99`, `cmd/document-worker/main.go:104`, `cmd/chromium-worker/main.go:96`, `cmd/webhook-worker/main.go:125` — falling back to `"127.0.0.1:9090"` only when unset, then used directly as `http.Server{Addr: metricsAddr}`. There is no code path anywhere that hardcodes `127.0.0.1` beyond this single default string.
+**What:** One `Converter` implementation per engine, registered into a single process-wide `Registry`; one asynq queue + one dedicated worker binary + one Dockerfile + one compose service + one chart Deployment + one chart ScaledObject per engine class. `convert.EngineImage`/`EngineDocument`/`EngineHTML` are the single source of truth for the engine-class string literal, referenced by name in `internal/api`, `internal/reconciler`, and `internal/queue`.
+**When to use:** Every new file-conversion capability. This is not optional or up for reinterpretation — three prior milestones (v1.0, v1.2, v1.3) converged on it, and the codebase's own comments call out any place that must stay in lock-step (`internal/convert/convert.go:11-17`).
+**Trade-offs:** Verbose (touches ~15 files per new class) but mechanically safe — each touch point is small, typed, and covered by an existing compile-time or test-time check (`go vet`, the `internal/api`/`internal/queue` test suites, `helm template` render checks). The alternative (a generic `Handler`/`Capability` contract) was explicitly rejected in Key Decisions for v1.2 and never revisited.
 
-**When to use:** Every k8s Deployment template sets `METRICS_ADDR=0.0.0.0:9090` via the shared ConfigMap. This is a **values.yaml-only change — verified zero Go code change required.**
-
-**Trade-off:** Binding `0.0.0.0` inside the pod removes the "unreachable outside the host" security boundary the compose deployment relies on for `/metrics` and `asynqmon` (`docker-compose.yml`'s own comment: "Bound to 127.0.0.1 only... no auth layer needed since it's unreachable outside the host"). In-cluster, ANY pod that can route to the metrics port can scrape it — there is no equivalent implicit isolation. **A `NetworkPolicy` restricting ingress on `:9090` to the Prometheus scraper's pod/namespace selector is not optional polish — it is the direct in-cluster replacement for the security property `127.0.0.1` used to provide.** Same reasoning applies to `asynqmon` (Deployment + ClusterIP Service + its own `NetworkPolicy`, since compose's `ports: - "127.0.0.1:8980:8080"` host-loopback restriction has no k8s equivalent — a ClusterIP Service alone is already reachable from every pod in the cluster by default).
-
-```yaml
-# networkpolicy-metrics.yaml (all Deployments carrying metrics:9090)
-podSelector:
-  matchExpressions:
-    - {key: app.kubernetes.io/part-of, operator: In, values: [octoconv]}
-ingress:
-  - from:
-      - namespaceSelector: {matchLabels: {name: monitoring}}   # or podSelector for a Prometheus Operator scrape target
-    ports: [{port: 9090, protocol: TCP}]
-```
-
-### Pattern 2: In-cluster E2E as a self-addressing Job (Landmine 2)
-
-**What:** `internal/e2e/e2e_test.go` does **not** use `httptest.NewServer`'s default loopback listener. It explicitly does:
-
+**Example — the exact shape `AudioConverter` must follow (`internal/convert/libreoffice.go` structure, adapted):**
 ```go
-ln, err := net.Listen("tcp", "0.0.0.0:0")   // e2e_test.go:348, :1010
-...
-srv.Listener.Close()
-srv.Listener = ln
+const EngineAudio = "audio" // add to internal/convert/convert.go's const block
+
+type AudioConverter struct{}
+
+var audioSourceFormats = []string{"mp3", "wav", "m4a", "ogg"}
+var audioTargetFormats = []string{"txt", "srt", "vtt", "json"}
+
+func (AudioConverter) Pairs() []Pair {
+	pairs := make([]Pair, 0, len(audioSourceFormats)*len(audioTargetFormats))
+	for _, from := range audioSourceFormats {
+		for _, to := range audioTargetFormats {
+			pairs = append(pairs, Pair{From: from, To: to}) // full cross-product,
+			// unlike LibvipsConverter's from!=to filter -- source and target
+			// sets are disjoint here, so no self-pair exists to exclude
+		}
+	}
+	return pairs
+}
+
+func (AudioConverter) Engine() string { return EngineAudio }
 ```
 
-— i.e., the webhook/canary receiver is deliberately bound to all interfaces on an OS-assigned ephemeral port, precisely so it is reachable from outside the test process's own network namespace. The receiver's address is then read back from `ln.Addr()` and combined with the already-overridable `E2E_WEBHOOK_HOST` env var (`e2eSetup`, `e2e_test.go:78-85`, default `"host.docker.internal"`).
+### Pattern 2: Timeout-is-terminal for engines with deterministic hang behavior (DOC-08's precedent, not image's)
 
-**Two in-cluster options compared:**
+**What:** `isTerminal` (the shared classifier) deliberately treats a `context.DeadlineExceeded` as TRANSIENT so the image path keeps retrying real S3/network blips. `isDocumentTerminal`/`isHTMLTerminal` deliberately DIVERGE from that and treat a timeout as TERMINAL, via the shared `timeoutIsTerminal` helper, because LibreOffice/chromium hangs on bad input are deterministic — retrying burns the whole `*_MAX_RETRY` budget on a render that will time out identically every time.
+**When to use for audio:** whisper.cpp transcription time is a near-deterministic function of (audio duration × model size × CPU). An `AUDIO_ENGINE_TIMEOUT` expiry is therefore far more likely to mean "this file is pathologically long/silent/corrupt for this model" than "transient contention" — the SAME reasoning DOC-08 already documents. **Recommendation: `isAudioTerminal` should be `timeoutIsTerminal(err)` (mirroring `isDocumentTerminal`/`isHTMLTerminal` verbatim), not a bespoke transient-timeout classifier.** This is a real design decision, not a formality — get it wrong and a single pathological audio file burns `AUDIO_MAX_RETRY × AUDIO_ENGINE_TIMEOUT` of worker time before finally failing.
+**Trade-offs:** A file that times out for a genuinely transient reason (e.g., the audio-worker pod was CPU-starved by a co-scheduled load spike) will fail one attempt sooner than it would under image's transient-timeout policy. This is the same trade-off document/html already accepted; the reconciler's stale-job sweep is the backstop for genuinely-stuck-not-yet-timed-out jobs either way.
 
-| | Run e2e suite AS a k8s Job (test binary in-cluster) | Receiver-pod + host-run tests via port-forward |
-|---|---|---|
-| Webhook reachability | **Trivial.** Pod IP is directly routable from every other pod by default (flat k8s pod network, no NAT) — inject the Job's own pod IP via the Downward API (`fieldRef: status.podIP`) into `E2E_WEBHOOK_HOST`. **No code change** — `E2E_WEBHOOK_HOST` already exists as an override knob. | **Structurally hard.** In-cluster `webhook-worker` pods would need to dial back OUT of the cluster to a process on the developer's host. There is no k8s equivalent of Docker's `host-gateway` — this is exactly the landmine SEED-004 names ("host.docker.internal:host-gateway трюк... в k8s не существует"). Only works at all if OrbStack's specific host-bridging behavior happens to route it, which is undocumented and non-portable to kind/k3d (the stated fallback). |
-| S3 presigned-download reachability | **Trivial**, if `S3_ENDPOINT` is set to MinIO's FQDN (`octoconv-minio.<ns>.svc.cluster.local:9000`, see Landmine 4) — the in-cluster Job resolves it exactly like any other pod. `E2E_S3_DIAL_ADDR` becomes **unnecessary** entirely (it exists only to bridge the host-vs-container DNS gap; running the suite in-cluster eliminates that gap). | Host-run tests need `E2E_S3_DIAL_ADDR` (or OrbStack's `cluster.local` host resolution, see Landmine 4) regardless — no advantage over the Job approach here. |
-| Portability beyond OrbStack | Fully portable — Downward API pod IP + Service DNS work identically on kind/k3d/any real cluster (the stated SEED-004 fallback). | Depends on host-to-pod ingress specifics of the chosen local cluster; not guaranteed on kind/k3d. |
-| CI reuse | The Job manifest can be driven by the exact same `go test ./internal/e2e/...` invocation `ci.yml`'s `e2e` tier already runs — only the environment differs (Downward API env vars vs `localhost`/`E2E_S3_DIAL_ADDR`). | Requires a materially different harness (port-forward setup, receiver-pod lifecycle) with no CI-tier reuse. |
+### Pattern 3: Two-stage external-process pipeline inside a single `Convert()` call
 
-**Recommendation: run the e2e suite as an in-cluster Kubernetes `Job`.** It is the only option that (a) requires zero changes to `internal/e2e/e2e_test.go`, (b) removes two landmines simultaneously (webhook host-gateway AND S3 dial-redirect, since both existing escape hatches become no-ops in-cluster), and (c) is portable to the kind/k3d fallback SEED-004 explicitly names, unlike the port-forward option which leans on undocumented OrbStack-specific host networking.
-
-```yaml
-# job-e2e.yaml (manual, NOT a Helm hook — run on demand: `helm template ... | kubectl apply -f -` or `helm test`)
-spec:
-  template:
-    spec:
-      containers:
-        - name: e2e
-          image: "{{ .Values.image.registry }}/octoconv-e2e:{{ .Values.global.imageTag }}"
-          env:
-            - {name: E2E_BASE_URL, value: "http://octoconv-api:8090"}
-            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: octoconv-secret, key: database-url}}}
-            - {name: API_KEY_SALT, valueFrom: {secretKeyRef: {name: octoconv-secret, key: api-key-salt}}}
-            - {name: WEBHOOK_SIGNING_SECRET, valueFrom: {secretKeyRef: {name: octoconv-secret, key: webhook-signing-secret}}}
-            - name: E2E_WEBHOOK_HOST
-              valueFrom: {fieldRef: {fieldPath: status.podIP}}   # replaces host.docker.internal entirely
-            # E2E_S3_DIAL_ADDR: intentionally OMITTED — S3_ENDPOINT is already the
-            # in-cluster-resolvable MinIO FQDN, no redirect needed.
-      restartPolicy: Never
+**What:** Every existing `Converter.Convert()` shells out to exactly ONE external binary via `runCommand` (vips / soffice / chromium-headless-shell). Audio is the first engine class that legitimately needs TWO sequential external processes: `ffmpeg` (resample arbitrary input to 16kHz mono 16-bit PCM WAV — whisper.cpp's hard input requirement, MEDIUM confidence, WebSearch-verified) then `whisper-cli` (the actual transcription).
+**When to use:** Keep both invocations INSIDE `AudioConverter.Convert()`, calling `runCommand` twice sequentially, sharing the same `ctx` (and therefore the same `AUDIO_ENGINE_TIMEOUT` budget) for both. Do NOT split ffmpeg preprocessing into a separate queue/task stage — that would break the "one task = one attempt = one Postgres transition" invariant every other engine class relies on (`process()` in `internal/worker/worker.go` wraps the ENTIRE attempt, not just `conv.Convert()`, in one `context.WithTimeout`; a second queue hop would need its own asynq.Unique lock derivation, duplicating `ImageUniqueTTL`'s whole worst-case-lifetime reasoning for no benefit).
+**Trade-offs:** `AUDIO_ENGINE_TIMEOUT` must budget for BOTH steps (ffmpeg resampling is fast/near-linear in file size; whisper-cli is the dominant cost). A single combined budget is simpler to reason about than two separate timeouts and matches every existing engine's "one timeout covers the whole attempt" shape.
+**Example (Convert() sketch, mirrors chromium.go's direct-argv-write, no-shell-involved discipline):**
+```go
+func (AudioConverter) Convert(ctx context.Context, inPath, outPath string, opts map[string]any) error {
+	workDir := filepath.Dir(outPath)
+	wavPath := filepath.Join(workDir, "pcm16.wav")
+	if _, err := runCommand(ctx, "ffmpeg", "-y", "-i", inPath, "-ar", "16000", "-ac", "1",
+		"-c:a", "pcm_s16le", wavPath); err != nil {
+		return fmt.Errorf("audio: ffmpeg: %w", err)
+	}
+	target := NormalizeFormat(filepath.Ext(outPath)) // txt|srt|vtt|json
+	outBase := strings.TrimSuffix(outPath, filepath.Ext(outPath)) // whisper-cli appends its own ext
+	if _, err := runCommand(ctx, "whisper-cli", "-m", whisperModelPath,
+		"-f", wavPath, "-of", outBase, "--output-"+target, "-nt" /* no timestamps in txt */); err != nil {
+		return fmt.Errorf("audio: whisper-cli: %w", err)
+	}
+	// whisper-cli writes outBase+"."+target deterministically (--output-file
+	// pins the basename) -- verify/os.Stat exactly like validatePDF does,
+	// no blind "assume success on exit 0" (every existing engine has been
+	// bitten by an engine that exits 0 with no/empty output; whisper.cpp
+	// should get the same non-trusting treatment).
+	return validateAudioOutput(outPath, target)
+}
 ```
 
-This needs a **new** `Dockerfile.e2e` (multi-stage: build the test binary with `go test -c ./internal/e2e/...`, copy fixtures under `internal/e2e/testdata/`) — a new image, not a new chart concept.
+## Data Flow
 
-### Pattern 3: migrate/createbucket as Helm hooks, not initContainers
+### Request Flow (job creation → transcript delivered)
 
-**What:** `docker-compose.yml`'s ordering today is `depends_on: {condition: service_healthy}` (postgres/redis/minio) plus a dedicated one-shot `createbucket` service. Two idiomatic k8s translations exist: (a) Helm `pre-install,pre-upgrade` hook Jobs, or (b) `initContainers` on every consuming Deployment.
-
-**Recommendation: Helm hooks, not initContainers**, for both `migrate` and `createbucket`:
-- **Migrate** is a single logical operation that must run exactly once per deploy, before ANY consumer starts — an `initContainer` model would re-run `cmd/migrate` on every single Deployment's every single pod restart (api, worker, document-worker, chromium-worker, webhook-worker ×2 = 6+ redundant migration attempts per rollout). `cmd/migrate`'s embedded-SQL runner (`internal/db/db.go`) is presumably idempotent (`CREATE TABLE IF NOT EXISTS`-style), but repeating it N times per deploy for no benefit is pure waste and a needless race-surface (N pods racing to apply the same migration concurrently) versus a single Job with `hook-weight` ordering guaranteeing exactly one execution.
-- **createbucket** has the same "logically once" shape (`mc mb --ignore-existing`) — a `pre-install,pre-upgrade` hook with a higher (later) `hook-weight` than migrate's Job, so ordering is: `migrate` → `createbucket` → main release resources. Helm guarantees hook Jobs complete (or fail, blocking the release) before the main manifests are applied, replicating compose's `depends_on: condition: service_healthy` guarantee declaratively.
-- **initContainers remain the right tool** only for genuinely PER-POD readiness gating (e.g., "wait for Postgres/Redis/MinIO to be reachable before this pod's main container starts" — but even that is largely redundant here since `cmd/*/main.go` already calls `log.Fatalf` on connect failure, causing k8s's own container restart/backoff to retry, which is arguably sufficient without an initContainer at all, given the existing fail-fast startup discipline in this codebase).
-
-```yaml
-# job-migrate.yaml
-metadata:
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
----
-# job-createbucket.yaml
-metadata:
-  annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
-    "helm.sh/hook-weight": "1"       # runs strictly after migrate
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+```
+Client POST /v1/jobs (file=recording.mp3, target=srt)
+    │
+    ▼
+handleCreateJob (internal/api/handlers.go)
+    │  1. multipart parse, size cap (unchanged)
+    │  2. convert.Sniff(file) -- NEW: mp3/wav/ogg/m4a signatures checked here
+    │     (ID3-tagged mp3 needs a second, ID3-aware branch -- see Anti-Pattern 3)
+    │  3. HasDimensionLimit("mp3") == false -> pixel-dimension check SKIPPED
+    │     automatically (dimensionParsers map has no audio entries) -- same
+    │     free bypass documents/html already get, VERIFY not IMPLEMENT
+    │  4. convert.Default.EngineFor("mp3","srt") -> ("audio", true)
+    │  5. S3 upload (uploads/{job_id}/0-recording.mp3)
+    │  6. jobs.Create (Postgres, status=queued, engine="audio")
+    │  7. switch engine { case EngineAudio: s.queue.EnqueueAudioTranscribe(...) }
+    ▼
+audio asynq queue (Redis) -- asynq.Unique-locked, AudioUniqueTTL-derived
+    ▼
+cmd/audio-worker (asynq.ServeMux -> HandleAudioTranscribe)
+    │  1. MarkActive (guarded transition, same as every class)
+    │  2. process(): download input, registry.Lookup("mp3","srt") -> AudioConverter
+    │  3. AudioConverter.Convert(): ffmpeg resample -> whisper-cli transcribe
+    │     -- both bounded by the SAME attemptCtx (AUDIO_ENGINE_TIMEOUT)
+    │  4. upload output (results/{job_id}/0-out.srt, Content-Type per
+    │     MIMEType("srt"))
+    │  5. AddOutput + MarkDone (Postgres)
+    │  6. EnqueueWebhookDeliver if callback_url set (unchanged, engine-agnostic)
+    ▼
+Client GET /v1/jobs/{id} -> download_url (presigned) OR webhook delivered
 ```
 
-### Pattern 4: FQDN S3_ENDPOINT closes the presigned-URL landmine for BOTH consumer classes (Landmine 4)
+### Failure/Retry Flow
 
-**What:** Presigned URLs bake `S3_ENDPOINT`'s host directly into the signed URL (`internal/storage/storage.go`, mirroring compose's `minio:9000`). Two consumer classes exist in the k8s scenario:
+```
+whisper-cli/ffmpeg failure or AUDIO_ENGINE_TIMEOUT expiry
+    │
+    ▼
+isAudioTerminal(err)  -- timeoutIsTerminal wrapper (Pattern 2 above)
+    │
+    ├─ terminal (bad input signature match, OR timeout) ──► MarkFailed + SkipRetry
+    │                                                        + webhook (if set)
+    │                                                        + metrics.RecordJobOutcome
+    │
+    └─ transient (S3/Postgres blip, non-timeout) ──────────► return unwrapped err,
+                                                               job stays "active",
+                                                               asynq retries per
+                                                               AudioRetryDelay
+                                                               (bounded AUDIO_MAX_RETRY)
+```
 
-1. **In-cluster consumers** (worker pods redownloading, the in-cluster e2e Job, `mcp-http`'s server-side `Download`) — resolve any Service DNS name (short or FQDN) fine, since kube-dns configures a search path (`<ns>.svc.cluster.local`) for every pod.
-2. **Host consumers** (a developer's `curl`/browser hitting a returned `download_url`, or a locally-run `cmd/mcp-server` in stdio mode pointed at the in-cluster API) — do **not** have that search path; a short Service name like `octoconv-minio:9000` will NOT resolve from macOS.
+If a task is dropped without a status transition (pod killed mid-attempt), the reconciler's `sweep()` picks it up on the next tick via `FindStale` + the `jobs.engine` routing switch — this is why that switch MUST gain an `EngineAudio` case; without it, a stranded audio job silently degrades into `unroutable_engine` (a safe-but-wrong metric-visible no-op) forever.
 
-**Verified (WebSearch against OrbStack's own docs, MEDIUM-HIGH confidence):** OrbStack resolves standard `<service>.<namespace>.svc.cluster.local` domains directly from the macOS host — no port-forward, no `/etc/hosts` edits required — and additionally exposes `LoadBalancer`-type Services at `*.k8s.orb.local`. This means setting `S3_ENDPOINT` to the **fully-qualified** MinIO Service name (`octoconv-minio.octoconv.svc.cluster.local:9000`), not the short name, makes presigned URLs dialable identically from in-cluster pods AND the OrbStack host — closing the landmine for both consumer classes **without** needing `E2E_S3_DIAL_ADDR`, an Ingress, or a `LoadBalancer` for MinIO specifically, on OrbStack. This is an OrbStack-specific convenience, not a general k8s guarantee — flag explicitly that a real multi-node cluster (beyond this milestone's stated OrbStack/local scope) would need an Ingress or a MinIO `LoadBalancer`/`NodePort` for host-external presigned-URL access instead.
+## Scaling Considerations
 
-**Consumer map for this milestone's scenario:**
-
-| Consumer | Reaches API via | Reaches presigned MinIO URL via |
-|---|---|---|
-| In-cluster workers (image/document/chromium/webhook) | ClusterIP Service DNS | FQDN Service DNS (same cluster) |
-| In-cluster e2e Job (Pattern 2) | ClusterIP Service DNS | FQDN Service DNS (same cluster) |
-| `mcp-http` pod (server-side `Download` in `convert_file`/`download_result`) | ClusterIP Service DNS (calls its own cluster's API) | FQDN Service DNS (same cluster) |
-| Developer's Mac (`curl`, browser, a locally-run stdio `cmd/mcp-server` pointed at the cluster) | `*.k8s.orb.local` (LoadBalancer Service for `octoconv-api`) | FQDN `octoconv-minio.octoconv.svc.cluster.local:9000` (OrbStack host-side resolution) |
-
-## Worker Probes (Q3)
-
-**Current state, verified:** `worker`, `document-worker`, `chromium-worker`, `webhook-worker` expose exactly one HTTP listener — `promhttp.Handler()` on `METRICS_ADDR` — and nothing else. asynq itself exposes no health endpoint (confirmed: no health-check method exists on `asynq.Server`/`asynq.Client` in this codebase's usage, matching the prompt's own framing). The Postgres pool, Redis connection, and S3 client are all established once at startup and never actively re-checked.
-
-**Assessment: a bare TCP probe against the metrics port is a weak but non-zero liveness signal** — it proves the Go process is alive and its own goroutines are scheduling (the metrics `http.Server` is started in a `go func()` well after `asynq.Server.Start(mux)`, which is itself non-blocking — see `cmd/worker/main.go:81-92` — so a listening metrics port implies the asynq processing loop was successfully constructed). It proves **nothing** about ongoing Redis/Postgres connectivity, since a dropped Redis connection mid-run does not close the independent metrics listener goroutine.
-
-**Two options:**
-
-1. **Zero-code-change**: `livenessProbe`/`readinessProbe` both as `tcpSocket` on port 9090. Cheapest path; catches only "process crashed/deadlocked," not "lost its dependencies."
-2. **Recommended small addition**: give each worker binary a real `/healthz` on the metrics listener (switch `metricsSrv.Handler` from a bare `promhttp.Handler()` to an `http.ServeMux` with `/metrics` and `/healthz` registered), pinging `pool.Ping(ctx)` (pgxpool's native method), `store.Ping(ctx)` (already exists on `storage.Client`, reused verbatim from the API's `HealthDeps.S3`), and a small dedicated Redis ping client (mirrors `cmd/api/main.go`'s existing `redisPinger` — ~10 lines, duplicated per the codebase's established per-binary-duplication convention for small helpers). Use this for **readiness only** (`livenessProbe` stays `tcpSocket` — a transient Redis blip should not trigger a restart-loop policy); readiness failing here has limited practical effect since nothing routes Service traffic TO worker pods (they pull from Redis, they don't serve requests), but it gives `kubectl get pods` and any future HPA/monitoring genuine signal instead of a process-liveness-only proxy, and is directly consistent with the project's own established principle that `/healthz` must ping real dependencies, not just report "process up" (`internal/api/handlers.go`'s `handleHealth` doc comment: "It is read-only: it only pings, never writes" — extend the same discipline here rather than introduce an inconsistent, weaker health model for workers).
-
-**Recommendation: do the small addition (option 2).** Given "Deployments/probes" is explicitly named as in-scope chart work in `SEED-004`, and the marginal code cost is genuinely small (three already-available ping primitives, no new packages), settling for a TCP-only proxy here would be an inconsistency the project's own conventions argue against.
-
-## MCP HTTP Architecture (Q4)
-
-**Verified:** `internal/mcpserver/mcpserver.go`'s `NewServer(cfg Config, c *Client) *mcp.Server` is genuinely transport-agnostic — it only builds an `*mcp.Server` and registers five tools against a `*Client`; the ONLY transport-specific line in the entire MCP stack is `cmd/mcp-server/main.go:46`: `srv.Run(ctx, &mcp.StdioTransport{})`. The SDK (`github.com/modelcontextprotocol/go-sdk` v1.6.1, confirmed installed) ships `mcp.NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *mcp.StreamableHTTPOptions) *mcp.StreamableHTTPHandler` (`mcp/streamable.go:194`), which implements `http.Handler` — a drop-in target for a `net/http.Server`, exactly mirroring the existing `promhttp.Handler()` pattern already used for `/metrics` in every `cmd/*/main.go`.
-
-**cmd/mcp-server gains `--http` vs new `cmd/mcp-http`:** the project's own established convention is **one binary per deployment unit**, explicitly justified for the analogous document/image engine split (`PROJECT.md` Key Decision: "Отдельный `cmd/document-worker` бинарник/контейнер вместо второго `asynq.Server` внутри image-воркера — ... ресурсная изоляция по классам движков"). A stdio MCP server is exec'd on-demand by a local MCP host (Claude Code, etc.) with a completely different lifecycle than a long-running, resource-limited, probed Kubernetes Deployment. **Recommendation: new `cmd/mcp-http/main.go`** (near-identical wiring to `cmd/mcp-server/main.go`: `mcpserver.Load()` → `mcpserver.NewClient(cfg)` → `mcpserver.NewServer(cfg, client)`, but the tail swaps `srv.Run(ctx, &mcp.StdioTransport{})` for an `http.Server` wrapping `mcp.NewStreamableHTTPHandler(...)`, bound to an env-configurable `MCP_HTTP_ADDR` mirroring the `METRICS_ADDR` pattern, with the same graceful-shutdown shape already used in `cmd/api/main.go`). **`internal/mcpserver` needs zero changes** for this. A new `Dockerfile.mcp-http` is required — no `Dockerfile.mcp-server` exists today (stdio has never been containerized).
-
-**Auth pass-through — two options:**
-
-1. **Pod holds ONE key (recommended)**: the `getServer` closure ignores the incoming `*http.Request` and always returns the single `*mcp.Server` built once at process start from the pod's `OCTOCONV_API_KEY` env var — an exact transport-swap of today's stdio model, with **zero changes** to `internal/mcpserver/client.go`'s `NewClient(cfg Config) (*Client, error)` (confirmed: it already bakes `apiKey` into the `Client` struct at construction, one key per process). Every caller that reaches the `mcp-http` Service acts as this one designated OctoConv client. This is architecturally consistent with the ALREADY-SHIPPED v1.5 design principle ("zero-privilege HTTP-клиент с редакцией ключа" — Phase 21): the MCP layer has never claimed per-end-user identity, only per-service identity, matching OctoConv's actual trust model where `clients` rows represent internal SERVICES, not individual humans. Gate WHO can reach this identity via a `NetworkPolicy` restricting ingress to specific trusted namespaces/pods — this is the in-cluster analog of "one developer, one locally-exec'd stdio process, one key" scaled to "one shared internal automation surface, one key, network-scoped."
-2. **Per-caller pass-through** (caller supplies its own API key in a header, MCP pod holds none): requires a new `getServer(r *http.Request)` closure that extracts a caller-supplied key, a new `mcpserver.NewClientWithKey`-style constructor, and per-key `*mcp.Server`/`*Client` caching to avoid rebuilding on every request. This is the "more correct" multi-tenant answer (every caller's actions map to its own `clients` row for rate-limiting/audit) but is a **materially bigger change** not requested by this milestone's stated goal ("MCP получает in-cluster HTTP-эндпоинт" — a transport change, not a multi-tenancy redesign).
-
-**Recommendation: Option 1 for v1.6.** Flag Option 2 explicitly as a documented future Key Decision if/when multiple distinct internal services need to share one `mcp-http` endpoint under their own separate identities — do not silently default into it.
-
-**Integration gap worth flagging (not a blocker, but a real finding):** every MCP tool response includes a `local_path` field (`internal/mcpserver/tools.go:39,153` — JSON schema description: *"local filesystem path (inside the server's OUTPUT_DIR) where the converted file was already downloaded"*), and `convertFileHandler`/`downloadResultHandler` both actually write the result to `cfg.OutputDir` on the server's own filesystem (`internal/mcpserver/client.go:284` `Download`) before returning that path. In the stdio model this is correct (the calling MCP host and the server share a filesystem — same machine). **Once `mcp-http` runs as a remote pod, `local_path` refers to the pod's own ephemeral filesystem and is meaningless/unusable to any remote HTTP caller** — the `PresignedURL`/`DownloadURL` field remains the only usable part of the response for that transport. This is not a code-breaking bug (nothing crashes; the field is simply inert for remote callers), but it is a real, user-facing contract mismatch worth a documented note (or a follow-on `Config.SkipLocalDownload` knob) rather than silently shipping a misleading tool description under the HTTP transport.
-
-## system-presets REST Operator Gate (Q5)
-
-**Verified — the domain layer needs ZERO changes.** `internal/api/api.go`'s `PresetAdmin` interface (already used by the existing client-scope `/v1/presets` handlers) is already scope-agnostic: `Create(ctx, presets.CreateParams{Scope: ..., ClientID: ...})`, `Update/Deactivate/Get/List(ctx, scope string, clientID *uuid.UUID, ...)`. Today's handlers (`internal/api/presets_handlers.go`) simply always hardcode `Scope: presets.ScopeUser, ClientID: &client.ID`. **System-presets REST is therefore purely a new set of REST handlers + a new route group + a new authorization gate — not a domain/repo change.**
-
-**Operator identity source — verified via schema:** `clients` table (`internal/db/migrations/0001_init.sql` + `0002_client_api_keys.sql`) has exactly `id, name, created_at, api_key_hash, api_key_hash_secondary, primary_revoked_at, secondary_revoked_at, updated_at` — **no spare role/flag column**, and `internal/clients/clients.go`'s `Client` struct mirrors this minimally (`ID uuid.UUID`, `Name string` only).
-
-**Two options:**
-
-1. **`OPERATOR_CLIENT_IDS` env allowlist (recommended)**: comma-separated UUID list, read once at API startup (mirrors the existing `envInt64`/`firstField` env-parsing idiom already in `cmd/api/main.go`), stored on `api.Config`, checked by a new gate — e.g. `middleware.RequireOperator(allowlist map[uuid.UUID]bool)` mounted only on a new `/v1/system/presets` route group, running AFTER `auth.Middleware` (client identity already resolved) and BEFORE the new handlers. **Zero schema migration.** Matches this project's own strict "environment-variable configuration only" architectural constraint (*"No config file support; every runtime setting... read from `os.Getenv`"*) and its precedent for exactly this shape of allowlist gate (`WEBHOOK_ALLOW_PRIVATE_IPS`, rate-limit env vars). Trade-off: changing the operator set requires a redeploy/restart (acceptable — internal-only, small, slow-changing operator population); no built-in per-operator audit trail beyond whatever `job_events`-style logging is added alongside.
-2. **`is_operator boolean` column on `clients`** (new migration `0006_client_operator_flag.sql`): more scalable (change without redeploy, via `manage-clients`), supports a future per-operator audit trail naturally. Genuinely the better long-term answer, but is unjustified schema churn for this milestone's stated scope (a handful of internal operators, not a growing/self-service operator population).
-
-**Recommendation: `OPERATOR_CLIENT_IDS` env allowlist for v1.6.** Document the DB-column alternative as an explicit future Key Decision, to be revisited if/when the operator set needs to change without a redeploy or per-operator audit becomes a real requirement.
-
-**No-leak consistency finding**: this codebase's presets handlers (`internal/api/presets_handlers.go`) are unusually disciplined about **never returning 403** — cross-client and system-scope-write attempts all collapse into the identical `noSuchPreset` 404 (explicit `D-03` comment in the file). The new operator gate should follow the SAME discipline: a non-operator client hitting `/v1/system/presets/*` should receive the same uniform 404, not a 403 that would confirm "this endpoint exists and requires elevated privilege you don't have" — consistent with the Phase 1 Key Decision ("cross-client доступ → 404, никогда 403") extended one level further to operator-vs-non-operator.
-
-## Build Order (Q6)
-
-Five clusters of work, sequenced by real dependency, not just milestone-listing order:
-
-1. **Phase A — Chart Core** (foundational, must go first): Helm chart skeleton for all five existing binaries + postgres/redis/minio + migrate/createbucket Helm hooks + the four landmine closures (METRICS_ADDR override + NetworkPolicy, in-cluster e2e-as-Job, hook ordering, FQDN S3_ENDPOINT) + worker `/healthz` probes. Every other phase either deploys through this chart or benefits from its conventions (Secrets/ConfigMap shape, namespace, probe pattern).
-2. **Phase B — KEDA Autoscaling**: `ScaledObject`×3 (image/document/html) against `octoconv_queue_depth`, `keda.enabled` gate. **Depends on Phase A** (needs the Deployments to scale and a reachable, NetworkPolicy-scoped `/metrics`).
-3. **Phase C — Load Test / Autoscale Validation**: synthetic load (or a higher-volume e2e run) proving 0→N→0 with observable criteria (replica count over time, KEDA/HPA events, queue-depth graph). **Depends on Phase B.** This closes the milestone's actual stated Core Value ("воркеры автоскейлятся KEDA... доказано") — Phases A→B→C form the primary, sequential arc.
-4. **Phase D — MCP HTTP**: `cmd/mcp-http` + `Dockerfile.mcp-http` + chart template + NetworkPolicy. **No code/architecture dependency on B or C** — only a soft dependency on Phase A for a clean deployment target (Secret/ConfigMap conventions, probe pattern). Can run in parallel with B/C if capacity allows, or immediately after A.
-5. **Phase E — system-presets REST**: new handlers + operator-gate middleware + `OPERATOR_CLIENT_IDS` env var. **Fully independent of all k8s work** — pure `internal/api` change, no chart dependency at all (the only chart touch is eventually adding `OPERATOR_CLIENT_IDS` to the ConfigMap, trivial whenever it lands).
-
-**Recommended sequencing: A → D → E → B → C.** Rationale: A is the highest-risk, most novel, SEED-004-flagged work and must be first. D and E have zero dependency on the harder KEDA arc and are small/independent — sequencing them right after A gives two quick, low-risk wins and validates the chart's Secret/ConfigMap/probe conventions on smaller surfaces before the higher-stakes KEDA work. B→C then close the milestone's primary, hardest, most novel goal as a contiguous arc, minimizing context-switching mid-validation. **D and E have no ordering constraint relative to each other or to B/C** — a roadmap author may freely interleave or reorder them (e.g., run E first since it needs zero k8s context at all, or defer D/E to the very end as a closing cluster) without breaking any real dependency; the A→B→C spine is the only hard-ordered sequence.
-
-## New vs Modified Files Summary
-
-| File | Status | Purpose |
-|------|--------|---------|
-| `deploy/chart/octoconv/**` (full chart) | NEW | Helm chart — Deployments, Services, Jobs, ScaledObjects, NetworkPolicies |
-| `Dockerfile.e2e` | NEW | In-cluster e2e test-binary image (Pattern 2) |
-| `Dockerfile.mcp-http` | NEW | `cmd/mcp-http` container image (Q4) |
-| `cmd/mcp-http/main.go` | NEW | HTTP-transport MCP entrypoint (thin, mirrors `cmd/mcp-server`) |
-| `internal/api/system_presets_handlers.go` | NEW | System-scope preset REST handlers, reusing existing `PresetAdmin` |
-| `internal/api/routes.go` | MODIFIED | Mount `/v1/system/presets` group + operator-gate middleware |
-| `cmd/api/main.go` | MODIFIED | Parse `OPERATOR_CLIENT_IDS`, thread into `api.Config` |
-| `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` | MODIFIED | Add `/healthz` alongside `/metrics` (Q3) |
-| `internal/mcpserver/**` | UNCHANGED | Already transport-agnostic |
-| `internal/e2e/e2e_test.go` | UNCHANGED | `E2E_WEBHOOK_HOST`/`E2E_S3_DIAL_ADDR` already env-driven |
-| `.github/workflows/ci.yml` | UNCHANGED (this milestone) | CI stays entirely compose-based; see note below |
-
-**CI note (explicitly checked):** `.github/workflows/ci.yml`'s 4 tiers (`gate` → `race` → `docker-build` → `e2e`) are 100% docker-compose-based — no `kind`/`k3d`/`helm lint`/`helm template` step exists anywhere, and nothing in this milestone's scope (per `PROJECT.md`'s Active requirements) calls for adding one. **A k8s validation CI tier is out of scope for v1.6** and should be treated as a candidate seed for a future milestone, not silently folded into this one.
+| Concern | Image/Document/HTML (existing) | Audio (new) |
+|---------|-------------------------------|--------------|
+| CPU cost shape | Bounded, sub-second to low-tens-of-seconds per job | Proportional to audio DURATION × model size; can be the most CPU-hungry class per-job in the whole system (whisper.cpp on CPU is commonly single-digit-multiples of real-time for base/small models — MEDIUM confidence) |
+| `AUDIO_ENGINE_TIMEOUT` sizing | N/A | Must be sized generously against the LONGEST audio file the service is expected to accept, not against a "typical" file — unlike document (worst case is a complex-but-bounded office file) audio's worst case scales with a client-controlled duration. Consider whether an upload-time duration/size ceiling belongs alongside `MAX_UPLOAD_BYTES` (the existing size cap already bounds duration indirectly for a given bitrate, but is not an explicit duration guard the way `MAX_IMAGE_PIXELS`/`MAX_DOCUMENT_UNCOMPRESSED_BYTES` are explicit resource-exhaustion guards for their classes) |
+| KEDA scaling | `threshold`/`maxReplicaCount` tuned per class already (image 5/4, document 1/2, html 2/2) | Audio's per-job cost is higher and more variable than any existing class — start `keda.audio.threshold` LOW (e.g. `1`, mirroring document's conservative "1 pending job = scale up" posture, not image's "5") given each job can legitimately occupy a worker for minutes |
+| Retry-state stranding (27-REVIEW WR-06) | Documented invariant: `cooldownPeriod` must exceed the class's max retry backoff or scale-to-zero can strand a retry-state task | Applies identically to audio — whatever `audioRetrySchedule` is chosen (recommend mirroring `documentRetrySchedule`'s shape: short, no-jitter, e.g. 5s/15s/30s — the timeout-is-terminal policy means retries only ever fire for genuinely transient blips, not long-running work) must stay below `keda.audio.cooldownPeriod` |
+| Model/image size | N/A | Baking a whisper.cpp ggml model into `Dockerfile.audio-worker` adds real, fixed image weight (tiny≈75MB, base/small are the realistic production choices, large-v3≈3.1GB — MEDIUM confidence, WebSearch-verified) — pin ONE model explicitly (mirrors the project's existing "never `:latest`, pin everything" discipline: MinIO release tags, veraPDF `v1.30.2`, asynqmon `0.7.2`) rather than downloading at container startup, which would violate the "workers remain offline" constraint restated in PROJECT.md's v1.7 Key context |
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Binding `0.0.0.0:9090` without a NetworkPolicy
+### Anti-Pattern 1: Reusing an existing engine's timeout-classification policy without re-deriving it
 
-**What people do:** Fix the METRICS_ADDR landmine by only changing the env var, treating it as "done" because the pod now starts and Prometheus can scrape it.
-**Why it's wrong:** This silently removes the security boundary `docker-compose.yml` relied on (`127.0.0.1`-only binding, explicitly documented there as "no auth layer needed since it's unreachable outside the host") — in k8s, `0.0.0.0` on any port is reachable from every pod in the cluster by default, with zero implicit isolation.
-**Do this instead:** Ship the `METRICS_ADDR` change and a `NetworkPolicy` restricting `:9090` ingress in the SAME phase/plan — never as a follow-up.
+**What people might do:** Copy `isTerminal`'s image-path "timeout is always transient, keep retrying" behavior for audio because it's the "default"/first-written classifier in the file.
+**Why it's wrong:** whisper.cpp's cost is a deterministic function of input duration/model — a timing-out job will time out again on retry. Retrying it anyway burns `AUDIO_MAX_RETRY × AUDIO_ENGINE_TIMEOUT` of worker capacity (potentially the most expensive class in the system) on guaranteed-repeat failures, exactly the DOC-08 defect class that document/html were deliberately written to avoid.
+**Do this instead:** `isAudioTerminal(err) = timeoutIsTerminal(err)`, mirroring `isDocumentTerminal`/`isHTMLTerminal` (see Pattern 2).
 
-### Anti-Pattern 2: KEDA-scaling the webhook-worker Deployment
+### Anti-Pattern 2: Trusting whisper-cli/ffmpeg exit code 0 as proof of a valid output file
 
-**What people do:** Apply the same "ScaledObject per queue" pattern uniformly to all five queue-backed binaries, including `webhook-worker`.
-**Why it's wrong:** `webhook-worker`'s ×2 replication exists specifically for delivery redundancy and Postgres-advisory-lock sweeper failover (a documented Key Decision), not throughput elasticity. Scaling it to 0 or 1 under low webhook-queue depth would silently break the "no single point of failure" guarantee the whole reconciler/webhook architecture depends on.
-**Do this instead:** KEDA only for `worker`/`document-worker`/`chromium-worker` (genuine engine-class elastic scaling); `webhook-worker` stays a fixed-replica (2) Deployment, explicitly excluded from `keda.enabled`'s scope.
+**What people might do:** Skip output validation because "the process exited 0."
+**Why it's wrong:** Every existing engine in this codebase has been live-tested to exit 0 while producing empty/no/wrong output under some failure mode (LibreOffice's documented "exit 0, no output file"; chromium-headless-shell's one-shot handler silently producing nothing under specific flag combinations). There is no reason to assume whisper.cpp/ffmpeg are exempt, and the codebase's own `terminalLibreOfficeSignatures`/`terminalChromiumSignatures` comments explicitly warn against this assumption.
+**Do this instead:** `validateAudioOutput` should `os.Stat` the produced file, reject zero-size, and — for `json`/`srt`/`vtt` — do a cheap structural sanity check (e.g. `srt`/`vtt` start with an expected header/cue pattern, `json` is valid JSON) mirroring `validatePDF`'s magic-byte discipline. Couple any new terminal-signature substrings into `terminalWhisperSignatures`/`terminalFFmpegSignatures` in the SAME commit that introduces the validator, exactly as `libreoffice.go`'s validator and `worker.go`'s signature slice are documented to ship atomically (see the D-04/T-13-02 comment pattern already in the codebase).
 
-### Anti-Pattern 3: Short MinIO Service name in `S3_ENDPOINT`
+### Anti-Pattern 3: Shallow mp3 magic-byte matching that ignores the ID3v2 prefix problem
 
-**What people do:** Set `S3_ENDPOINT=octoconv-minio:9000` (mirroring compose's `minio:9000`), reasoning "it's just the compose hostname → k8s Service name translation."
-**Why it's wrong:** A short Service name only resolves for consumers inside the same namespace with kube-dns's search-path configured (in-cluster pods) — it does NOT resolve from the OrbStack host, re-creating the exact "compose-DNS-in-presigned-URL" landmine SEED-004 names, just with a different literal hostname.
-**Do this instead:** Use the fully-qualified `<service>.<namespace>.svc.cluster.local` form, verified resolvable from both in-cluster pods and the OrbStack host (Pattern 4).
+**What people might do:** Add mp3 to `sniff.go`'s `signatures` table with a single naive check like the existing `matchJPEG`/`matchWebP` shallow-prefix pattern (e.g. only checking for a raw `0xFF 0xE0`-masked frame-sync at byte 0).
+**Why it's wrong:** A large fraction of real-world mp3 files begin with an `"ID3"` (0x49 0x44 0x33) tag of ARBITRARY, self-declared length (a syncsafe-encoded size field) BEFORE the actual MPEG frame sync bytes — this is exactly the class of "prefix lies about structure" problem `docsniff.go`/`olecfb.go`/`dimensions.go` already solve carefully for other formats. A frame-sync-only check silently rejects every ID3-tagged mp3 as unrecognized content (422 for a huge share of real client uploads), while a naive `"ID3"`-prefix-only check risks being too loose (though in practice `"ID3"` as a 3-byte literal is a low-collision signature, unlike a single-byte or 2-byte magic).
+**Do this instead:** Match EITHER (a) raw frame sync `b[0]==0xFF && (b[1]&0xE0)==0xE0` at offset 0 (untagged mp3) OR (b) the 3-byte `"ID3"` literal at offset 0 (tagged mp3, accepted at the shallow-prefix level — consistent with the codebase's existing shallow-signature precedent for webp/tiff/jpeg, which also don't fully validate structure past the magic). `sniffLen=12` already covers both cases; no buffer-size change is needed for the signature check itself (unlike the separate audio-duration-bomb question under Scaling Considerations, which is a distinct, larger-buffer concern if pursued).
+
+### Anti-Pattern 4: Reintroducing the WR-01 empty-PromQL bug in the new `scaledobject-audio.yaml`
+
+**What people might do:** Copy `scaledobject-document.yaml` verbatim (including its as-shipped `ignoreNullValues: "true"`) before the WR-01 hardening-tail fix lands, then have to patch a 4th file when WR-01 is fixed.
+**Why it's wrong:** Doing the audio ScaledObject work before the hardening-tail fix means writing the known-bad pattern once more, guaranteed to need a follow-up edit.
+**Do this instead:** Sequence WR-01's chart fix BEFORE `scaledobject-audio.yaml` is authored (see Suggested Build Order below), so audio's ScaledObject is written correctly the first time and the other three are fixed in the same commit/phase.
+
+## Integration Points
+
+### External Tools (new)
+
+| Tool | Integration Pattern | Notes |
+|------|---------------------|-------|
+| `whisper.cpp` (`whisper-cli` binary) | Built from source in the Dockerfile's builder stage (no Debian apt package exists — confirmed via search; official images build from source too) via `git clone` pinned to a tag/commit + `cmake`/`make`, ggml model downloaded and BAKED into the image at build time (never at container runtime — matches the "offline worker" constraint), invoked via the existing hardened `runCommand` (`internal/convert/exec.go`) — no new exec-wrapper mechanism needed | Pin the model explicitly (recommend `base` or `small`, English or multilingual per requirements) mirroring the project's "never `:latest`" discipline (veraPDF `v1.30.2`, MinIO release tags, asynqmon `0.7.2`). MEDIUM confidence — WebSearch-verified, no in-repo precedent. |
+| `ffmpeg` | Installed via `apt-get install ffmpeg` in the runtime stage (available in `debian:bookworm-slim`'s repos, unlike whisper.cpp) — same `runCommand` invocation mechanism, called as the first of two sequential steps inside `AudioConverter.Convert()` | Confirms the project's existing "one apt-installed CLI tool per engine class" pattern (libvips-tools / libreoffice-*-nogui / chromium-headless-shell) extends cleanly to "two CLI tools, one apt + one built-from-source" |
+
+### Internal Boundaries (all pre-existing interfaces — audio is a pure addition of new implementations/cases, no interface redesign)
+
+| Boundary | Communication | Notes |
+|----------|---------------|-------|
+| `internal/api` ↔ `internal/queue` | `Enqueuer` interface (`internal/api/api.go`) | Add `EnqueueAudioTranscribe(ctx, jobID) error` to the interface AND `handleCreateJob`'s routing switch — both must change together or the switch's `default:` fail-closed branch silently rejects every audio job with a 500 |
+| `internal/reconciler` ↔ `internal/queue` | `enqueuer` interface (`internal/reconciler/reconciler.go`) | Same shape, independent interface (interface segregation is deliberate here — do not merge with `api.Enqueuer`) |
+| `internal/worker` ↔ `internal/convert` | `registry.Lookup(source, target)` — engine-agnostic, ALREADY handles any registered `Converter` | No change needed — `process()` in `worker.go` is already engine-agnostic; only the per-engine `Handle*` wrapper and terminal-classifier are new |
+| `cmd/api` ↔ `internal/metrics` | `NewQueueDepthCollector(inspector, queues...)` variadic call site | Purely additive — add `queue.QueueAudio` to the existing call in `cmd/api/main.go`; the collector itself needs zero changes (already generic) |
+| Helm chart ↔ KEDA | `scaledobject-audio.yaml` → in-chart Prometheus → `octoconv_queue_depth{queue="audio",...}` | Gate on `and .Values.keda.enabled .Values.prometheus.enabled` exactly like the other three (co-dependency guard documented in `scaledobject-image.yaml`'s header comment) |
+
+## Hardening-Tail Mapping (v1.6 residual items → concrete files)
+
+The milestone bundles four v1.6 hardening-tail items with the new audio class. Mapped to files:
+
+| Item | File(s) | What changes | Independent of audio work? |
+|------|---------|---------------|------------------------------|
+| **WR-01** (empty-PromQL semantics) | `deploy/chart/octoconv/templates/scaledobject-image.yaml`, `scaledobject-document.yaml`, `scaledobject-html.yaml` (all three, `ignoreNullValues` line) | Flip `ignoreNullValues: "true"` → `"false"` (sustained api-outage now correctly trips KEDA's `fallback`), or add an `absent(octoconv_queue_depth)` alert as a documented compensating control instead. 27-REVIEW.md gives both options explicitly. | YES, fully independent — pure chart-template edit, zero Go code, zero audio dependency. **Should land BEFORE `scaledobject-audio.yaml` is authored** (Anti-Pattern 4) so the new file is correct from its first commit. |
+| **OPER-01** (compose `OPERATOR_CLIENT_IDS` passthrough + live gate) | `docker-compose.yml` (`api.environment` block, currently missing the key entirely — confirmed by direct read) | Add `OPERATOR_CLIENT_IDS: ${OPERATOR_CLIENT_IDS:-}` to the `api` service's `environment:` block (the exact fix 26-REVIEW.md's WR-03 specifies), then run the deferred live gate (set an operator UUID via compose env override, hit `/v1/system/presets`, confirm 200 for the operator / 404 for everyone else) | YES, fully independent — one-line compose edit + a live verification pass, zero audio dependency. Cheap, should land early (low risk, unblocks closing out v1.6's own audit). |
+| **Gate-tooling warnings** (28-REVIEW WR-01..WR-06) | `deploy/chart/octoconv/templates/scaledobject-document.yaml:38` (Go-template `0`-is-falsy truthiness bug on `scaleDownStabilizationSeconds`), `scripts/keda-load-proof.sh` (stale-Terminating-pod selection, S3-error-body-as-success download check, orphaned `kubectl -w` watcher), `scripts/fixtures/render_evidence.py` (unpinned Python≥3.11 requirement), `scripts/fixtures/gen_heavy_docx.py` (CWD-relative sample-image path) | Six independent, mechanical fixes — none touch `internal/` Go packages; all are chart-template or shell/Python tooling robustness fixes surfaced by the Phase 28 code review | YES, fully independent — these are load-proof GATE SCRIPT correctness fixes, not product code. No audio dependency. Lowest priority/risk of the four hardening items (tooling only, not shipped product behavior) but cheap to batch together since they're all in `28-REVIEW.md`'s Warnings section already. |
+| **K8S-02** (direct-dial recheck) | No file change — this is a LIVE VERIFICATION task against a running OrbStack cluster (confirm a presigned MinIO URL resolves via a direct host→cluster FQDN dial, without the `kubectl port-forward` workaround Phase 24's live gate had to use because of a wedged OrbStack proxy layer) | Re-run the specific `curl` against `minio.octoconv.svc.cluster.local:9000` from the bare host once OrbStack's proxy is healthy; update `24-VERIFICATION.md`'s human-verification item #2 from open to resolved | YES, fully independent — pure operational re-check, zero code change of any kind. Can be done any time the OrbStack daemon is healthy; not gated on any other hardening item. |
+
+**Can these four form one coherent phase?** Yes, with a caveat: they are independent of EACH OTHER and independent of the audio work, but they are NOT independent of the ORDER within themselves relative to audio's chart additions (WR-01 must precede `scaledobject-audio.yaml`, per Anti-Pattern 4). They share no code paths, so batching them into a single "hardening tail" phase carries no coupling risk — but there's little value in NOT batching them either, since they're all small, low-risk, single-file-or-script edits already fully specified by existing review documents (no new research needed — this is closing out already-diagnosed findings, not discovering new ones). Recommend one phase, ordered internally as: WR-01 chart fix → OPER-01 compose fix + live gate → gate-tooling script fixes (batch) → K8S-02 live recheck (can run any time, including in parallel/opportunistically).
+
+## Suggested Build Order
+
+1. **Hardening tail (WR-01, OPER-01, gate-tooling, K8S-02)** — zero dependency on audio, all pre-diagnosed by existing review docs, cheap. Landing this FIRST means `scaledobject-audio.yaml` (step 9 below) is written correctly from its first commit instead of needing a follow-up patch (Anti-Pattern 4). K8S-02's live recheck can float independently/opportunistically since it blocks nothing.
+2. **`internal/convert` foundation** — `EngineAudio` const, `audiosniff.go` (mp3/wav/m4a/ogg signatures, including the mp3 ID3-vs-frame-sync dual path), `MIMEType` additions, `AudioConverter` skeleton (`Pairs()`/`Engine()` only, `Convert()` can initially be a thin wrapper while the exec pipeline is built next) — this is the layer every other touch point depends on (`EngineFor` lookups, `Registry.Classes()` for `/v1/formats`).
+3. **`AudioConverter.Convert()` — the ffmpeg+whisper-cli pipeline** — build and validate against a local whisper.cpp install BEFORE touching the queue/worker plumbing, since this is the one genuinely new piece of external-process integration (two sequential `runCommand` calls, a real model file, real output-format validation). Get this working as a standalone, testable unit first.
+4. **`internal/queue` — task/queue/retry/TTL** — `TypeAudioTranscribe`, `QueueAudio`, `NewAudioTranscribeTask`, `AudioRetryDelay`/`audioBackoffSum`/`AudioUniqueTTL`, `RetryDelayFunc` switch case, `Client.EnqueueAudioTranscribe`. Mechanical, mirrors `Document*`/`HTML*` blocks exactly — low risk once the pattern is followed.
+5. **`internal/worker` + `cmd/audio-worker`** — `HandleAudioTranscribe`, `isAudioTerminal` (Pattern 2 — get the timeout-is-terminal decision right here), terminal-signature slices, then the `cmd/audio-worker/main.go` binary itself (copy-adapt `cmd/document-worker/main.go`). This is where the pipeline built in step 3 gets wired into the real async job lifecycle.
+6. **`internal/api` + `internal/reconciler` routing** — add `EngineAudio` to both engine-routing switches (`handleCreateJob`, `reconciler.sweep()`) and both `Enqueuer`/`enqueuer` interfaces. Small, mechanical, but easy to forget one of the two switches (reconciler's fail-closed `default:` means a missed case degrades gracefully rather than crashing — but it IS a real gap until added).
+7. **`cmd/api/main.go` metrics registration** — add `queue.QueueAudio` to the `NewQueueDepthCollector` call. One line; do this alongside step 6 since both are "make the new engine class visible to the rest of the system" work.
+8. **`Dockerfile.audio-worker` + `docker-compose.yml` + CI bake matrix** — get the container building and runnable in compose before touching Kubernetes; this is also where the "bake the ggml model in at build time" decision gets made concrete and where local end-to-end testing becomes possible for the first time.
+9. **Helm chart (`values.yaml`, `configmap.yaml`, `deployment-audio-worker.yaml`, `scaledobject-audio.yaml`)** — last, because it depends on the compose service/env contract from step 8 being stable, and because `scaledobject-audio.yaml` should be written with the already-landed WR-01 fix in hand (step 1).
+10. **Live E2E verification** — a full audio job (upload mp3 → transcript in each of txt/srt/vtt/json → webhook/download) against the real compose stack, then (if in scope this milestone) against the Helm/KEDA chart mirroring Phase 27/28's live-gate discipline.
+
+This order front-loads the one genuinely novel piece of engineering (the ffmpeg+whisper.cpp pipeline, step 3) before investing in the surrounding plumbing, and defers all Kubernetes/KEDA work (step 9-10's chart half) until the simpler compose path has already proven the pipeline works — matching how document (Phase 10-11) and html (Phase 15) were built before their K8s/KEDA integration arrived three phases later (v1.6), not simultaneously with the engine class itself.
 
 ## Sources
 
-- `cmd/api/main.go`, `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go` — direct read, confirms `METRICS_ADDR`/`os.Getenv` pattern is identical and code-change-free to override — HIGH confidence
-- `docker-compose.yml`, `docker-compose.e2e.yml` — direct read, confirms current port bindings, `extra_hosts` host-gateway usage, `createbucket`/`asynqmon` trust-model comments — HIGH confidence
-- `internal/e2e/e2e_test.go` (lines 1-140, 340-370, 1000-1021) — direct read, confirms `0.0.0.0:0` explicit listener bind and the already-env-driven `E2E_WEBHOOK_HOST`/`E2E_S3_DIAL_ADDR` knobs — HIGH confidence
-- `.github/workflows/ci.yml` — direct read, confirms 4-tier compose-only pipeline, no k8s step — HIGH confidence
-- `internal/mcpserver/mcpserver.go`, `config.go`, `client.go`, `tools.go`, `cmd/mcp-server/main.go` — direct read, confirms transport-agnostic `NewServer`, one-key-per-process `Client`, and the `local_path`/`OUTPUT_DIR` contract — HIGH confidence
-- `/Users/apaderin/go/pkg/mod/github.com/modelcontextprotocol/go-sdk@v1.6.1/mcp/streamable.go` — direct read of the installed module, confirms `NewStreamableHTTPHandler(getServer func(*http.Request) *mcp.Server, opts *StreamableHTTPOptions) *StreamableHTTPHandler` exists and implements `http.Handler` — HIGH confidence
-- `internal/api/presets_handlers.go`, `internal/api/api.go`, `internal/api/routes.go` — direct read, confirms `PresetAdmin` is already scope-agnostic and the existing no-leak-404 discipline — HIGH confidence
-- `internal/db/migrations/0001_init.sql`, `0002_client_api_keys.sql` — direct read, confirms `clients` table has no spare role/flag column — HIGH confidence
-- `internal/metrics/queue_collector.go` — direct read, confirms the `octoconv_queue_depth{queue,state}` Prometheus gauge KEDA's Prometheus scaler would query — HIGH confidence
-- `internal/storage/storage.go` (`Client.Ping`) — direct read, confirms a reusable ping primitive for worker `/healthz` — HIGH confidence
-- `.planning/PROJECT.md`, `.planning/seeds/SEED-004.md` — direct read, milestone goal framing and the four named landmines — HIGH confidence
-- WebSearch: "OrbStack Kubernetes service domain resolvable from macOS host LoadBalancer" (docs.orbstack.dev/kubernetes) — confirms `cluster.local` domains and `*.k8s.orb.local` LoadBalancer access resolve directly from the Mac host — MEDIUM-HIGH confidence (official docs summary, not independently tested against this repo's actual chart)
+- Direct reads of `internal/convert/{convert,converters,libvips,libreoffice,chromium,exec,sniff,docsniff,htmlsniff,dimensions}.go`, `internal/queue/{queue,client}.go`, `internal/worker/worker.go`, `internal/api/{api,handlers}.go`, `internal/reconciler/reconciler.go`, `internal/metrics/queue_collector.go`, `internal/storage/keys.go`, `internal/jobs/jobs.go`, `cmd/{api,worker,document-worker}/main.go` — HIGH confidence, ground truth.
+- `docker-compose.yml`, `.github/workflows/ci.yml`, `Dockerfile.{worker,document-worker}`, `deploy/chart/octoconv/{values.yaml,templates/*}` — HIGH confidence, ground truth.
+- `.planning/milestones/v1.6-phases/{26-operator-presets-rest/26-REVIEW.md, 27-keda-autoscaling/27-REVIEW.md, 28-autoscale-load-proof/28-REVIEW.md, 24-helm-chart-core/24-VERIFICATION.md}` — HIGH confidence, ground truth for the hardening-tail mapping (WR-01, OPER-01/WR-03, gate-tooling WR-01..06, K8S-02's SC3 direct-dial item).
+- whisper.cpp CLI output-format flags (`--output-txt/srt/vtt/json`), input requirement (16kHz mono 16-bit PCM WAV), and lack of an apt package (build-from-source) — MEDIUM confidence, WebSearch-verified against `ggml-org/whisper.cpp` GitHub docs and multiple independent how-to sources (til.simonwillison.net, DeepWiki CLI reference); no in-repo precedent exists to cross-check against, unlike every other claim in this document.
+- ggml model size figures (tiny≈75MB, large-v3≈3.1GB) — MEDIUM confidence, WebSearch-verified, used only to inform the "pin one model, bake it in" recommendation, not as a hard requirement.
 
 ---
-*Architecture research for: OctoConv v1.6 (Kubernetes & KEDA)*
-*Researched: 2026-07-14*
+*Architecture research for: octoconv v1.7 (audio engine class + v1.6 hardening tail)*
+*Researched: 2026-07-17*

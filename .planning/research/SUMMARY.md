@@ -1,214 +1,183 @@
 # Project Research Summary
 
-**Project:** OctoConv — v1.6 milestone (Kubernetes & KEDA)
-**Domain:** Porting an existing production-hardened Go/asynq/Postgres/Redis/MinIO async conversion service from Docker Compose to a local Kubernetes (OrbStack) deployment, adding KEDA per-engine-class autoscaling, an in-cluster MCP streamable-HTTP endpoint, and an operator-gated system-presets REST API.
-**Researched:** 2026-07-14
-**Confidence:** HIGH for code-grounded findings (queue-depth exposition, sweeper singleton, MCP key model, METRICS_ADDR override, `clients` schema); MEDIUM for general KEDA/Helm/OrbStack-k8s mechanics (verified against current docs, not against this project's own cluster, since no chart exists yet).
+**Project:** OctoConv
+**Domain:** Async internal file-conversion microservice — milestone v1.7 adds a 4th engine class (offline whisper.cpp audio transcription) plus the v1.6 hardening tail
+**Researched:** 2026-07-17
+**Confidence:** MEDIUM-HIGH (in-repo architecture/patterns are HIGH confidence, direct code reads; whisper.cpp/ffmpeg external facts are HIGH for versions/CLI flags/build flags — live-verified against upstream sources — but MEDIUM for CPU realtime-factor sizing, JSON schema field names, and hallucination/thread-limit behavior, which are WebSearch-triangulated with no in-repo precedent to cross-check against)
 
 ## Executive Summary
 
-This milestone is not "learn Kubernetes" research — it is integration-design research against a codebase that is already production-hardened for a single-node Compose deployment. Every one of the four SEED-004-named landmines (localhost-bound `/metrics`, the `host.docker.internal` E2E trick, one-shot migration/bucket ordering, and compose-DNS baked into presigned S3 URLs) has a code-verified, mostly zero-Go-code-change fix, and the two new surfaces this milestone adds (MCP HTTP, system-presets REST) build on existing transport-agnostic (`internal/mcpserver`) and scope-agnostic (`PresetAdmin`) abstractions that need no domain-layer changes at all. The recommended approach is: a single flat Helm chart (no subcharts, no Bitnami/MinIO-Operator dependencies — hand-roll Postgres/Redis/MinIO as plain Deployment+PVC+Service, matching the compose file's own non-HA shape); KEDA `ScaledObject`s driven by the Prometheus scaler against the already-existing `octoconv_queue_depth` metric (never asynq's internal Redis list keys); and additive, thin new entrypoints (`cmd/mcp-http`, new REST handlers) rather than any refactor of shared domain code.
+OctoConv v1.7 is not a new product shape — it is the 4th application of an already-proven "engine-class" pattern (image -> document -> html -> **audio**), plus closing four small, pre-diagnosed v1.6 hardening items (WR-01 PromQL semantics, OPER-01 operator-passthrough live gate, gate-tooling warnings, K8S-02 direct-dial recheck). Every research file agrees the audio class should be built by copy-adapting the **document/html precedent**, not the image one: whisper.cpp and ffmpeg are external binaries that can legitimately hang or run long on valid input, run inside their own dedicated container (`Dockerfile.audio-worker`, mirroring `Dockerfile.document-worker`'s shape), and touch the same ~15 files every prior engine class touched (convert registry, queue/client, worker handler, API/reconciler routing switches, Helm chart Deployment + ScaledObject). The stack is locked at `whisper.cpp v1.9.1` (built from source, `-DGGML_NATIVE=OFF` is load-bearing to avoid SIGILL on non-build-host CPUs) plus system `ffmpeg` as a mandatory, separate preprocessing `runCommand` step (whisper.cpp's own README states it only accepts 16-bit WAV; MP3/M4A/OGG/Opus must be normalized first). Model choice (`base` vs `small`) is flagged as an **open product decision**, not resolved by research — `base` is recommended as the shipped default with `small` as a later opt-in, but this should be confirmed against real transcript-quality feedback, not assumed.
 
-The single most important risk uncovered by this research is an architectural bug hiding in plain sight: `octoconv_queue_depth` is registered per-worker, inside each engine-worker's own `main()` — so once KEDA scales a worker Deployment to zero replicas, there is no pod left to expose the very metric KEDA needs to decide whether to scale back up. This must be fixed (relocate the collector registration to the always-on `api` process) as an explicit, isolated step before any `ScaledObject` manifest is written, not discovered during the load-proof. A second, closely-related risk is that `webhook-worker` is not a symmetric queue consumer like the other three engine classes — it is the sole host of the Postgres-advisory-lock singleton reconciler sweeper, so KEDA scaling it to zero would silently stop stale-job recovery for the entire fleet, not just webhooks. It must be excluded from KEDA entirely and kept as a fixed `replicas: 2` Deployment. A third, non-technical risk is operational: this project's own retrospective documents three confirmed OrbStack daemon wedges under heavy parallel build/compose load, and this milestone (full k8s control plane + iterative chart rebuilds + rapid pod churn during the load-proof) is the heaviest session this VM has ever been asked to run — sequential image pre-building and never running the compose and k8s stacks hot simultaneously are non-negotiable discipline, not nice-to-haves.
+The single most important design decision for the whole milestone is getting the `target_format=json` transcript contract right on day one: it is the SEED-001 hinge point (this milestone ships transcription only; the next milestone's mistake-analysis/spaced-repetition consumer reads this contract without any `Converter`/`Registry` change). Segment- and ideally word-level timestamps must be included now, even though nothing consumes the extra fields yet, because retrofitting them later would be a breaking contract change exactly when the next milestone starts. The research files surface one real, unresolved tension that the roadmap must decide explicitly: FEATURES.md and ARCHITECTURE.md both recommend a single, document-style "timeout = terminal" classification for `AUDIO_ENGINE_TIMEOUT`, while PITFALLS.md argues this naively conflates "input is corrupt" (ffmpeg hang — genuinely terminal) with "input is legitimately long" (a 45-minute lesson recording exceeding a tight timeout — should be transient/retryable with fresh CPU allocation). This is called out below as a **Key Decision** the roadmap phase must resolve, not a research gap.
 
-Two explicit conflicts between research files were resolved (see Key Decisions below): the system-presets operator gate uses an `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak (not a new `is_operator` column + 403), and the MCP HTTP endpoint uses per-request caller-key pass-through auth (not a single pod-held key). One integration gap is surfaced but deliberately left unresolved for roadmap-level decision: MCP tool responses include a `local_path` field that is meaningless once the MCP server runs as a remote in-cluster pod rather than a local stdio process sharing the caller's filesystem.
+The most significant net-new risks, none seen in any prior engine class, are: (1) MP3's ID3v2 tag structurally breaks the project's fixed-offset magic-bytes sniffing pattern and needs bespoke variable-offset detection; (2) whisper.cpp's threading defaults to host core count, not the container's cgroup CPU limit, risking throttling/OOM under the project's existing `cpus: "2.0"` worker ceiling; (3) baking a 150MB-500MB ggml model into the worker image risks silently defeating the sub-15-second scale-from-zero property that Phase 27/28 spent two phases proving for the other three engine classes — this needs its own timestamped load-proof measurement, not an assumption that it "just works" like the others; (4) ASR output is the project's first genuinely non-deterministic engine output, breaking the "assert exact string" E2E testing habit used everywhere else, and hallucination-on-silence is a documented whisper-family failure mode that exits 0 with a structurally valid but semantically garbage transcript — no existing terminal-signature classifier can catch it, so it must be logged as an explicit accepted residual risk, not silently shipped.
 
 ## Key Findings
 
 ### Recommended Stack
 
-KEDA v2.20.1 (Helm chart `keda`), Helm v4 (GA, with v3.21.3 as a fully-supported fallback), and OrbStack's built-in single-node Kubernetes are the three new infra dependencies for this milestone; the core application stack (Go 1.26, chi, asynq/Redis, PostgreSQL 18, MinIO) is unchanged and out of scope. Postgres/Redis/MinIO should be hand-rolled minimal Deployment+PVC+Service templates in the chart, not Bitnami charts (paywalled/frozen since Broadcom's 2025 catalog change — do not adopt) and not the MinIO Operator+Tenant CRDs (correct for production multi-tenant object storage, disproportionate for one local bucket). KEDA's Prometheus scaler is the only scaler type to use — the tempting alternative (KEDA's Redis Lists scaler against asynq's internal `pending` list keys) works technically but couples to an undocumented internal implementation detail SEED-004 explicitly says to avoid. A minimal hand-rolled `prom/prometheus` Deployment + static scrape ConfigMap is sufficient; `kube-prometheus-stack` is disproportionate machinery for "KEDA needs one PromQL-answering URL."
+The stack is narrow and mostly LOCKED by the milestone framing: `ggml-org/whisper.cpp` v1.9.1 (built from source in a Dockerfile builder stage — no Debian apt package exists), invoked via its `whisper-cli` binary through the project's existing hardened `runCommand` exec wrapper with zero new Go dependencies (no CGo bindings — the project is `CGO_ENABLED=0` everywhere). `ffmpeg` (Debian bookworm's apt-pinned `7:5.1.9-0+deb12u1`) is a hard, confirmed prerequisite — whisper.cpp's own README states it "currently runs only with 16-bit WAV files." The ggml model file (`ggml-base.bin`/`ggml-small.bin`, NOT the GGUF format used by llama.cpp) must be baked into the image at build time, pinned by SHA-256, never fetched at container runtime — this both matches the offline-worker constraint and avoids a KEDA scale-from-zero cold-start network dependency.
 
 **Core technologies:**
-- KEDA v2.20.1 — per-engine-class queue-depth autoscaling — current stable, HIGH confidence (live GitHub Releases + Helm repo index)
-- Helm v4 (GA) — chart packaging — v3 approaching EOL per its own release notes; greenfield chart has no reason to start on a deprecating major version
-- OrbStack Kubernetes — local cluster target (already decided) — shares the same image store as OrbStack's Docker daemon, so locally-built images are pod-visible with no registry; `:latest` tags still trigger re-pull attempts, so repin/use `imagePullPolicy`
-- Bare `prom/prometheus` Deployment + static scrape ConfigMap — minimal Prometheus footprint for the KEDA trigger — avoids 15+ CRDs of `kube-prometheus-stack` for a need that is exactly one queryable endpoint
+- `whisper.cpp v1.9.1` (`whisper-cli` binary) — CPU-only offline speech-to-text — the only implementation fitting the "one hardened CLI shell-out per engine class" pattern; build with `-DGGML_NATIVE=OFF` explicitly (default `ON` compiles `-march=native` for the build host and SIGILLs on any runtime host lacking those exact CPU extensions — a well-documented, recurring whisper.cpp/llama.cpp Docker footgun)
+- `ggml-base.bin` / `ggml-small.bin` — acoustic+language model weights, pinned by SHA-256 from HuggingFace (the canonical source; the old CDN is dead) — **model choice (base vs small) is an open product decision**, not resolved here; `base` (142 MiB, ~388 MB RAM, RTF ~0.2-0.5 on modern arm64) is the recommended default, `small` (466 MiB, ~2-3x slower) as a later opt-in if transcript-quality complaints emerge
+- `ffmpeg` (bookworm apt, pinned) — mandatory pre-conversion of arbitrary input audio (mp3/m4a/ogg/opus) to 16kHz mono 16-bit PCM WAV; kept as its own separate `runCommand` step rather than whisper.cpp's `WHISPER_COMMON_FFMPEG` compiled-in flag, preserving the "one external tool per hardened boundary" discipline
 
 ### Expected Features
 
-Five open questions this milestone must answer are directly resolved by FEATURES.md's recommended defaults: Helm chart UX (per-service `values.yaml`, migrate/createbucket as hook Jobs, split liveness/readiness probe thresholds), KEDA UX (webhook-worker hard-excluded, demo-tuned `pollingInterval`/`cooldownPeriod`, explicit 0→N→0 timeline capture), MCP HTTP transport (`Stateless: true`, shared tool code, per-client auth — see Key Decisions), and system-presets operator authorization (see Key Decisions).
+This milestone scopes strictly to transcription (SEED-001's "фундамент" — mistake-analysis is explicitly deferred to the next milestone). The central feature-design finding: whisper.cpp's own output-format flags (`-otxt`/`-osrt`/`-ovtt`/`-oj`) map directly onto OctoConv's existing `(source_format, target_format)` `Pair` mechanism — output-format selection needs **zero new API surface**, just more `Pairs()` in the audio `Converter`.
 
 **Must have (table stakes):**
-- `helm install` brings up the entire stack (Postgres, Redis, MinIO, api, 4 worker classes, asynqmon) in one command
-- Readiness/liveness probes gate Service traffic and restart correctly per component (api `/healthz`; workers get a real dependency-aware `/healthz` addition, not just a TCP probe)
-- Migration and bucket-creation run exactly once, before anything depends on them (Helm `pre-install,pre-upgrade` hook Jobs)
-- Per-engine-class KEDA `ScaledObject`s that visibly scale 0→N→0 under a real load burst
-- MCP tool code identical between stdio and HTTP transports (already true — additive only)
-- System-preset writes require an explicit operator credential, not just any valid client key
+- mp3/wav/m4a/ogg/opus input, normalized via ffmpeg to 16kHz mono WAV (covers phone/Zoom/voice-note sources; whisper.cpp's native miniaudio decoder does NOT handle M4A/AAC or Opus)
+- Magic-bytes content validation for all five input containers (parity with every other engine's fail-closed posture) — **MP3 is the hard case**, flagged for explicit resolution (see Key Decisions)
+- `target_format` in {`txt`, `srt`, `vtt`, `json`} as ordinary `Converter.Pairs()`
+- `json` target with segment-level (ideally word-level) start/end/text — **the SEED-001 hinge point**, must not be cut for scope even though nothing consumes it yet
+- `AudioOpts{Language, Translate}` via the existing validated-opts mechanism, default `Language="auto"` (explicitly overriding whisper.cpp's own CLI default of `en`)
+- Upfront duration guard via `ffprobe` before the expensive step (resource-exhaustion parity with the image engine's pixel-count guard)
+- Dedicated `audio` asynq queue, `cmd/audio-worker`, KEDA ScaledObject, reconciler routing entry — mirrors the document-engine-class precedent exactly
 
-**Should have (competitive/differentiator):**
-- A load-proven 0→N→0 autoscale demonstration with an explicit, timestamped causal chain (queue depth graph + pod count over time), not just "it scaled"
-- Operator-role authorization layered onto the existing single-credential-type API-key model without introducing a second auth system
+**Should have (competitive):**
+- Named presets for common transcription configs (trivial once `AudioOpts` exists)
+- Confidence/no-speech-probability fields in the `json` contract if the pinned whisper.cpp version exposes them cleanly (also the cheapest available hallucination-mitigation signal, see Key Decisions)
 
 **Defer (v2+):**
-- Ingress/TLS for any new HTTP surface — no external/cross-cluster consumer exists yet
-- CD pipeline wiring CI's image bake into automatic `helm upgrade` — no remote cluster target yet
-- Multi-environment `values-*.yaml` sprawl — only one target (OrbStack local) exists
-- `helm test` hooks — the in-cluster E2E adaptation already covers this more thoroughly
-- KEDA/HPA on the API or MCP-HTTP Deployments — no queue-depth-style signal to scale on for request/response tiers
+- Real speaker diarization — whisper.cpp's own options are English-only-experimental (`tinydiarize`) or require pre-split stereo channels; incompatible with single-track bilingual tutor/student recordings and with the "no heavy new runtime per engine" pattern
+- Real-time/streaming transcription — foreign to the post-hoc upload transport SEED-001 actually uses
+- Arbitrary target-language translation — whisper.cpp's `--translate` is hardcoded to English-only
+- Finer-grained streaming progress (`--print-progress`) — needs a new streaming-exec primitive; the existing `runCommand` buffers until process exit
+- Mistake detection / spaced-repetition deck generation — explicitly the next milestone's job, not this one's
 
 ### Architecture Approach
 
-A single flat Helm chart (`deploy/chart/octoconv/`) with templates organized into per-service files (not subcharts), a shared `configmap.yaml`/`secret.yaml`, `keda.enabled` and `mcpHttp.enabled` feature gates, and `NetworkPolicy` templates as first-class chart artifacts (not follow-up hardening). Every major new component is additive: a new `cmd/mcp-http/main.go` (near-identical wiring to `cmd/mcp-server/main.go`, swapping `mcp.StdioTransport` for `mcp.NewStreamableHTTPHandler`), new `internal/api/system_presets_handlers.go` reusing the already scope-agnostic `PresetAdmin` interface, and small additions of `/healthz` to the four worker binaries. `internal/mcpserver`, `internal/e2e/e2e_test.go`, and the domain/repo layers need zero changes.
+Audio is the pattern's 4th instantiation, not a new architecture: one `Converter` implementation registered into `convert.Default`, one dedicated asynq queue + worker binary + Dockerfile + compose service + Helm Deployment + ScaledObject, touching the same ~15 files every prior engine class touched (`internal/convert`, `internal/queue`, `internal/worker`, `internal/api`, `internal/reconciler`, `cmd/api/main.go`'s metrics collector, the Helm chart). It should be built by copy-adapting `document-worker`/`chromium-worker`, not `image`/`libvips` — both document and audio run an external binary that can legitimately hang on bad input and need a heavier, non-trivial-to-install runtime dependency baked into a dedicated Dockerfile.
 
 **Major components:**
-1. Helm chart (Deployments, Services, Jobs, ScaledObjects, NetworkPolicies) — brings up the full stack and gates KEDA/MCP-HTTP behind values flags
-2. `cmd/mcp-http` (new binary) — HTTP-transport MCP entrypoint sharing `internal/mcpserver`'s existing transport-agnostic server
-3. `internal/api/system_presets_handlers.go` (new) — system-scope preset REST handlers, gated by a new operator middleware, reusing the existing `PresetAdmin` interface unchanged
-4. KEDA `ScaledObject`×3 (image/document/html), explicitly excluding `webhook-worker`, driven by a relocated `octoconv_queue_depth` Prometheus metric served from the always-on `api` process
+1. `internal/convert/whisper.go` (NEW) — `AudioConverter` implementing `Pairs()`/`Convert()`/`Engine()`; `Convert()` runs TWO sequential `runCommand` invocations (ffmpeg resample, then whisper-cli transcribe) inside one `AUDIO_ENGINE_TIMEOUT`-bounded context — the first engine class needing two external processes per job, not one
+2. `internal/convert/audiosniff.go` (NEW) — magic-byte detection for wav/ogg/m4a (straightforward, reuses HEIC's ISOBMFF box-walk pattern for m4a) plus a bespoke MP3 detector (see Key Decisions)
+3. `internal/queue` + `internal/worker` + `cmd/audio-worker` — `TypeAudioTranscribe`/`QueueAudio`, a from-scratch `AudioUniqueTTL` derivation (never reuse another class's), `HandleAudioTranscribe`, and the terminal/transient timeout classifier (the milestone's central open decision)
+4. `internal/api`/`internal/reconciler` engine-routing switches — both must gain an `EngineAudio` case or audio jobs 500 (API) or silently degrade to `unroutable_engine` (reconciler)
+5. `Dockerfile.audio-worker` + Helm chart (`deployment-audio-worker.yaml`, `scaledobject-audio.yaml`) — multi-stage build (Go stage + whisper.cpp-from-source stage + ffmpeg-via-apt runtime stage), model baked in at build time, `USER nobody`
 
 ### Critical Pitfalls
 
-1. Queue-depth chicken-and-egg at zero replicas — `octoconv_queue_depth` is registered inside each worker's own `main()`, so a worker scaled to 0 has no pod exposing the metric KEDA needs to scale it back up. Fix: relocate (or duplicate) `NewQueueDepthCollector` registration into the always-on `api` process before writing any `ScaledObject`.
-2. webhook-worker scale-to-zero kills the fleet-wide reconciler sweeper — it is the sole host of the Postgres-advisory-lock singleton sweeper; scaling it to zero silently stops stale-job recovery for image/document/html too, not just webhooks. Fix: no `ScaledObject` on webhook-worker at all — fixed `replicas: 2`.
-3. `terminationGracePeriodSeconds` default (30s) vs real engine timeouts (up to 300s for documents) — a scale-down mid-conversion gets SIGKILLed before the handler can finish or record a clean status. Fix: set per-engine-class grace periods derived from real worst-case timeouts + margin, never the default.
-4. `METRICS_ADDR=0.0.0.0` without a NetworkPolicy — the localhost-bind removed by this change was the security control (no auth on `/metrics`/asynqmon by design). Fix: ship the bind change and a NetworkPolicy scoping ingress to the Prometheus/kubelet source as one atomic unit, always.
-5. OrbStack daemon wedging under heavy parallel build/k8s load — three confirmed incidents in this project's own history, root cause unresolved. Fix: pre-build all 5 images sequentially with non-`latest` tags before iterating on the chart; never run compose and k8s stacks hot simultaneously.
-
-## Key Decisions (Conflicts Resolved)
-
-### Decision 1: Operator gate for system-presets REST — `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak
-
-**Conflict:** FEATURES.md recommended a new `is_operator boolean` column on `clients` + `manage-clients --operator` CLI flag + explicit 403 for non-operators. ARCHITECTURE.md recommended an `OPERATOR_CLIENT_IDS` env allowlist (parsed once at API startup, no migration) + the existing 404-no-leak convention.
-
-**Resolution:** `OPERATOR_CLIENT_IDS` env allowlist + 404.
-
-**Rationale:**
-- CLAUDE.md's own documented architectural constraint states plainly that this codebase has no config-file support; every runtime setting is read from `os.Getenv` — this is a fact about the existing system, not a stylistic preference, and there is direct precedent for exactly this shape of gate (`WEBHOOK_ALLOW_PRIVATE_IPS`, rate-limit env vars). A new migration is a heavier, less-precedented move for a milestone whose actual stated focus and risk budget is infrastructure (KEDA, OrbStack), not schema evolution.
-- This codebase has been unusually disciplined about the 404-never-403 distinction since Phase 1 (`D-03`, explicit comment in `internal/api/presets_handlers.go`: cross-client access → 404, never 403) and has held that line through v1.2-v1.5 without exception. Introducing a 403 here would be the first deliberate break of an established, working security-through-non-enumeration pattern for a marginal semantic gain (privilege-failure vs resource-not-found) that the project has evidently not needed to make elsewhere.
-- Zero migration = zero new schema-churn risk stacked onto an already infra-heavy milestone.
-- Trade-off accepted: changing the operator set requires an API redeploy/restart (acceptable — internal-only, small, slow-changing operator population), and there's no built-in per-operator audit trail beyond whatever logging is added alongside. Document the `is_operator` column as an explicit future Key Decision, to revisit if/when the operator set needs to change without a redeploy or per-operator audit becomes a real requirement.
-
-### Decision 2: MCP HTTP auth model — per-request caller-key pass-through
-
-**Conflict:** FEATURES.md and PITFALLS.md recommended per-request pass-through of the caller's own API key (the `mcp-http` pod stores no key itself — true zero-privilege). ARCHITECTURE.md recommended the pod holding a single startup-loaded key, mirroring the stdio model exactly (`Config.APIKey`/`internal/mcpserver/client.go`'s existing one-key-per-process construction, zero code changes).
-
-**Resolution:** per-request caller-key pass-through.
-
-**Rationale:**
-- The entire reason to add an HTTP transport (vs. the existing stdio, one-process-per-caller model) is to let multiple distinct internal automation clients reach the same in-cluster endpoint. A shared, pod-held single key collapses that multi-client reality into one identity: every caller reaching the Service impersonates the same `clients` row, which silently breaks per-client rate limiting, per-client preset scoping, and audit traceability (no way to answer "which `clients` row authorized this call") — a regression of the exact zero-privilege trust model v1.5 Phase 21 was built to establish ("zero-privilege HTTP client with key redaction").
-- PITFALLS.md flags this explicitly (Pitfall 5) as a design decision that must be made before wiring the transport, with a HIGH recovery cost if shipped the other way (retrofitting per-request identity into a client built once at process start is a real refactor, not a config flip) — asymmetric risk strongly favors deciding correctly now.
-- Implementation shape: the SDK's `getServer(r *http.Request) *mcp.Server` callback (or a wrapping `net/http` middleware, matching the existing chi-middleware style in `internal/api/routes.go`) extracts the caller's own `Authorization`/API-key header and threads it through to a per-request (or per-key-cached) `mcpserver.Client`, reusing the same hash-compare auth logic already used by the REST API — factored out into shared code, not duplicated. Combine with `NetworkPolicy` scoping which pods can reach the Service at all, and `Stateless: true` (no session-affinity requirement) so a plain `Service` can round-robin even with the added per-request auth wiring.
-- Trade-off accepted: materially more implementation work than the "pod holds one key" mirror-of-stdio option, and requires a small but real design task (shared auth-check extraction, per-key client caching) rather than being a zero-diff port. This is the correct trade given the stated multi-client reality of an in-cluster HTTP surface.
-
-### Surfaced but not resolved: `local_path` contract gap for remote MCP callers
-
-Every MCP tool response (`convert_file`, `download_result`) includes a `local_path` field describing where the converted file was downloaded on the server's own filesystem (`internal/mcpserver/tools.go`, `client.go`'s `Download`). This is correct and meaningful under stdio (server and calling MCP host share a filesystem) but becomes inert/misleading once `mcp-http` runs as a remote in-cluster pod — the path refers to an ephemeral pod filesystem no remote caller can ever reach. This is not a crash or a code-breaking bug, but it is a real user-facing contract mismatch that this research does not resolve — it is a roadmap-level decision for the MCP HTTP phase. Options to weigh during phase planning:
-
-1. Omit `local_path` entirely in HTTP mode — gate on a `Config.SkipLocalDownload`-style flag; simplest, smallest diff, but changes the tool's response shape depending on transport (callers must know which transport they're on).
-2. Return presigned-URL-only for the HTTP transport — treat `PresignedURL`/`DownloadURL` as the sole authoritative result field when running as `mcp-http`; effectively a specialization of option 1 with clearer intent (the tool never claims to have staged a local file when there is no shared filesystem).
-3. Add a download-proxy tool — a new MCP tool that streams the converted file's bytes back to the caller directly over the MCP transport (rather than relying on the caller reaching a presigned S3 URL independently). More capability (works even if the caller can't reach MinIO directly), but adds real complexity — binary streaming over MCP, size limits, and a second code path alongside the existing presigned-URL flow.
-
-No default is recommended here; this should be an explicit decision captured when the MCP HTTP phase is planned.
+1. **Timeout classification conflates "input is bad" with "input is legitimately long"** — a naive copy of the document class's blanket "timeout = terminal" fails ordinary long recordings on the first attempt with zero retry chance. Avoid by splitting the failure domain: ffmpeg-stage timeout -> terminal (malformed/adversarial input signal); whisper-stage timeout on already-duration-validated audio -> transient (mirror the image engine's classifier), bounded by `AUDIO_MAX_RETRY`. **This is the Key Decision below — FEATURES.md/ARCHITECTURE.md's "just mirror document" recommendation and PITFALLS.md's stage-aware argument must be reconciled explicitly in the roadmap, not left ambiguous.**
+2. **`AudioUniqueTTL` reuse/undersizing reopens the T-03-10 double-processing race** — every existing class derives its asynq unique-lock TTL fresh from `(maxRetry+1) x engineTimeout`; if audio reuses `ImageUniqueTTL` or a hardcoded default sized for a 120s timeout while real jobs run 30-60+ minutes, the Redis lock expires mid-transcription and the reconciler enqueues a second concurrent whisper.cpp process against the same job — the exact race the `attemptCtx` design exists to prevent, now reopened for the most expensive class to duplicate.
+3. **MP3's ID3v2 tag breaks the fixed-offset `sniffLen=12` signature-table pattern structurally** — a large fraction of real-world MP3s carry a variable-length, self-describing ID3v2 header (synchsafe-encoded size, can push the true MPEG frame sync hundreds of KB in via embedded album art) that no existing `matchPNG`/`matchJPEG`-style fixed-window matcher can handle. Needs its own bounded, variable-offset detector — never a naive table entry.
+4. **KEDA `cooldownPeriod` only governs 1->0 scale-down; the Kubernetes HPA's default 300s `scaleDown.stabilizationWindowSeconds` governs N->N-1** and is nowhere near enough protection for a 45-60 minute job — this is a lesson the project already learned and documented in Phase 28 for the document class; audio must reuse the `scaleDownStabilizationSeconds` chart knob explicitly, sized above worst-case job duration, not just tune `cooldownPeriod`.
+5. **Baking the ggml model into the worker image can silently defeat the scale-from-zero property Phase 27/28 spent two phases proving** (11s to 4 replicas) — a multi-hundred-MB image adds real cold-pull time that could dominate the sub-15s SLA on OrbStack specifically. This is not automatically disqualifying (bake-in is still the simplest, most "offline" option) but must be a deliberate, measured decision with its own load-proof-style evidence, not an unmeasured default.
+6. **Whisper-family hallucination on silence/music produces a structurally valid, exit-0 transcript that is semantically garbage** — no existing terminal-signature classifier (`terminalVipsSignatures` et al.) can catch a "successful" process that looped nonsense text. Not solvable this milestone; must be logged as an explicit accepted residual risk (mirroring the project's existing `file://` residual-risk pattern), with the cheapest mitigation (VAD/no-speech-probability surfaced in the `json` contract) applied if in scope.
 
 ## Implications for Roadmap
 
-Based on research, suggested phase structure (six phases, with a hard-ordered Chart Core → Queue-Depth Fix → KEDA → Load-Proof spine and two independent, freely-orderable phases for MCP HTTP and system-presets REST):
+### Key Decision 1: Stage-aware timeout classification (resolves FEATURES/ARCHITECTURE vs PITFALLS conflict)
 
-### Phase 1: Helm Chart Core & Landmine Closure
-**Rationale:** Foundational — every other phase either deploys through this chart or reuses its conventions (Secrets/ConfigMap shape, namespace, probe pattern, NetworkPolicy pattern). Highest-risk, most novel, SEED-004-flagged work; must go first.
-**Delivers:** `helm install` brings up the full stack (Postgres, Redis, MinIO, api, 4 worker classes, asynqmon) on OrbStack k8s; migrate/createbucket run exactly once via `pre-install,pre-upgrade` hook Jobs; in-cluster E2E passes as a Kubernetes Job.
-**Addresses:** Table-stakes Helm UX (probes, hook Jobs, Secret/ConfigMap shape) from FEATURES.md.
-**Avoids:** Pitfall 4 (METRICS_ADDR bind without NetworkPolicy — ship as one atomic unit), Pitfall 7 (OrbStack wedging), Pitfall 8 (E2E host-gateway/presigned-DNS landmines).
-**Critical sequencing facts baked into this phase:**
-- `METRICS_ADDR=0.0.0.0` change and its compensating `NetworkPolicy` must ship together, never as a follow-up — this is the direct in-cluster replacement for the security property `127.0.0.1`-binding used to provide.
-- `terminationGracePeriodSeconds` must be set per engine-class Deployment, derived from real worst-case engine timeouts + margin (image >=120s, document >=300s, html >=60s) — never left at Kubernetes' 30s default, or a legitimate long conversion gets SIGKILLed mid-flight.
-- `S3_ENDPOINT` must use the fully-qualified `<service>.<namespace>.svc.cluster.local` form, not a short Service name — resolvable from both in-cluster pods and the OrbStack host, closing the presigned-URL landmine for both consumer classes.
-- Sequential image pre-build discipline for OrbStack: build all 5 images once, sequentially, with fixed non-`latest` tags, before iterating on the chart — do this as an explicit pre-flight task, not incidentally. Never run the compose stack and the k8s stack hot simultaneously.
-**Research flags:** Needs research — OrbStack-specific k8s networking/FQDN host resolution behavior (verified via docs only, not against a live chart yet), exact current Helm hook-ordering guarantees on `helm upgrade` (not just `install`).
+FEATURES.md ("`AUDIO_ENGINE_TIMEOUT` classified terminal — document precedent, NOT image's transient-timeout precedent") and ARCHITECTURE.md ("`isAudioTerminal` should be `timeoutIsTerminal(err)`, mirroring `isDocumentTerminal`/`isHTMLTerminal` verbatim") both recommend a single blanket terminal classification, reasoning that whisper.cpp's cost is "a near-deterministic function of (audio duration x model size x CPU)." PITFALLS.md directly challenges this: unlike LibreOffice/chromium hangs (which are pathological — bad input, will time out identically on retry), a whisper.cpp timeout on a long-but-valid recording is not pathological, it's the expected cost of legitimate work; blanket-terminal means any file landing even slightly outside the configured timeout is permanently failed on the first attempt with zero chance of success even on a less-loaded worker.
 
-### Phase 2: MCP Streamable HTTP Endpoint
-**Rationale:** No code/architecture dependency on KEDA work — only a soft dependency on Phase 1 for deployment conventions (Secret/ConfigMap, NetworkPolicy pattern, probe shape). Small, independent, low-risk relative to the KEDA arc — sequencing it early validates the chart's conventions on a smaller surface before the higher-stakes KEDA phases.
-**Delivers:** `cmd/mcp-http` + `Dockerfile.mcp-http` + chart template, gated by `mcpHttp.enabled`; per-request caller-key pass-through auth (Decision 2); `Stateless: true`; pinned to a single replica (session-state limitation, Pitfall 6).
-**Uses:** `internal/mcpserver`'s existing transport-agnostic `NewServer`; go-sdk v1.6.1's `NewStreamableHTTPHandler` (already pinned, zero version bump).
-**Implements:** Shared auth-check logic factored out so both `internal/api` and `cmd/mcp-http` validate the same API-key header without duplicating hash-compare code.
-**Research flags:** Needs research — go-sdk v1.6.1's `Stateless: true` interaction with `convert_file`'s in-flight progress-notification streaming is explicitly flagged LOW confidence in FEATURES.md and must be live-verified before committing to it; also verify at execution time whether v1.6.1 ships server-side Streamable HTTP at all. Resolve the `local_path` contract gap (see above) as an explicit phase-planning decision.
+**Resolution for the roadmap:** adopt PITFALLS.md's stage-aware split, since it is strictly more correct without added complexity (both stages already produce distinguishable wrapped errors): ffmpeg-stage failure/timeout -> terminal (signal of malformed/adversarial input, same rationale as the image dimension-bomb guard); whisper-stage timeout on audio that has already passed the ffprobe duration/format check -> transient (mirror the image engine's classifier, no `context.DeadlineExceeded` terminal arm), bounded by `AUDIO_MAX_RETRY`. This must be decided and documented in the audio engine core phase's Key Decisions before `isAudioTerminal` is implemented — it is not boilerplate copy-paste from either sibling class.
 
-### Phase 3: system-presets REST (Operator Gate)
-**Rationale:** Fully independent of all Kubernetes work — a pure `internal/api` change with no chart dependency beyond eventually adding `OPERATOR_CLIENT_IDS` to the ConfigMap (trivial whenever it lands). Can run in parallel with or interleaved before/after Phase 2.
-**Delivers:** `/v1/system/presets` route group + `RequireOperator` middleware checking `client.ID` against an `OPERATOR_CLIENT_IDS` env allowlist (Decision 1); non-operator access returns the same uniform 404 the codebase already uses for cross-client access, never 403.
-**Addresses:** "System-preset writes require an explicit operator credential" from FEATURES.md table stakes.
-**Avoids:** Introducing a second parallel auth model or breaking the established no-leak-404 discipline.
-**Research flags:** Standard pattern — skip research-phase. `PresetAdmin` is already scope-agnostic (verified: `internal/api/presets_handlers.go`), so this is additive REST handlers + one middleware, not a domain change.
+### Key Decision 2: Model choice (base vs small) is an open product decision, not a research conclusion
 
-### Phase 4: Queue-Depth Exposition Fix
-**Rationale:** Hard prerequisite for Phase 5 (KEDA). PITFALLS.md is explicit that this must be resolved "before writing any ScaledObject manifest," as an early, isolated gating step — not discovered during the load-proof, by which point the wrong architecture would already be baked into the chart. This is pure Go code (no chart/manifest changes), so it can and should be validated against the existing compose E2E suite before any k8s work touches it.
-**Delivers:** `NewQueueDepthCollector` registration relocated into (or duplicated into) the always-on `api` process for all four queues (image/document/html/webhook), so the metric remains scrapeable even when a worker Deployment is at zero replicas. Confirm via `kubectl get --raw` on the external metrics API that the value resolves correctly at genuinely zero worker replicas, not just at N.
-**Avoids:** Pitfall 1 (queue-depth chicken-and-egg at zero replicas) — the single most load-bearing fix this milestone must not skip or defer.
-**Research flags:** Standard pattern — low research need; this is a targeted, code-verified relocation of existing, working collector code, not new design.
+STACK.md recommends baking `base` as the sole default model, offering `small` as a later opt-in preset — but flags this explicitly as unresolved pending real transcript-quality feedback on the actual (likely accented/bilingual, per SEED-001's tutor/student framing) audio population. The roadmap should treat model selection as a decision to make with a cheap reversibility path (build-arg/preset variant), not something to lock permanently in the Dockerfile with no revisit trigger. Bundling both models by default is explicitly rejected (pushes image size toward ~1GB, undermining Key Decision 3 below).
 
-### Phase 5: KEDA Autoscaling (ScaledObjects)
-**Rationale:** Depends on Phase 1 (deployable, NetworkPolicy-scoped `/metrics`) and Phase 4 (queue-depth exposed from an always-on component). Closes the milestone's other stated headline goal.
-**Delivers:** `ScaledObject`x3 (image/document/html) via the Prometheus scaler against the relocated `octoconv_queue_depth` metric, `keda.enabled` chart gate; `webhook-worker` explicitly excluded and shipped as a fixed `replicas: 2` Deployment alongside this phase, not as an afterthought.
-**Addresses:** "Per-engine-class KEDA ScaledObjects that visibly scale 0->N->0" from FEATURES.md.
-**Avoids:** Pitfall 2 (webhook-worker scale-to-zero kills the fleet-wide sweeper) — treat `minReplicaCount >= 1`/no-ScaledObject-at-all as a fail-closed hard gate on this Deployment, not a tunable.
-**Critical sequencing facts:** webhook-worker's exclusion from KEDA must ship in this same phase, not deferred — it is correctness-critical, not optional. Tune `pollingInterval`/`cooldownPeriod` per engine class (image: fast/bursty, shorter cooldown; document/html: slow tasks, longer cooldown so one long-running task doesn't read as sustained load or premature idleness).
-**Research flags:** Needs research at execution time — exact KEDA Prometheus scaler tuning for this project's real task-duration distributions (demo-tuned defaults from research, e.g. `pollingInterval: 5-15s`, `cooldownPeriod: 60s`, are a starting point, not production values).
+### Key Decision 3: Model distribution (bake-in vs volume) must be a measured tradeoff, not a default
 
-### Phase 6: Load-Proof / Autoscale Validation
-**Rationale:** Depends on Phase 5. Closes the milestone's actual stated Core Value ("воркеры автоскейлятся KEDA... доказано"). Phases 1->4->5->6 form the primary, sequential, hard-ordered arc; Phases 2 and 3 have no ordering constraint relative to this spine or each other.
-**Delivers:** A documented, timestamped 0->N->0 demonstration: queue depth at 0 with worker replicas at 0 (steady state) -> burst load -> time-to-first-replica -> time-to-drain -> time-to-scale-to-zero, with pod count and `octoconv_queue_depth` plotted on the same time axis.
-**Avoids:** The "looks done but isn't" trap of only proving the N->0 leg (a running pod can always report its own draining metric) — the 0->N leg must be verified separately with the worker genuinely at 0 replicas and a freshly-filled queue. Also load-tests scale-down with a long-running document job in flight to verify Phase 1's `terminationGracePeriodSeconds` choice actually holds under real conditions (not just image, which is fast).
-**Research flags:** Standard pattern — mostly execution/observation and load-generation scripting; low research need beyond what Phases 1/4/5 already established.
+Bake-in is simplest and matches the "workers stay offline" constraint most directly, but risks silently defeating the scale-from-zero SLA Phase 27/28 already proved for the other three classes. The roadmap should require a Phase-28-style timestamped load-proof measurement for the audio class specifically before calling KEDA integration done, and treat the bake-in-vs-volume choice as reversible based on that measurement, not fixed a priori.
+
+### Suggested Phase Structure
+
+1. **v1.6 Hardening Tail** (WR-01 empty-PromQL semantics, OPER-01 compose `OPERATOR_CLIENT_IDS` passthrough + live gate, gate-tooling script warnings, K8S-02 direct-dial recheck)
+   **Rationale:** Zero dependency on the audio work; all four items are already fully diagnosed by prior phase reviews (26/27/28-REVIEW.md), cheap, mechanical. Landing WR-01 first specifically means `scaledobject-audio.yaml` (a later phase) is written correctly from its first commit instead of needing a follow-up patch.
+   **Delivers:** Closed v1.6 audit findings; chart `ignoreNullValues` fix applied to all three existing ScaledObjects; verified operator-passthrough live gate; fixed gate-tooling scripts; resolved K8S-02 direct-dial verification.
+   **Avoids:** Reintroducing a known-bad chart pattern into the new audio ScaledObject (Anti-Pattern: copying `scaledobject-document.yaml` verbatim before the fix lands).
+
+2. **Audio Engine Foundation** (`internal/convert`: `EngineAudio` const, `audiosniff.go`, `MIMEType` additions, `AudioConverter` skeleton + the ffmpeg->whisper-cli `Convert()` pipeline as a standalone testable unit)
+   **Rationale:** This is the one genuinely novel piece of engineering (two sequential external processes, a real model file, real output validation) — get it working standalone before investing in surrounding plumbing (queue/worker/chart).
+   **Delivers:** A working `AudioConverter` that can transcribe a local file to txt/srt/vtt/json, with magic-bytes validation (including the bespoke MP3 detector) and a duration/size sanity guard.
+   **Addresses:** Table-stakes input formats, `target_format` pairs, `json` contract (SEED-001 hinge), magic-bytes parity, duration guard.
+   **Avoids:** Pitfall 6 (ffmpeg decompression-bomb-equivalent CVE surface), Pitfall 7 (MP3 fixed-offset sniff failure), Pitfall 11 (opts-injection if model/language selection is exposed).
+
+3. **Queue, Worker & Routing Integration** (`internal/queue` task/TTL, `internal/worker` handler + stage-aware terminal classifier per Key Decision 1, `cmd/audio-worker`, `internal/api`/`internal/reconciler` engine-routing switches, `cmd/api/main.go` metrics registration)
+   **Rationale:** Mechanical once the pattern is followed, but this is where the milestone's most consequential open decision (timeout classification, Key Decision 1) and the `AudioUniqueTTL` derivation (Pitfall 2) must be gotten right — both are easy-to-miss, hard-to-notice-until-production bugs.
+   **Delivers:** Audio jobs flow end-to-end through the async pipeline with correct retry/dedup semantics.
+   **Uses:** `internal/queue/queue.go`'s `Document*`/`HTML*` blocks as structural templates (not literal reuse).
+   **Implements:** Engine-class routing pattern, stage-aware timeout classification (Key Decision 1).
+
+4. **Containerization & Local E2E** (`Dockerfile.audio-worker`, `docker-compose.yml` service, CI bake matrix, an explicit RTF (realtime-factor) measurement against the container's real CPU allocation)
+   **Rationale:** Get the container building and runnable in compose before touching Kubernetes; this is also where `AUDIO_ENGINE_TIMEOUT` and `AUDIO_WORKER_CONCURRENCY` get sized from a *measured* benchmark rather than a copy-pasted document-class constant that would be off by 1-2 orders of magnitude.
+   **Delivers:** A running audio-worker in compose, a measured RTF-to-timeout mapping, an explicit whisper.cpp `--threads` flag sized to the container's cgroup CPU limit (not host core count).
+   **Addresses:** Sizing inputs for `AUDIO_ENGINE_TIMEOUT`/`AUDIO_MAX_RETRY`/`AUDIO_WORKER_CONCURRENCY`.
+   **Avoids:** Pitfall 5 (thread-count-vs-cgroup-limit throttling/OOM), the "copy-pasted timeout constant" trap flagged in Pitfall 1.
+
+   *This phase should treat its RTF benchmark as a measured go/no-go gate, mirroring the project's own precedent for veraPDF's JVM startup cost in Phase 23 — do not ship `AUDIO_ENGINE_TIMEOUT` as an assumption.*
+
+5. **KEDA/Helm Chart Integration & Production Hardening** (chart `audioWorker`/`keda.audio` blocks, `deployment-audio-worker.yaml`, `scaledobject-audio.yaml` with the WR-01 fix and the `scaleDownStabilizationSeconds` override applied from day one, model-distribution decision per Key Decision 3, reconciler staleness threshold adjustment, live E2E against the real cluster)
+   **Rationale:** Depends on the stable compose service/env contract from Phase 4; the ScaledObject should be written with WR-01 already fixed (Phase 1) so it's correct on first commit.
+   **Delivers:** Full production wiring including scale-from-zero measurement specific to the audio class, HPA N->N-1 protection sized above worst-case job duration, and a documented accepted-residual-risk entry for hallucination-on-silence.
+   **Addresses:** Production readiness parity with the other three engine classes.
+   **Avoids:** Pitfall 4 (KEDA cooldown-vs-HPA-stabilization gap), Pitfall 8 (unmeasured scale-from-zero regression), Pitfall 3 (reconciler global staleness threshold not audio-aware), Pitfall 9/10 (non-deterministic-output test design, hallucination accepted-risk documentation).
 
 ### Phase Ordering Rationale
 
-- 1 -> 4 -> 5 -> 6 is the only hard-ordered sequence. The chart must exist and expose a NetworkPolicy-scoped `/metrics` (Phase 1) before the queue-depth metric can be relocated and validated at zero replicas (Phase 4), which must complete before any `ScaledObject` is written (Phase 5), which must complete before the load-proof can meaningfully run (Phase 6).
-- Phases 2 (MCP HTTP) and 3 (system-presets REST) are fully independent of the KEDA spine and of each other. ARCHITECTURE.md's own recommended sequencing (A -> D -> E -> B -> C, i.e. chart core, then MCP HTTP and presets REST, then KEDA, then load-proof) front-loads these two small, low-risk, independently-shippable phases to validate chart conventions before committing to the higher-stakes, harder-to-unwind KEDA work — but a roadmap author may freely reorder or interleave them (e.g. run the presets REST phase first since it needs zero k8s context at all) without breaking any real dependency.
-- This grouping avoids the two most severe pitfalls by construction: separating the queue-depth fix into its own phase (4) forces it to be resolved before ScaledObjects exist, rather than discovered mid-load-proof; and calling out webhook-worker's KEDA exclusion as a deliverable of Phase 5 itself (not a "phase 7 cleanup") prevents the natural "apply the same template to every worker" mistake PITFALLS.md flags as the most common failure mode here.
+- Hardening tail is sequenced first purely because it is zero-cost, zero-risk, and prevents a guaranteed follow-up patch on the new audio ScaledObject (WR-01 must precede its authoring).
+- The converter/pipeline logic (Phase 2) is sequenced before queue/worker plumbing (Phase 3) because it is the one genuinely novel piece of external-process integration — validate it as a standalone unit before wiring it into the async lifecycle, mirroring how document (Phase 10-11) and html (Phase 15) engines were built before their KEDA integration arrived three phases later in v1.6, not simultaneously.
+- Containerization/RTF measurement (Phase 4) is deliberately placed before Helm/KEDA (Phase 5) because `AUDIO_ENGINE_TIMEOUT` sizing, `AUDIO_WORKER_CONCURRENCY`, and the model-bake-vs-volume decision all depend on a real measurement that can only happen once the container exists — chart tuning without that measurement would be guesswork.
+- This ordering directly avoids Pitfall 1 (unmeasured timeout copy-paste), Pitfall 2 (TTL derivation skipped under time pressure), Pitfall 5 (thread/cgroup mismatch discovered only in production), and Pitfall 8 (scale-from-zero regression discovered only after chart work is "done").
 
 ### Research Flags
 
-Needs research (deeper investigation likely required during phase planning):
-- Phase 1: OrbStack-specific k8s networking/FQDN host-resolution behavior, exact Helm hook re-run semantics on `helm upgrade` vs `install`.
-- Phase 2: go-sdk v1.6.1's `Stateless: true` mode interaction with `convert_file`'s progress-notification streaming (explicitly flagged LOW confidence); confirm server-side Streamable HTTP is actually present at this pinned version.
-- Phase 5: Real per-engine-class KEDA `pollingInterval`/`cooldownPeriod` tuning against this project's actual task-duration distributions (research supplies demo-tuned starting values only).
+Phases likely needing deeper research during planning (`--research-phase`):
+- **Phase 2 (Audio Engine Foundation):** JSON output schema field names for `-oj`/`-ojf` are LOW-MEDIUM confidence (extrapolated from adjacent tooling, not confirmed against the actual pinned v1.9.1 binary's output) — must be verified live against the pinned binary before the SEED-001-facing contract is finalized. MP3 ID3v2 detection design also warrants a focused look at synchsafe-integer decoding correctness.
+- **Phase 4 (Containerization & Local E2E):** RTF/thread-count/memory sizing is MEDIUM confidence, WebSearch-triangulated with no first-party benchmark on comparable hardware — needs empirical measurement against the project's actual container CPU/memory limits, not just literature review.
+- **Phase 5 (KEDA/Helm):** Model-distribution tradeoff (bake vs volume/init-container) and its interaction with OrbStack's specific pull-time characteristics is under-researched relative to the rest of the chart work; may need a scoped research pass on init-container/PVC patterns if bake-in's measured pull time proves unacceptable.
 
-Phases with standard/well-documented patterns (skip `--research-phase`):
-- Phase 3: Pure `internal/api` extension of an already scope-agnostic interface + one middleware — no novel pattern.
-- Phase 4: Targeted relocation of existing, working collector code — no new design.
-- Phase 6: Execution/observation and load-generation scripting against already-decided infrastructure.
+Phases with standard patterns (skip research-phase):
+- **Phase 1 (Hardening Tail):** Fully pre-diagnosed by existing review documents (26/27/28-REVIEW.md) — closing known findings, not discovering new ones.
+- **Phase 3 (Queue/Worker/Routing):** Mechanically mirrors three prior engine classes' code shape almost exactly; the one real decision (Key Decision 1) is already resolved above.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH for versions (live-fetched GitHub Releases/Helm index/official docs); MEDIUM for packaging opinions (Bitnami avoidance, hand-rolled Postgres/Redis/MinIO, single-vs-umbrella chart) — informed synthesis, not one canonical source |
-| Features | MEDIUM — KEDA/Helm feature patterns are well-documented and stable; go-sdk streamable-HTTP session-semantics specifics (`Stateless: true` + progress streaming) are explicitly flagged LOW and need live validation |
-| Architecture | HIGH — every finding is anchored to a direct read of this repo's own source (`cmd/*/main.go`, `docker-compose*.yml`, `internal/e2e/e2e_test.go`, `internal/mcpserver/*.go`, `internal/api/presets_handlers.go`, migrations, CI workflow); MEDIUM specifically for OrbStack-networking claims (one WebSearch against OrbStack's own docs, not independently tested against this repo's actual chart yet) |
-| Pitfalls | HIGH for code-grounded findings (queue-depth exposition, sweeper singleton, MCP key model, OrbStack wedge history — all verified directly against this repo's source and `.planning/RETROSPECTIVE.md`); MEDIUM for general KEDA/Helm/OrbStack-k8s mechanics (verified against current docs/GitHub issues, not against this project's own cluster) |
+| Stack | HIGH for versions/CLI/build flags (live-verified against GitHub Releases API, live README, live HuggingFace HEAD requests); MEDIUM for CPU realtime-factor sizing (no first-party benchmark on comparable modest cloud/OrbStack cores) |
+| Features | MEDIUM (CLI flags/build options verified against upstream README/discussions; exact `-oj`/`-ojf` JSON field names are extrapolated from adjacent tooling, not confirmed against the pinned binary — flagged as a Phase 2 research item) |
+| Architecture | HIGH for in-repo patterns (every claim grounded in direct reads of `internal/convert`, `internal/queue`, `internal/worker`, `internal/api`, `internal/reconciler`, Helm chart, cross-referenced against three prior engine-class additions); MEDIUM for whisper.cpp-specific facts (WebSearch-verified, no in-repo precedent) |
+| Pitfalls | HIGH for OctoConv-internal patterns (verified against `internal/worker/worker.go`, `internal/queue/queue.go`, `internal/reconciler/reconciler.go`, chart templates, v1.6 phase reviews); MEDIUM for whisper.cpp/ffmpeg-specific external claims (thread-limit behavior, hallucination, CVE surface — WebSearch, cross-checked across multiple sources but not Context7-verified) |
 
-**Overall confidence:** HIGH on what must architecturally happen and in what order; MEDIUM on exact tuning values (probe thresholds, `cooldownPeriod`/`pollingInterval`) and on OrbStack-specific networking edge cases, both of which require live verification against an actual running chart rather than documentation alone.
+**Overall confidence:** MEDIUM-HIGH — the architectural shape and in-repo integration points are HIGH confidence and well-precedented; the genuinely new external-tool behavior (RTF sizing, JSON schema, hallucination, thread/cgroup interaction) is consistently MEDIUM confidence across all four files and should be treated as planning input requiring empirical validation during phase execution, not as ship-blocking guarantees.
 
 ### Gaps to Address
 
-- `local_path` contract gap for remote MCP callers (see Key Decisions) — three options proposed, no default recommended; must be an explicit decision when Phase 2 is planned.
-- go-sdk v1.6.1's exact Streamable HTTP session semantics — whether `Stateless: true` truly preserves `convert_file`'s progress-notification streaming is asserted from documentation/API-shape inspection only, not a live smoke test; verify before committing to the stateless design in Phase 2's plan.
-- OrbStack Kubernetes' exact current version and PVC persistence behavior across `helm uninstall`/reinstall — inferred from release-notes history, not independently confirmed; verify with `kubectl version` and a live PVC-survival test at execution time, do not assume compose-volume-like persistence.
-- asynq v0.26.0's `Server.Shutdown()` exact blocking/deadline semantics — needed to confirm the `terminationGracePeriodSeconds` fix (Phase 1) doesn't reproduce the same mismatch inside asynq's own shutdown path; flagged in PITFALLS.md as something to verify specifically, not assumed from the general asynq API surface.
+- **JSON output schema (`-oj`/`-ojf` field names):** Not confirmed against the pinned v1.9.1 binary's actual output — verify live in Phase 2 before finalizing the SEED-001-facing contract; this is the highest-leverage unresolved gap since it is a forward-compatibility commitment to a future milestone.
+- **Realtime-factor (RTF) sizing:** Triangulated from third-party/community sources on non-comparable hardware — treat as a planning input requiring a measured go/no-go gate in Phase 4 (mirrors the project's own veraPDF JVM-startup-cost precedent from Phase 23), not a fixed constant to ship on faith.
+- **Model choice (base vs small):** Open product decision per Key Decision 2 — research recommends `base` as default but flags this as unresolved pending real transcript-quality feedback on the actual (bilingual, tutor/student) audio population.
+- **Model distribution (bake vs volume):** Open per Key Decision 3 — bake-in is simplest but risks an unmeasured scale-from-zero regression; requires a Phase 5 load-proof-style measurement before the tradeoff can be called resolved.
+- **Timeout classification (terminal vs transient):** Resolved in this document as Key Decision 1 (stage-aware split) — the roadmap must carry this resolution forward explicitly into the Phase 3 context doc, since two of the four research files recommended the simpler-but-wrong blanket approach.
+- **Hallucination-on-silence:** Explicitly unsolvable this milestone (no simple structural detection exists per current research) — must be logged as an accepted residual risk in the Phase 2/5 decision log, with the cheapest available mitigation (no-speech-probability surfaced in the `json` contract) applied if the pinned whisper.cpp version supports it cleanly.
+- **whisper.cpp thread/memory behavior under cgroup limits:** MEDIUM confidence, one anecdotal OOM report in the wider ecosystem — needs an explicit benchmark against the actual `cpus`/`memory` chart values before `AUDIO_WORKER_CONCURRENCY` is fixed (Phase 4).
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- Direct repository reads: `docker-compose.yml`, `cmd/api/main.go`, `cmd/worker/main.go`, `cmd/document-worker/main.go`, `cmd/chromium-worker/main.go`, `cmd/webhook-worker/main.go`, `internal/metrics/queue_collector.go`, `internal/reconciler/reconciler.go`, `internal/mcpserver/{mcpserver,config,client,tools}.go`, `cmd/mcp-server/main.go`, `internal/api/{presets_handlers,api,routes}.go`, `internal/db/migrations/{0001_init,0002_client_api_keys}.sql`, `internal/e2e/e2e_test.go`, `.github/workflows/ci.yml`
-- `.planning/PROJECT.md`, `.planning/seeds/SEED-004.md`, `.planning/RETROSPECTIVE.md` (OrbStack wedge history)
-- https://github.com/kedacore/keda/releases, https://kedacore.github.io/charts/index.yaml, https://keda.sh/docs/2.20/ (scalers/prometheus, reference/scaledobject-spec) — live-fetched
-- https://github.com/hibiken/asynq source (`internal/base/base.go`, `internal/rdb/rdb.go`) — confirms Redis pending-key structure
-- https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.6.1/mcp — confirms `NewStreamableHTTPHandler` API shape at the exact pinned version
-- https://github.com/helm/helm/releases, https://docs.orbstack.dev/kubernetes/ — live-fetched
+- `https://github.com/ggml-org/whisper.cpp/releases` + GitHub Releases API — live-verified tag `v1.9.1`, published `2026-06-19`
+- `https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/{README.md,examples/cli/README.md,models/download-ggml-model.sh,.devops/main.Dockerfile,ggml/CMakeLists.txt}` — live-fetched at the pinned tag: 16-bit-WAV requirement, `GGML_NATIVE`/`GGML_CPU_ALL_VARIANTS` cmake options, ggml (not GGUF) model format, no built-in checksum verification
+- `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{tiny,base,small,medium}.bin` — live HEAD/GET requests confirming exact byte sizes and SHA-256
+- `debian:bookworm-slim` live `apt-cache policy ffmpeg` — `ffmpeg 7:5.1.9-0+deb12u1`
+- Direct reads of `internal/convert/*.go`, `internal/queue/*.go`, `internal/worker/worker.go`, `internal/api/{api,handlers}.go`, `internal/reconciler/reconciler.go`, `internal/metrics/queue_collector.go`, `cmd/{api,worker,document-worker}/main.go`, `docker-compose.yml`, `.github/workflows/ci.yml`, `Dockerfile.{worker,document-worker}`, `deploy/chart/octoconv/{values.yaml,templates/*}` — ground truth for every in-repo architectural claim
+- `.planning/milestones/v1.6-phases/{26-operator-presets-rest/26-REVIEW.md, 27-keda-autoscaling/27-REVIEW.md, 28-autoscale-load-proof/28-REVIEW.md, 24-helm-chart-core/24-VERIFICATION.md}` — ground truth for the hardening-tail mapping (WR-01, OPER-01/WR-03, gate-tooling WR-01..06, K8S-02)
 
 ### Secondary (MEDIUM confidence)
-- https://github.com/bitnami/charts/issues/35164 + Broadcom migration guidance + corroborating secondary sources (Chainguard, Minimus, Chkk)
-- MinIO Operator/community-chart state via GitHub discussions + artifacthub (no single canonical current-state doc)
-- General Helm umbrella-vs-single-chart guidance (multiple blog sources, no single canonical spec)
-- KEDA flapping/scale-to-zero GitHub issues (#770, #2314, discussion #6443)
-- Kubernetes SIGTERM/grace-period best-practice write-ups (Google Cloud, CNCF)
+- `https://github.com/ggml-org/llama.cpp/discussions/10230` and related ggml/llama.cpp issues — `GGML_NATIVE`/`-march=native` Docker illegal-instruction failures, consistent across multiple independent issue reports
+- `https://github.com/mackron/miniaudio` — whisper.cpp's native decoder format support (WAV/FLAC/MP3/OGG-Vorbis; no native M4A/AAC/Opus), corroborated by whisper.cpp's own ffmpeg-conversion guidance
+- MP3 ID3v2 synchsafe-size/sync-word-precedence — corroborated across Mutagen ID3v2 spec docs, Hydrogenaudio Knowledgebase, and an independent parsing write-up (treated as HIGH confidence within Pitfalls research specifically, given multi-source agreement on a spec-level fact)
+- ffmpeg CVEs (CVE-2021-38171, CVE-2025-25469, CVE-2026-8461 "PixelSmash") — SentinelOne/Hackers-Arise/JFrog vulnerability writeups, not independently verified against NVD record text
+- whisper hallucination on silence/music — corroborated across an arXiv paper, an OpenAI Whisper GitHub discussion, and a practitioner write-up
 
-### Tertiary (LOW confidence, flagged for live validation)
-- go-sdk `Stateless: true` interaction with `convert_file`'s progress-notification streaming — needs a live smoke test before committing
-- OrbStack's exact current Kubernetes version and PVC-persistence-across-reinstall behavior — inferred from release-notes/issue history, not one canonical page
+### Tertiary (LOW-MEDIUM confidence, needs validation)
+- CPU realtime-factor (RTF) benchmarks — triangulated from a legacy-hardware community discussion, a third-party Apple M2 blog benchmark, and general "6x real-time" community claims on unspecified hardware; explicitly flagged for empirical re-measurement during Phase 4 against the project's real container CPU allocation
+- whisper.cpp JSON output field names (`-oj`/`-ojf`) — the concrete example surfaced was from an adjacent tool (whisper-timestamped), not confirmed as whisper.cpp's own schema verbatim; must be verified against the actual pinned binary before the SEED-001 contract is finalized
+- whisper.cpp thread-count-vs-cgroup-CPU-limit OOM behavior — one anecdotal report from the wider Whisper-family Docker ecosystem, not independently reproduced
 
 ---
-*Research completed: 2026-07-14*
+*Research completed: 2026-07-17*
 *Ready for roadmap: yes*

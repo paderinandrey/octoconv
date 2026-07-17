@@ -1,10 +1,10 @@
 # Stack Research
 
-**Domain:** Kubernetes + KEDA local deployment for an existing Go microservice fleet (OctoConv v1.6)
-**Researched:** 2026-07-14
-**Confidence:** HIGH for versions/verified facts (Context7 has no entries for these infra tools — used live GitHub API/Helm repo index/official docs directly instead); MEDIUM for architecture/packaging recommendations (opinionated synthesis, not a single canonical source); explicitly flagged where LOW
+**Domain:** Offline audio-transcription engine class (whisper.cpp) for OctoConv v1.7
+**Researched:** 2026-07-17
+**Confidence:** HIGH for versions/CLI/models (verified live against GitHub API, live README, live HuggingFace HEAD requests); MEDIUM for CPU realtime-factor sizing (no first-party benchmark on comparable modest cloud/OrbStack CPU cores — see caveats)
 
-This is a **replacement** stack note for OctoConv's first infrastructure milestone (v1.6, "Kubernetes & KEDA"). It supersedes the previous milestone's STACK.md content (v1.5 — MCP stdio SDK, veraPDF, mscfb — all already shipped and merged, not revisited here). It does not re-litigate the fixed core application stack (Go 1.26, chi, asynq/Redis, PostgreSQL 18, MinIO — Notion spec, out of scope) or any of the 6 existing service binaries/images. Everything below is net-new tooling for: (1) the Kubernetes distribution/host, (2) Helm packaging, (3) KEDA autoscaling, (4) a minimal in-cluster Prometheus, and (5) the MCP streamable-HTTP transport (already-pinned SDK, confirmed zero version bump needed).
+This is a **replacement** stack note for OctoConv's v1.7 milestone. It supersedes the previous milestone's STACK.md content (v1.6 — KEDA/Helm/OrbStack Kubernetes, all already shipped and merged, not revisited here). It covers only the NEW audio engine class. Go/chi/asynq/Postgres/MinIO/Helm/KEDA are already validated (see PROJECT.md) and are not re-researched here.
 
 ## Recommended Stack
 
@@ -12,134 +12,201 @@ This is a **replacement** stack note for OctoConv's first infrastructure milesto
 
 | Technology | Version | Purpose | Why Recommended |
 |------------|---------|---------|-----------------|
-| KEDA | **v2.20.1** (app + Helm chart, chart repo `https://kedacore.github.io/charts`, chart name `keda`) | Per-engine-class queue-depth autoscaling (image/document/html/webhook) | Current stable per `kedacore/keda` GitHub Releases API (`tag_name: v2.20.1`, published 2026-06-08) and confirmed as the newest entry in the live Helm repo index (`keda-2.20.1.tgz`, `appVersion: 2.20.1`). `v2.21` exists only as "unreleased" in the docs version selector. HIGH confidence (GitHub API + Helm repo index, both live-fetched). |
-| Helm | **v3.21.3** (July 9, 2026) or **v4.2.3** (July 9, 2026, GA) | Package/template the whole stack as one chart | Helm v3 and v4 both ship active patch releases on the same cadence; v3's own v3.21.0 release notes state "Helm v3 is approaching end-of-life. Please update to Helm v4." v4 is GA. **Recommendation: use Helm v4** for this new chart (greenfield, no v3-only plugin/CI dependency exists in this repo yet) — avoids starting a migration debt on day one. If any CI runner assumption turns out to require the v3 CLI/API shape, v3.21.3 is still fully supported (security fixes through Nov 2026) and is a safe fallback. HIGH confidence (GitHub releases, live-fetched). |
-| OrbStack Kubernetes | Built-in, single-node, bundled Kubernetes has progressed **1.29.3 → 1.31.6 → 1.33.5** across recent OrbStack releases (exact current version not independently confirmed — verify with `kubectl version` at execution time) | Local cluster target (already decided in SEED-004 — not re-litigated here) | Verified: OrbStack's Kubernetes shares the **same container engine/image store as OrbStack's Docker daemon**, so locally-built images are visible to cluster pods with **no registry, no `kind load`-equivalent step**. This is the single biggest gate for the build/deploy loop and is confirmed directly by OrbStack's own Kubernetes docs. **Caveat (confirmed):** if an image tag is `:latest`, Kubernetes will still try to re-pull/update it by default — for local images either tag them non-`:latest` (e.g. `:dev`, `:local`) or set `imagePullPolicy: IfNotPresent`/`Never` on the Pod spec. This directly affects two images already in `docker-compose.yml` that use `:latest` (`minio/minio:latest`, `minio/mc:latest`) — repin or set the pull policy explicitly when porting. HIGH confidence (official OrbStack docs, live-fetched). |
+| `ggml-org/whisper.cpp` | **v1.9.1** (tag, released 2026-06-19, confirmed live via GitHub Releases API — `published_at: 2026-06-19T05:53:19Z`) | CPU-only offline speech-to-text inference engine | Already the LOCKED decision. Header-only C/C++ port of OpenAI Whisper, zero Python runtime, ships a single static-ish CLI binary — this is the only whisper implementation that fits OctoConv's "shell out to a CLI binary in a per-class container" pattern used by libvips/LibreOffice/chromium. No runtime network calls needed once the binary + model are baked into the image, satisfying the "воркеры остаются офлайн" constraint. |
+| `whisper-cli` (built from source, part of whisper.cpp `examples/cli`) | ships with v1.9.1 | The actual binary the worker shells out to | Renamed from the old `main` binary (deprecated) in whisper.cpp ~v1.5. `whisper-cli -h` confirms binary name and full flag set live. Fits `internal/convert/exec.go`'s `runCommand` (process-group kill on timeout) with zero changes needed — it is a single synchronous invocation, exactly like the libvips converter, not a forking daemon like `soffice.bin`. |
+| ggml model file (`ggml-base.bin`, `ggml-small.bin`) | pin an exact model file by SHA-256, not `download-ggml-model.sh`'s mutable `main` branch pointer | Acoustic + language model weights whisper-cli loads via `-m` | Format is **ggml (`.bin`), NOT GGUF** — do not confuse with llama.cpp's GGUF ecosystem; whisper.cpp's own converters (`convert-pt-to-ggml.py`) only emit `.bin`. Hosted on HuggingFace (`https://huggingface.co/ggerganov/whisper.cpp`), which is itself a mirror the whisper.cpp project treats as canonical (the old `ggml.ggerganov.com` CDN is commented out in `download-ggml-model.sh` as of v1.9.1 — dead). |
+| `ffmpeg` | Debian bookworm's apt-pinned build: **7:5.1.9-0+deb12u1** (verified live via `apt-cache policy` against `debian:bookworm-slim`) | Pre-conversion of arbitrary input audio → 16kHz mono 16-bit PCM WAV | whisper.cpp's own README states plainly: *"the whisper-cli example currently runs only with 16-bit WAV files, so make sure to convert your input before running the tool"* — this is a **hard, confirmed requirement**, not an optimization. Installing system ffmpeg via apt (matching the existing `apt-get install -y --no-install-recommends` pattern in `Dockerfile.document-worker`/`Dockerfile.chromium-worker`) and running it as an explicit pre-processing step keeps the pipeline as two separate, independently-hardened `runCommand` invocations (ffmpeg, then whisper-cli) rather than relying on whisper.cpp's optional built-in `WHISPER_COMMON_FFMPEG` cmake flag (see "What NOT to Use"). |
 
-### Supporting Infrastructure (stateful dependencies: Postgres, Redis, MinIO)
+### Supporting Libraries
 
-| Component | Recommendation | Version (match existing compose) | Why |
-|-----------|-----------------|-----------------------------------|-----|
-| PostgreSQL | Hand-rolled minimal `StatefulSet` + `PersistentVolumeClaim` + `Service`, own templates in the chart | `postgres:18` (same image already pinned in `docker-compose.yml`) | See "What NOT to use" below — do **not** pull in a Bitnami chart. A single-replica local-validation Postgres needs no operator (CloudNativePG/Zalando are overkill for infra-validation scope, not HA). A short StatefulSet template mirroring the existing compose healthcheck (`pg_isready -U octo -d octo_db`) as `readinessProbe`/`livenessProbe` is lower risk than adopting a third-party chart's opinions about ConfigMap/Secret shape or bundled extensions. |
-| Redis | Hand-rolled minimal `StatefulSet` (or `Deployment` + PVC, since asynq treats Redis purely as transient broker state, not source of truth — Postgres is) + `Service` | `redis:8` (same as compose) | Same rationale as Postgres — avoid Bitnami. Official `redis:8` image + `redis-cli ping` readiness probe (mirrors existing compose healthcheck exactly). No Sentinel/Cluster needed for single-node local validation. |
-| MinIO | Hand-rolled minimal `StatefulSet`/`Deployment` + `PVC` + `Service`, running the **same** `server /data --console-address ":9001"` command already in compose | `minio/minio:latest` → **repin to a dated release tag** before porting (both for supply-chain pinning hygiene already practiced elsewhere in this repo — `asynqmon:0.7.2` is explicitly pinned per a documented rationale — and to sidestep OrbStack's `:latest` re-pull caveat above) | Verified: MinIO's own **standalone Helm chart is community-support only** (not the officially recommended path); MinIO's own recommendation is the `minio/operator` + Tenant CRDs, built for multi-tenant/multi-drive production object storage — disproportionate for one local bucket. The `minio/charts` repo was briefly removed and later restored, another signal of churn/ambiguity in what "official" even means here. **Recommendation: skip both the community chart and the Operator; hand-roll the manifest**, matching the same packaging pattern used for Postgres/Redis — one consistent approach across all three stateful deps, zero new third-party chart maintenance-risk surface. MEDIUM confidence (GitHub discussions + artifacthub, live-searched; MinIO does not publish one single unambiguous "current state" page). |
-| `createbucket` (mc-based one-shot) | Kubernetes `Job` with a `helm.sh/hook: post-install,post-upgrade` annotation (ordered via `helm.sh/hook-weight` after MinIO becomes ready), or a plain `Job` whose own container polls MinIO's health endpoint before running `mc mb` | n/a | Matches SEED-004 landmine #3. Helm hooks are the idiomatic way to express "run once, after X is ready" — compose's `depends_on: condition: service_healthy` has no direct one-line Kubernetes equivalent; probes give liveness/readiness on long-running objects, but cross-object ordering for one-shot Jobs still needs either hooks or a manual polling initContainer. Use the same hook pattern for `cmd/migrate`. |
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|-------------|
+| `build-essential`, `cmake`, `git` (apt, Debian bookworm build stage only) | bookworm apt defaults | Compile whisper.cpp from source | Needed only in the Dockerfile's `build` stage (mirrors `golang:1.26-bookworm` builder pattern already used for `cmd/*-worker`). Not present in the runtime image. |
+| `libgomp1` (apt) | bookworm apt default | OpenMP runtime whisper.cpp's ggml CPU backend links against for multi-threading | Required in the **runtime** image if whisper.cpp is built with its default threading backend; confirm at build time with `ldd build/bin/whisper-cli` and add whatever `.so` it resolves to system libs beyond libc/libstdc++ (typically just `libgomp1`). |
 
-### What NOT to use for Postgres/Redis/MinIO
+No new **Go** dependencies are needed — this engine class follows the exact same shape as libvips/LibreOffice/chromium: a `Converter` implementation in `internal/convert/` that shells out via the existing `runCommand` hardened-exec helper. Do not add a Go whisper binding (see "What NOT to Use").
 
-| Avoid | Why | Confirmed state (2026-07) |
-|-------|-----|----------------------------|
-| Bitnami charts (`bitnami/postgresql`, `bitnami/redis`, any `bitnami/*`) | Broadcom's Aug 28, 2025 catalog change moved all **non-`:latest`** image tags — and, from Sep 29, 2025, most packaged chart OCI artifacts — behind a paid subscription (reported figures range roughly $6k/mo to $72k/yr). The "Bitnami Legacy" archive holding older/pinned tags is frozen (no further updates or security patches). Chart *source* on GitHub is still Apache-2.0, but the images the chart deploys by default are the part now paywalled or forced onto a floating `:latest` tag. This directly conflicts with this repo's existing "pin every image, no `:latest` in production paths" convention (see the `asynqmon:0.7.2` pin rationale in `docker-compose.yml`). **Do not adopt any Bitnami chart for this milestone.** HIGH confidence (`bitnami/charts` GitHub issue #35164 + Broadcom's own migration guidance, corroborated by three independent secondary write-ups — Chainguard, Minimus, Chkk). |
-| MinIO Operator + Tenant CRDs | Correct long-term production path per MinIO's own docs, but adds an operator Deployment, several CRDs, and a Tenant resource for what is one local bucket in one infra-validation milestone — disproportionate. Revisit only if a real target platform later needs multi-drive/multi-tenant MinIO. | MEDIUM confidence |
-| `kube-prometheus-stack` (full Prometheus Operator + Alertmanager + Grafana + node-exporter + kube-state-metrics) | KEDA's Prometheus scaler needs exactly one thing: an HTTP endpoint that answers PromQL-shaped queries at `serverAddress`. `kube-prometheus-stack` installs 15+ CRDs and several extra components purely to obtain that one Prometheus server — disproportionate for scraping 6 first-party pods' existing `/metrics` endpoints on a single-node local cluster. | Own architectural judgment (MEDIUM confidence) — see the minimal Prometheus recommendation below. |
-| KEDA's Redis Lists scaler (`type: redis`, `listName`) as the *primary* per-queue-depth trigger | Asynq's pending-task Redis key **is** confirmed to be a plain Redis LIST (verified directly from `hibiken/asynq` source: `internal/base/base.go` defines `PendingKey(qname) = "asynq:{" + qname + "}:pending"`; `internal/rdb/rdb.go`'s enqueue Lua script does `LPUSH` into it, and dequeue uses `RPOPLPUSH` to move entries into the active list) — so a `redis-lists` KEDA trigger with `listName: "asynq:{image}:pending"` is *technically wireable* (note: the literal `{`/`}` braces are part of the real key, present for Redis-Cluster hash-tag compatibility, and easy to get wrong). But: (a) it reflects only the `pending` state, undercounting true backlog when a queue has in-flight retries (`asynq:{queue}:retry`, a ZSET) or scheduled/delayed tasks (also a ZSET); (b) it depends on an **undocumented internal implementation detail** of asynq with no semver-guaranteed contract across versions; (c) OctoConv **already exports** a purpose-built `queue_depth` Prometheus metric that presumably already accounts for the states that matter operationally. The Prometheus scaler against that existing metric is strictly better — semantically correct, versioned by first-party code, and matches this milestone's own stated design intent (SEED-004: "не redis-scaler по внутренностям asynq"). **Use the Redis Lists scaler only as a debugging/cross-check tool, never as the production trigger.** HIGH confidence on the Redis key structure (live-fetched from `hibiken/asynq` source); MEDIUM-HIGH confidence on the recommendation (matches the project's own prior decision rather than an independently re-derived conclusion). |
+### Development Tools
 
-## KEDA: Scaler Configuration Shape (Prometheus, recommended trigger type)
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| `whisper-cli -h` | Enumerate exact flags for the pinned tag before writing `internal/convert/whispercpp.go` | Flags are stable but do change across minor versions (e.g. `--version` flag only added in v1.8.7) — re-run `-h` against the exact pinned v1.9.1 binary rather than trusting older blog posts. |
+| `models/download-ggml-model.sh` (from the pinned v1.9.1 source tree) | Reference for the exact HuggingFace URL shape (`https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-<model>.bin`) | Do not shell this script directly into the Dockerfile unmodified — it has no checksum verification (confirmed by reading the script live). Use `curl -L --fail` against the same URL plus your own pinned SHA-256 check (see Installation below). |
 
-Confirmed field list for the `prometheus` scaler trigger metadata (KEDA docs v2.20, live-fetched):
+## Installation
 
-| Field | Required | Default | Meaning |
-|-------|----------|---------|---------|
-| `serverAddress` | Yes | — | URL of the Prometheus HTTP API, e.g. `http://prometheus.octoconv.svc.cluster.local:9090` (in-cluster DNS form `<svc>.<ns>.svc.cluster.local` — works when Prometheus and KEDA are co-located) |
-| `query` | Yes | — | PromQL query that must resolve to a single scalar/vector value, e.g. `sum(octoconv_queue_depth{queue="image"})` (confirm the exact metric/label names against your live `/metrics` output — not independently verified here) |
-| `threshold` | Yes | — | Value at which KEDA scales from 1→N (post-activation; the standard Kubernetes HPA takes over from here using this as the target metric value) |
-| `activationThreshold` | No | `0` | Threshold that decides the 0→1 transition (the scale-*from*-zero "wake up" gate) — set above steady-state noise so a near-empty queue doesn't keep a deployment permanently alive |
-| `namespace` | No (required for HA setups, e.g. Thanos) | — | Namespace label for HA-federated Prometheus |
-| `customHeaders` | No | — | Comma-separated static headers (`X-Client-Id=cid,X-Tenant-Id=tid`) — use `TriggerAuthentication` instead for anything secret |
-| `unsafeSsl` | No | `false` | Skip TLS cert verification — irrelevant for an in-cluster plain-HTTP Prometheus |
-| `ignoreNullValues` | No | `true` | Whether a lost/empty Prometheus target is treated as an error vs. silently ignored |
-| `timeout` | No | KEDA's global HTTP client default | Per-scaler query timeout |
+```dockerfile
+# Dockerfile.audio-worker — mirrors Dockerfile.document-worker's shape
+# (Go build stage -> engine build stage -> slim runtime stage)
 
-**Two-phase scaling behavior (confirmed, KEDA docs v2.20):**
-- **Activation phase (0↔1 replicas):** KEDA's own polling loop (`pollingInterval`, chart/spec default **30s**) evaluates the trigger while replicas = 0. Once `activationThreshold` is crossed, KEDA scales the target toward `minReplicaCount`.
-- **Scaling phase (1↔N replicas):** control passes to the standard Kubernetes HPA object (created/owned by KEDA), which re-evaluates on its own sync loop (cluster default ~15s) and scales toward `maxReplicaCount` (spec default `100` — **override this per engine-class ScaledObject**, e.g. small numbers like 2–5 for local validation) using `threshold` as the target value.
-- **Scale-to-zero cooldown:** `cooldownPeriod` (default **300s / 5 min**) applies **only** to the scale-*to-zero* transition once the trigger goes inactive — it does not gate 1→N or N→1 scaling, which is pure HPA behavior. For a demoable 0→N→0 load test, plan to tune `cooldownPeriod` down (e.g. 30–60s) so the "→0" leg doesn't take 5 minutes per queue during the demo.
-- `minReplicaCount: 0` is what enables true scale-to-zero. A separate `idleReplicaCount` field exists for an intermediate non-zero "idle" floor but has documented HPA-controller limitations — not needed here, don't reach for it.
+# --- Go build stage ---
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/audio-worker ./cmd/audio-worker
 
-**Example shape (illustrative only — confirm the real `octoconv_queue_depth`-style metric/label names against the actual `/metrics` output before writing the real ScaledObject):**
-```yaml
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: image-worker-scaledobject
-spec:
-  scaleTargetRef:
-    name: image-worker
-  minReplicaCount: 0
-  maxReplicaCount: 5
-  cooldownPeriod: 60
-  pollingInterval: 15
-  triggers:
-    - type: prometheus
-      metadata:
-        serverAddress: http://prometheus.octoconv.svc.cluster.local:9090
-        query: sum(octoconv_queue_depth{queue="image"})
-        threshold: "5"
-        activationThreshold: "1"
+# --- whisper.cpp build stage: compile from source, pinned tag ---
+FROM debian:bookworm-slim AS whisper-build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp.git /whisper
+WORKDIR /whisper
+# GGML_NATIVE=OFF is load-bearing: without it, ggml compiles with -march=native
+# for whatever CPU the image builder happens to run on (CI runner / OrbStack
+# host), and whisper-cli SIGILLs on any runtime host lacking those exact
+# instruction extensions -- a well-documented whisper.cpp/llama.cpp Docker
+# pitfall (see Sources). Do NOT flip this to ON to "optimize."
+RUN cmake -B build -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build -j --target whisper-cli --config Release
+
+# Pin the model by content hash, not by trusting HuggingFace's mutable `main`
+# branch pointer at build time (mirrors the project's existing discipline of
+# pinning exact MinIO RELEASE tags / veraPDF v1.30.2 rather than `:latest`).
+# SHA-256 verified live 2026-07-17 against
+# https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+RUN curl -L --fail --retry 5 --retry-delay 5 \
+      -o /models/ggml-base.bin \
+      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
+    && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe  /models/ggml-base.bin" | sha256sum -c -
+
+# --- runtime stage ---
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=whisper-build /whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli
+COPY --from=whisper-build /models/ggml-base.bin /models/ggml-base.bin
+COPY --from=build /out/audio-worker /usr/local/bin/audio-worker
+# Single synchronous CLI invocation per job (ffmpeg, then whisper-cli) --
+# no forking daemon like soffice.bin/chromium, so (matching Dockerfile.worker's
+# own documented rationale) no tini/init-as-PID-1 is needed here.
+USER nobody
+ENTRYPOINT ["/usr/local/bin/audio-worker"]
 ```
 
-## Minimal Prometheus Footprint for KEDA
+```bash
+# Example runCommand-shaped invocation sequence the worker performs per job
+# (two hardened exec.Command calls, both bounded by AUDIO_ENGINE_TIMEOUT):
 
-**Recommendation (own architectural judgment, MEDIUM confidence — no single canonical source names this exact minimal shape, but it's the consistent pattern across everything read):** do **not** install `kube-prometheus-stack`. Instead:
-- A single `Deployment` running the official `prom/prometheus` image (pin an explicit release tag, not `:latest`, matching this repo's existing pinning convention).
-- A `ConfigMap` holding a static (or `kubernetes_sd_configs`-based, for auto-discovery across Pods) `prometheus.yml` that scrapes the existing `/metrics` path on each of the 6 first-party Pods (api, worker, document-worker, chromium-worker, webhook-worker×2). This is exactly the fix for SEED-004 landmine #1 (`METRICS_ADDR` must bind `0.0.0.0` in-cluster, gated by `NetworkPolicy` rather than the current localhost-bind isolation the compose deployment relies on).
-- No Alertmanager, no Grafana, no node-exporter, no kube-state-metrics, no Prometheus Operator CRDs (`ServiceMonitor`/`PodMonitor`) — all of those add real value at larger scale but are unnecessary machinery when the actual requirement is "KEDA needs one PromQL-answering URL."
-- If `ServiceMonitor`-style discovery is later wanted, the **Prometheus Operator alone** (without the full `kube-prometheus-stack` bundle) is a smaller middle ground — not needed for this milestone's stated scope.
+# 1. Preprocess: decode arbitrary container/codec to whisper.cpp's required format
+ffmpeg -i input.<ext> -ar 16000 -ac 1 -c:a pcm_s16le -y /tmp/<job>/audio.wav
 
-## MCP Streamable HTTP Transport (go-sdk, already pinned — confirm zero version bump)
-
-Confirmed against `github.com/modelcontextprotocol/go-sdk@v1.6.1` — the exact version already in `go.mod` (HIGH confidence, pkg.go.dev fetched for this specific tag, not just "latest"):
-
-- `func NewStreamableHTTPHandler(getServer func(*http.Request) *Server, opts *StreamableHTTPOptions) *StreamableHTTPHandler` — the entry point. `getServer` lets a `*mcp.Server` be constructed/selected per-request; a constant closure returning one shared `*Server` is sufficient for a single in-cluster deployment.
-- `(*StreamableHTTPHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)` — it **is** a plain `http.Handler`, so it composes with `net/http` exactly like the existing chi-based API server (mount it as a route, or run it standalone with `http.ListenAndServe`).
-- `StreamableHTTPOptions` — options struct (includes things like an `OnConnectionClose` callback for session-end/timeout notification).
-- Related lower-level types: `StreamableServerTransport` / `StreamableClientTransport` — not needed for a straightforward server mount.
-
-**Auth — do NOT bump the SDK to get `RequireBearerToken`:** that middleware (OAuth-style bearer-token verification, `TokenVerifier`, scopes, `WWW-Authenticate` challenge) is confirmed **absent from v1.6.1** — it's a newer SDK addition. Bumping the SDK solely for it would (a) introduce a dependency change beyond this milestone's stated "k8s work is YAML-only except the already-pinned MCP HTTP transport" framing, and (b) is the wrong shape anyway: CLAUDE.md's constraint is explicit — **do not introduce a separate/external auth provider**; auth must go through the existing `clients` table / API-key model. **Recommendation:** wrap the plain `http.Handler` returned by `NewStreamableHTTPHandler` with a small stdlib `net/http` middleware — same shape as this codebase's existing API-key-check middleware in `internal/api` — validating a shared header before calling `ServeHTTP` (either the same client API key the MCP tool already forwards downstream today, or a separate cluster-internal shared secret). Combine this with the same "internal-only, never exposed outside the cluster" trust posture already used for `/metrics` and `asynqmon` (bind in-cluster, gate with `NetworkPolicy`), since the milestone's own framing describes this MCP endpoint as internal-only, not a new public surface. This path requires **zero new Go dependencies** — pure stdlib middleware, consistent with "no new deps beyond the already-pinned SDK" for this milestone.
-
-## Helm Chart Layout
-
-**Recommendation: a single chart, not an umbrella chart with subcharts.** (Own judgment, MEDIUM confidence — informed by general Helm guidance found via search, not a single authoritative source naming this exact project's shape.)
-
-Rationale specific to this project:
-- Umbrella charts/subcharts earn their overhead when there's genuine reuse (the same subchart deployed by multiple parent charts) or team-ownership boundaries needing independent release cadences/blast-radius isolation. OctoConv v1.6 is one operator, one cluster, one release unit, 6 tightly-coupled first-party services that already share one `docker-compose.yml` and one `.env` contract — there is no reuse case and no ownership boundary to protect.
-- A single chart with **templates organized into per-service subdirectories** under `templates/` (e.g. `templates/api/deployment.yaml`, `templates/api/service.yaml`, `templates/worker/deployment.yaml`, `templates/keda/scaledobject-image.yaml`, `templates/postgres/statefulset.yaml`, etc.) gets the organizational clarity of subcharts without the overhead of N separate `Chart.yaml`/`values.yaml` pairs, N sets of chart versioning, and Helm's subchart value-override indirection (`<subchart>.path.to.value`).
-- One flat `values.yaml` (with per-service top-level keys: `api:`, `worker:`, `documentWorker:`, `chromiumWorker:`, `webhookWorker:`, `postgres:`, `redis:`, `minio:`, `keda:`, `prometheus:`) maps directly onto the existing `.env.example` contract per service — easiest to keep in sync with the Go code's env-var reads.
-- Revisit subcharts only if a second, independently-deployed environment/product ever needs to reuse just the Postgres/Redis/MinIO piece.
+# 2. Transcribe: JSON output carries per-segment timestamps (needed for
+#    SEED-001's future lesson-parsing use case); -np keeps stdout clean since
+#    the worker doesn't need whisper-cli's live console progress.
+whisper-cli \
+  -m /models/ggml-base.bin \
+  -f /tmp/<job>/audio.wav \
+  -of /tmp/<job>/result \
+  -oj \
+  -l auto \
+  -np \
+  -t 2 \
+  -bs 1 -bo 1
+```
 
 ## Alternatives Considered
 
 | Recommended | Alternative | When to Use Alternative |
 |-------------|-------------|--------------------------|
-| Helm v4 (or v3.21.3 fallback) | Kustomize (already floated as a fallback option in SEED-004) | If the team later wants pure-overlay patching without a templating language, or a Helm CLI dependency is undesirable in CI. Not the starting choice here since both SEED-004 and PROJECT.md already frame Helm as the primary path for this milestone. |
-| KEDA Prometheus scaler on the existing `queue_depth` metric | KEDA Redis Lists scaler on asynq's internal `pending` list keys | Only as a secondary/debug signal, or if the Prometheus metric is ever found unreliable — but wiring it requires hardcoding the exact braced key format `asynq:{queue}:pending`, an internal implementation detail, not a documented asynq contract. |
-| Hand-rolled minimal StatefulSets for Postgres/Redis/MinIO | Official/community Helm charts (`bitnami/*`, `minio/minio`, any community `postgresql`/`redis` chart) | If this ever needs to become a real multi-environment/HA deployment rather than a local validation milestone — at that point, properly evaluate CloudNativePG (Postgres operator), a maintained Redis chart/operator, and MinIO Operator+Tenant on their merits at that time. |
-| Bare `prom/prometheus` Deployment + static scrape ConfigMap | `kube-prometheus-stack` / standalone Prometheus Operator | If dashboards (Grafana), alerting (Alertmanager), or `ServiceMonitor`-based auto-discovery across many future services become valuable — not needed for "KEDA needs one queryable URL" today. |
+| whisper.cpp `whisper-cli` (CLI, one-shot per job) | whisper.cpp's own `whisper-server` (persistent HTTP daemon, also in the same repo) | Never for this project's current shape — a persistent daemon breaks the "one hardened `runCommand` invocation per job, per-class container, killed by process-group SIGKILL on timeout" pattern that every other engine class uses. Would require a genuinely different worker architecture (HTTP client instead of `os/exec`). Reconsider only if per-job process-spawn overhead (model load time, several hundred ms–seconds for base/small) becomes the dominant cost at very high job throughput. |
+| whisper.cpp (C++, CPU) | `faster-whisper` (Python + CTranslate2, GPU/CPU) | Only if a GPU becomes available in the deployment target and higher-than-whisper.cpp throughput is required. Rejected here: pulls in a Python runtime + pip dependency tree, which is a new language/toolchain axis this Go-only, CLI-shell-out project has deliberately avoided for every other engine (libvips/LibreOffice/chromium are all apt-installed native binaries, not language runtimes). |
+| ggml `base`/`small` models, CPU-only | `large-v3-turbo` or GPU-accelerated inference | Only if transcription quality on accented/noisy/technical speech proves inadequate with base/small in practice — large models are 3-10x slower on CPU (see Realtime-Factor Sizing below) and OctoConv's current infra (OrbStack k8s, KEDA scale-from-zero CPU pods, `cpus: 2.0` per-worker ceiling in compose) has no GPU path. |
+| Bake exactly one default model (`base`) into the image | Support multiple selectable models per job via `preset`/opts | OctoConv already has a `preset`/`opts` mechanism (Phase 18/14) for per-job engine tuning — extending it to a `model=base|small` opt is a reasonable **later** step once the audio class ships, not a day-one requirement. Bundling every model size into one image (`tiny`+`base`+`small`+`medium` = ~2.1 GiB of model weights alone) blows the container-size budget for no proven need. |
+| `-bs 1 -bo 1` (greedy decoding) | whisper-cli's defaults (`-bs 5 -bo 5`, beam search) | Beam search with beam/best-of = 5 materially improves transcript quality at the cost of several times more compute per segment (well-documented whisper.cpp community tuning knob). Given this is a CPU-only, timeout-bounded, offline background job (not a live dictation UI), greedy decoding is the safer default to keep `AUDIO_ENGINE_TIMEOUT` predictable; raise `-bs`/`-bo` later as an opt-in preset if transcript quality demands it. |
+
+## What NOT to Use
+
+| Avoid | Why | Use Instead |
+|-------|-----|--------------|
+| `-DGGML_NATIVE=ON` (ggml's default when unset) | Compiles with `-march=native` for whatever CPU the *builder* happens to run on (CI runner, or an Apple Silicon OrbStack build host cross-building `linux/amd64`). Any runtime host lacking those exact instruction extensions gets a SIGILL crash — a well-documented, recurring whisper.cpp/llama.cpp Docker footgun. | `-DGGML_NATIVE=OFF` explicitly in the Dockerfile build stage (see Installation). Accept the modest perf cost of non-native tuning; do not chase `GGML_CPU_ALL_VARIANTS` (requires `GGML_BACKEND_DL`, adds real build complexity) unless a measured need appears. |
+| Downloading the ggml model at container **runtime** (e.g. `wget` in an entrypoint script, or bind-mounting from a shared volume fetched on first boot) | Violates the "воркеры остаются офлайн" milestone constraint and KEDA scale-from-zero: a freshly-scaled-up pod with no cached model would either fail closed or make an outbound network call on the hot path of every cold start. Also non-deterministic — HuggingFace's `main` branch pointer can move. | Bake the model into the image at **build** time with a pinned SHA-256 (see Installation). This matches the project's existing precedent (LibreOffice fonts/filters baked in, veraPDF app tree copied in at build time, chromium-headless-shell baked in — nothing engine-related is fetched at runtime anywhere in the current codebase). |
+| `WHISPER_COMMON_FFMPEG` cmake flag (whisper.cpp's own optional built-in FFmpeg decoding path, letting `whisper-cli` accept mp3/ogg/opus directly) | Couples the ffmpeg *library* linkage into the whisper.cpp build itself (extra `libavcodec`/`libavformat`/`libswresample`-dev build dependencies, a second surface for CVEs to land on inside the whisper binary) and — per the project's own hardened-exec pattern — every external format-parsing step should be its own bounded, killable `runCommand` invocation, not baked into a single monolithic binary. | System `ffmpeg` CLI (apt-installed) invoked as its own explicit preprocessing `runCommand` step before `whisper-cli` runs, exactly as the README's own documented workaround already recommends (`ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a pcm_s16le output.wav`). |
+| Go whisper.cpp CGo bindings (e.g. community `go-whisper`/`whisper.go` wrappers around `libwhisper.so`) | Introduces CGo into a codebase that is explicitly built `CGO_ENABLED=0` everywhere (`Dockerfile.api:7`, `Dockerfile.worker:7`, etc.) for static, minimal binaries; breaks that convention for one engine class only, and re-introduces exactly the kind of tight in-process coupling to an external native library that the whole `Converter`/CLI-shell-out architecture was designed to avoid. | Plain CLI shell-out via the existing `internal/convert/exec.go` `runCommand` helper — zero new build modes, consistent with every other engine. |
+| `models/download-ggml-model.sh` run unmodified inside the Dockerfile | No checksum verification exists in the script (confirmed by reading it live) — it just curls the file and trusts it. | Curl the same URL directly and pin a SHA-256 (see Installation) — five extra lines, closes the gap. |
+| Bundling `medium`/`large*` models by default | 1.5-2.9 GiB per model file alone; on CPU-only 2-core containers these are 5-10x slower than base/small (see sizing below) and blow both the container-size and `ENGINE_TIMEOUT` budgets for marginal accuracy gain on typical internal-service audio (meeting recordings, lecture audio — not adversarial/noisy). | `base` as the shipped default; `small` as an optional build-arg/preset variant if quality complaints arise. |
+
+## Stack Patterns by Variant
+
+**If the job payload is short, clear-audio internal recordings (meetings, lectures) — the expected common case:**
+- Use the `base` model (142 MiB, ~388 MB RAM) as the default.
+- Because it is the smallest model with acceptable general-purpose accuracy, keeps the container image and RAM footprint small, and (per the sizing evidence below) comfortably beats real-time on 2 modern CPU cores.
+
+**If transcript quality complaints emerge for accented/technical/noisy audio:**
+- Offer `small` (466 MiB, ~852 MB RAM) as an explicit opt-in (preset or build variant), not the default.
+- Because `small` is meaningfully slower — budget roughly 2-3x more wall-clock time per job than `base` on the same core count — and the container/`ENGINE_TIMEOUT` math must account for that before it's the default.
+
+**If English-only audio is a hard guarantee for a given client population:**
+- Use the `.en`-suffixed model variant (`ggml-base.en.bin`, `ggml-small.en.bin`) instead of the multilingual model.
+- Because English-only models are measurably more accurate on English audio at the same size — this is documented, uncontroversial whisper.cpp guidance, not a novel claim — and `-l auto`/language auto-detection can be dropped entirely, removing one source of transcription-time variance.
+
+**If future language-detection/multi-language support is required (not currently in scope):**
+- Keep the multilingual model and pass `-l auto`.
+- Because switching between `.en` and multilingual models later is a model-file swap only, not a code change — no need to design for it prematurely.
 
 ## Version Compatibility
 
 | Package A | Compatible With | Notes |
 |-----------|------------------|-------|
-| KEDA v2.20.1 (Helm chart `kubeVersion: >=v1.23.0-0`) | OrbStack Kubernetes (observed progression 1.29→1.31→1.33 across recent releases) | Comfortably satisfied at any of these observed versions, all well above KEDA's floor. MEDIUM confidence on the *exact current* OrbStack k8s version (no single indexed canonical "current version" page found; inferred from release-notes/GitHub-issue history) — verify with `kubectl version` at execution time. |
-| `modelcontextprotocol/go-sdk` v1.6.1 | Go 1.26 (project's pinned toolchain) | No changes needed — v1.6.1 already satisfies the streamable-HTTP requirement without a version bump. |
-| `minio/minio:latest` (current compose pin) | OrbStack's "no registry needed" image visibility | Needs to be **repinned to a dated release tag** before the k8s port, both for supply-chain pinning hygiene (already the norm elsewhere in this repo) and to avoid OrbStack's documented default re-pull-on-`:latest` behavior undermining the "no registry" convenience during local iteration. |
+| `whisper.cpp v1.9.1` | `debian:bookworm-slim` (glibc), built from source with `-DGGML_NATIVE=OFF` | No official Debian/apt package exists for whisper.cpp — it must be built from source in the Dockerfile's build stage, mirroring how the project already builds Go binaries from source rather than relying on distro packages for anything project-specific. |
+| ggml model files (`ggml-*.bin`) | Any whisper.cpp version from roughly v1.5+ | The ggml model format has been stable across recent whisper.cpp releases; no version-lockstep concern like there is between e.g. veraPDF's CLI jar and its own musl-linked JRE (documented gotcha elsewhere in this repo's `Dockerfile.document-worker`). Still, re-verify the model loads cleanly against the exact pinned v1.9.1 binary before shipping — don't assume forward/backward compatibility with an untested tag. |
+| `ffmpeg 7:5.1.9-0+deb12u1` (bookworm apt) | Any whisper.cpp version (ffmpeg is an external preprocessing step, not linked into whisper.cpp at all in this design) | No coupling — this is the entire point of keeping ffmpeg as a separate `runCommand` step rather than a compiled-in whisper.cpp feature. |
+| `linux/amd64` and `linux/arm64` | Both supported: whisper.cpp's own official `ghcr.io/ggml-org/whisper.cpp:main` image publishes both platforms; OrbStack's k8s runs natively on Apple Silicon (arm64) | Building the audio-worker image via a from-source multi-stage build (as recommended, not the official prebuilt image — see below) means `GGML_NATIVE=OFF` must be set identically regardless of which arch is building/running, so this compatibility is self-managed rather than inherited from an upstream image. If CI (GitHub Actions, currently x86_64 runners per existing 4-level CI pipeline) builds the amd64 image and OrbStack separately builds/runs arm64 locally, both paths hit the same Dockerfile with no platform-specific branching needed. |
+
+## Docker Packaging: Build-from-Source vs. Prebuilt Image
+
+**Recommendation: build from source in a multi-stage Dockerfile, do not use `ghcr.io/ggml-org/whisper.cpp:main`.**
+
+- The official image bundles `curl` and `ffmpeg` already and supports both `linux/amd64`/`linux/arm64` — it is a legitimate option and worth knowing about.
+- But it does not follow this project's established "build-essential toolchain in a throwaway build stage → copy only the compiled artifact into a slim runtime stage, with an explicit pinned `USER nobody`" pattern used by `Dockerfile.worker`/`Dockerfile.document-worker`/`Dockerfile.chromium-worker` — the official image's entrypoint (`ENTRYPOINT ["bash", "-c"]` on their own `main.Dockerfile`) is designed for ad-hoc interactive use, not as a base for a Go binary + hardened-exec worker.
+- Building from source also lets the project pin `-DGGML_NATIVE=OFF` explicitly (the official image's own build flags for this are not something this research could verify are portability-safe across arbitrary runtime hosts) and control exactly which model gets baked in with a verified SHA-256, rather than trusting an upstream multi-purpose image's model-fetch conventions.
+
+## Realtime-Factor Sizing (affects `AUDIO_ENGINE_TIMEOUT` / KEDA cooldown)
+
+**Confidence: MEDIUM — no first-party whisper.cpp benchmark exists on hardware directly comparable to a 2-core OrbStack/cloud container; the numbers below are triangulated from multiple third-party sources and should be treated as planning inputs to validate empirically during phase execution (matching this project's own precedent of a measured go/no-go gate for veraPDF's JVM startup cost in Phase 23), not as ship-blocking guarantees.**
+
+Realtime factor (RTF) defined here as `processing_time / audio_duration` — lower is faster; RTF < 1.0 means faster than real time.
+
+| Data point | Model | Hardware | RTF (this def.) | Source confidence |
+|---|---|---|---|---|
+| Community discussion benchmark | base, q4_0 quantized | Intel Core i5-460M (2010, 2c/4t, no AVX) | ~1.17 (slower than real time) | LOW — legacy/atypical hardware, but useful as a worst-case floor |
+| Community discussion benchmark | small, q4_0 quantized | same legacy CPU | ~3.6 | LOW |
+| Third-party blog benchmark | small, CPU-only | Apple M2 (arm64, NEON) | ~0.35 | MEDIUM |
+| General community guidance | small | "modern CPU" | ~0.17 (cited as "6x real-time") | LOW-MEDIUM, unspecified core count |
+
+**Working assumption for planning** (base model, greedy decoding `-bs 1 -bo 1`, 2 CPU cores, matching the project's existing `cpus: "2.0"` per-worker ceiling): expect RTF in the **0.2-0.5** range on modern arm64 (OrbStack/Apple Silicon) hardware, and plan for it to be **worse** (potentially approaching or exceeding 1.0) on generic x86_64 CI/cloud cores without AVX2, especially if beam search defaults are left on. `small` should be budgeted at roughly 2-3x `base`'s wall-clock time on the same core count.
+
+**Practical implication:** `AUDIO_ENGINE_TIMEOUT` cannot be a single-digit-minute constant like `HTML_ENGINE_TIMEOUT=60s` or even `DOCUMENT_ENGINE_TIMEOUT=300s` — it must account for realistic audio *duration*, not just engine complexity, because `MAX_UPLOAD_BYTES` (currently 100 MiB, shared across all engine classes) could admit an hour-plus recording at typical lossy-compressed bitrates. Recommend the roadmap treat the audio-duration-vs-timeout relationship as its own explicit design question (e.g. a duration cap probed via `ffprobe` before enqueueing, separate from the byte-size cap) rather than assuming a fixed timeout constant covers all inputs — this is a sizing/architecture decision for a later phase, not resolved by this stack research.
+
+## Container Size Budget
+
+**Confidence: LOW-MEDIUM — estimated additively from verified component sizes, not measured against an actually-built image; recommend measuring the real built image size during phase execution and treating this as a planning estimate only.**
+
+| Component | Estimated size | Basis |
+|---|---|---|
+| `debian:bookworm-slim` base | ~80 MB | Same base every other worker image already uses |
+| `ffmpeg` + its apt dependency chain (`--no-install-recommends`) | ~150-200 MB | ffmpeg's shared-library dependency tree (libavcodec/libavformat/etc.) is substantial even with recommends trimmed; not independently measured here |
+| `whisper-cli` binary + `libwhisper`/`libggml` shared libs | ~10-30 MB | Small C/C++ binary, no heavyweight dependency tree unlike LibreOffice/chromium |
+| `ggml-base.bin` (default, baked in) | 141 MiB (verified via live HEAD request, 147,951,465 bytes) | This is the dominant image-size line item if `small` is also bundled |
+| **Estimated total (base model only)** | **~400-450 MB** | Comparable to or smaller than `Dockerfile.document-worker`'s LibreOffice-suite footprint; well under `Dockerfile.chromium-worker`'s likely size |
+| If `small` model is bundled instead of/alongside `base` | +466 MiB (verified, 487,601,967 bytes) | Pushes total toward ~850 MB-1 GB if both are baked in — reinforces the "ship one default model" recommendation above |
 
 ## Sources
 
-- https://github.com/kedacore/keda/releases (GitHub Releases API, live-fetched: `v2.20.1`, published 2026-06-08) — HIGH
-- https://kedacore.github.io/charts/index.yaml (live-fetched Helm repo index: `keda` chart v2.20.1 / appVersion 2.20.1) — HIGH
-- https://keda.sh/docs/2.20/scalers/prometheus/ (live-fetched: full field list for the Prometheus scaler trigger) — HIGH
-- https://keda.sh/docs/2.20/reference/scaledobject-spec/ (live-fetched: `pollingInterval`/`cooldownPeriod`/`minReplicaCount`/`maxReplicaCount` defaults and activation vs. scaling phase behavior) — HIGH
-- https://keda.sh/docs/2.20/scalers/redis-lists/ (live-searched: `listName`/`listLength`/`activationListLength` shape) — HIGH
-- https://github.com/hibiken/asynq (source: `internal/base/base.go`, `internal/rdb/rdb.go`, live-fetched — confirmed `PendingKey` is a Redis LIST populated via `LPUSH` and drained via `RPOPLPUSH`, key format `asynq:{qname}:pending`) — HIGH
-- https://github.com/helm/helm/releases (live-fetched: Helm v3.21.3 / v4.2.3, both released 2026-07-09; v4 GA, v3 explicitly noted as approaching EOL) — HIGH
-- https://docs.orbstack.dev/kubernetes/ (live-fetched: shared image store / no-registry-needed behavior, `:latest` re-pull caveat, wildcard `*.k8s.orb.local` LoadBalancer routing, no built-in ingress controller by default) — HIGH
-- OrbStack FAQ / release notes / GitHub issues (WebSearch, not one single fetched canonical page — kubectl context name `orbstack`, k8s version progression 1.29→1.33) — MEDIUM
-- https://github.com/bitnami/charts/issues/35164 + Broadcom migration guidance + corroborating secondary sources (Chainguard, Minimus, Chkk) (WebSearch, multiple independent sources agreeing) — HIGH
-- https://github.com/minio/operator (releases/discussions), https://artifacthub.io (minio/minio-operator listings) (WebSearch — MinIO has no single current-state doc; synthesized from several live-searched sources) — MEDIUM
-- https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk@v1.6.1/mcp (live-fetched for the exact pinned version: `NewStreamableHTTPHandler`, `StreamableHTTPOptions`; confirms `RequireBearerToken` absent at this version) — HIGH
-- General Helm umbrella-vs-single-chart guidance (WebSearch, multiple blog sources, no single canonical spec — treated as informed opinion, not settled fact) — MEDIUM
+- `https://github.com/ggml-org/whisper.cpp/releases` and `https://api.github.com/repos/ggml-org/whisper.cpp/releases` — HIGH confidence, live-verified 2026-07-17: current tag `v1.9.1`, published `2026-06-19T05:53:19Z`
+- `https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/examples/cli/README.md` — HIGH confidence, live-fetched full `whisper-cli -h` output at the exact pinned tag (flags, output formats, model path default)
+- `https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/README.md` — HIGH confidence, live-fetched: 16-bit-WAV requirement, exact `ffmpeg -ar 16000 -ac 1 -c:a pcm_s16le` conversion command, `WHISPER_COMMON_FFMPEG` opt-in flag, official Docker image list/platforms
+- `https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/models/download-ggml-model.sh` — HIGH confidence, live-fetched: confirms ggml (not GGUF) format, HuggingFace as canonical source, no built-in checksum verification
+- `https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/.devops/main.Dockerfile` and `ggml/CMakeLists.txt` — HIGH confidence, live-fetched: official Docker approach, `GGML_NATIVE`/`GGML_CPU_ALL_VARIANTS` cmake options
+- `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{tiny,base,small,medium}.bin` — HIGH confidence, live HEAD/GET requests 2026-07-17 confirming exact byte sizes and SHA-256 for `base`/`small`
+- `debian:bookworm-slim` live `apt-cache policy ffmpeg` — HIGH confidence, run live 2026-07-17: `ffmpeg 7:5.1.9-0+deb12u1`
+- `https://github.com/ggml-org/llama.cpp/discussions/10230` and related llama.cpp/ggml issues on `GGML_NATIVE`/`-march=native` Docker illegal-instruction failures — MEDIUM confidence (community discussion, but consistent across multiple independent issue reports and matches ggml's own CMakeLists documentation of the flag's behavior)
+- `https://github.com/ggml-org/whisper.cpp/discussions/3752` (legacy-hardware benchmark) and third-party benchmark blogs (Apple Silicon M1-M4 whisper.cpp benchmarks, general "6x real-time" community claims) — LOW-MEDIUM confidence, used only as directional RTF triangulation, explicitly flagged for empirical validation during phase execution
+- This repository's own `Dockerfile.worker`, `Dockerfile.document-worker`, `Dockerfile.chromium-worker`, `internal/convert/exec.go`, `.env.example` — HIGH confidence, direct inspection of the existing, validated per-engine-class conventions this new engine class must follow
 
 ---
-*Stack research for: Kubernetes + KEDA milestone (v1.6), OctoConv*
-*Researched: 2026-07-14*
+*Stack research for: OctoConv v1.7 audio-transcription engine class (whisper.cpp)*
+*Researched: 2026-07-17*
