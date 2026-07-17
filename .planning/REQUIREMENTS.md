@@ -17,7 +17,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 
 - [x] **KEDA-01**: `octoconv_queue_depth` экспонируется always-on api-процессом (перенос/дублирование asynq.Inspector-коллектора из воркеров — жёсткая предпосылка scale-from-zero; при 0 реплик воркера метрика обязана жить)
 - [x] **KEDA-02**: KEDA (helm-установка, актуальная v2.20.x) + ScaledObjects по prometheus-скейлеру для image/document/html воркеров (minReplicaCount 0); webhook-worker исключён из KEDA полностью — фиксированные 2 реплики (единственный хост advisory-lock sweeper'а)
-- [ ] **KEDA-03**: Live load-proof: залповая заливка очереди через API → наблюдаемый скейл 0→N→0 с таймстампами (0→N leg проверяется отдельно); scale-down soak — длинная document-конвертация в полёте переживает даунскейл gracefully (asynq graceful shutdown, не SIGKILL mid-job)
+- [x] **KEDA-03**: Live load-proof: залповая заливка очереди через API → наблюдаемый скейл 0→N→0 с таймстампами (0→N leg проверяется отдельно); scale-down soak — длинная document-конвертация в полёте переживает даунскейл gracefully (asynq graceful shutdown, не SIGKILL mid-job)
 
 ### MCP HTTP
 
@@ -57,7 +57,7 @@ Requirements for this milestone. Each maps to roadmap phases.
 | K8S-03 | Phase 24 | Complete |
 | KEDA-01 | Phase 27 | Complete |
 | KEDA-02 | Phase 27 | Complete |
-| KEDA-03 | Phase 28 | Pending |
+| KEDA-03 | Phase 28 | Complete |
 | MCPH-01 | Phase 25 | Complete |
 | MCPH-02 | Phase 25 | Complete |
 | OPER-01 | Phase 26 | Complete |

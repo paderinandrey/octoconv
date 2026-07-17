@@ -218,7 +218,7 @@ Full details: `.planning/milestones/v1.5-ROADMAP.md`
 | 25. MCP Streamable HTTP | v1.6 | 0/? | Not started | - |
 | 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 3/3 | Complete    | 2026-07-16 |
-| 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete   | 2026-07-17 |
+| 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 
 ---
 
