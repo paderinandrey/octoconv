@@ -160,7 +160,10 @@ teardown() {
 		wait "$SAMPLER_PID" 2>/dev/null || true
 	fi
 	if [ -n "$SNAPSHOT_PID" ]; then
-		kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+		# WR-04: kill the whole process group (own group via `set -m` at the
+		# snapshotLoop launch site) so a reparented `kubectl -w` pipeline
+		# cannot survive this EXIT trap.
+		kill -- -"$SNAPSHOT_PID" >/dev/null 2>&1 || true
 		wait "$SNAPSHOT_PID" 2>/dev/null || true
 	fi
 	if [ -n "$BUSY_POD" ]; then
@@ -404,7 +407,7 @@ if [ "$CALIBRATE" = "1" ]; then
 	log "CALIBRATION MODE (D-07): single heavy-docx trial run, page-units=$PAGE_UNITS"
 
 	HEAVY_DOCX="/tmp/heavy-${RUN_TS}.docx"
-	uv run --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
+	uv run --python 3.12 --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
 		--page-units "$PAGE_UNITS" --out "$HEAVY_DOCX"
 
 	CAL_JOB_ID=$(postJobPath "$HEAVY_DOCX" "pdf" "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -619,7 +622,7 @@ if [ -n "$SAMPLER_PID" ]; then
 	SAMPLER_PID=""
 fi
 
-uv run --with matplotlib python3 scripts/fixtures/render_evidence.py \
+uv run --python 3.12 --with matplotlib python3 scripts/fixtures/render_evidence.py \
 	--csv "$CSV_FILE" \
 	--png "$EVIDENCE_DIR/sc1-sc2-burst-${RUN_TS}.png" \
 	--title "Phase 28 SC1/SC2: image-class burst 0->N->0"
@@ -654,7 +657,7 @@ assert_eq "0" "$DOC_REPLICAS_BEFORE" "document-worker Deployment status.replicas
 # Generate the calibrated heavy docx (D-07) into scratch space -- never
 # committed, generated at gate-run time.
 LONG_DOCX="/tmp/heavy-sc3-${RUN_TS}.docx"
-uv run --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
+uv run --python 3.12 --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
 	--page-units "$PAGE_UNITS" --out "$LONG_DOCX"
 
 # Submit the LONG job FIRST.
@@ -693,16 +696,26 @@ PASS_COUNT=$((PASS_COUNT + 1))
 echo "PASS: SC3 -- document-worker scaled ${DOC_REPLICAS_1}->${DOC_REPLICAS_2} after short job $SHORT_JOB_ID"
 
 # Identify pod1 = the document-worker pod with the EARLIEST
-# creationTimestamp -- this is the pod that has been running since the long
-# job's submission, i.e. the busy pod (DOCUMENT_WORKER_CONCURRENCY=1
-# guarantees it never picked up the short job).
+# creationTimestamp AMONG Running, non-Terminating pods -- this is the pod
+# that has been running since the long job's submission, i.e. the busy pod
+# (DOCUMENT_WORKER_CONCURRENCY=1 guarantees it never picked up the short
+# job). WR-02 (28-REVIEW): the WR-02 fresh-install document-worker pod is
+# scaled 1->0 before SC3 with terminationGracePeriodSeconds=330, so a
+# Terminating remnant of that old pod can still exist with an EARLIER
+# creationTimestamp than the genuinely busy pod -- filtering to
+# status.phase=Running AND an empty deletionTimestamp excludes it so the
+# pod-deletion-cost annotation always lands on the live long-job pod.
 BUSY_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=document-worker" \
-	--sort-by=.metadata.creationTimestamp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+	--field-selector=status.phase=Running \
+	--sort-by=.metadata.creationTimestamp \
+	-o jsonpath='{.items[?(@.metadata.deletionTimestamp=="")].metadata.name}' 2>/dev/null | awk '{print $1}')
 if [ -z "$BUSY_POD" ]; then
 	BUSY_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=document-worker" \
-		--sort-by=.metadata.creationTimestamp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+		--field-selector=status.phase=Running \
+		--sort-by=.metadata.creationTimestamp \
+		-o jsonpath='{.items[?(@.metadata.deletionTimestamp=="")].metadata.name}' 2>/dev/null | awk '{print $1}')
 fi
-assert_nonempty "$BUSY_POD" "SC3: pod1 (busy pod, earliest creationTimestamp) identified"
+assert_nonempty "$BUSY_POD" "SC3: pod1 (busy pod, earliest creationTimestamp among Running/non-Terminating) identified"
 
 # Annotate pod1 IMMEDIATELY -- must land BEFORE the short job completes /
 # before the ReplicaSet controller's 2->1 deletion decision. This is a
@@ -747,9 +760,14 @@ snapshotLoop() {
 		sleep 1
 	done
 }
-snapshotLoop &
+# WR-04 (28-REVIEW): run the watcher subshell in its OWN process group
+# (`set -m` job control inside the subshell) so its `kubectl get pod -w |
+# while read` pipeline -- which reparents on a bare `kill $SNAPSHOT_PID` --
+# can be killed as a whole group (`kill -- -PID`) instead of leaking an
+# orphaned kubectl watch that outlives the entire gate.
+( set -m; snapshotLoop ) &
 SNAPSHOT_PID=$!
-echo "pod1 snapshot loop started (pid=$SNAPSHOT_PID), polling every ~3s through the SC3 window"
+echo "pod1 snapshot loop started (pid=$SNAPSHOT_PID, own process group), polling every ~3s through the SC3 window"
 
 echo "waiting for short job $SHORT_JOB_ID to reach a terminal status..."
 short_status=""
@@ -833,15 +851,21 @@ kubectl port-forward -n "$NAMESPACE" svc/minio "${MINIO_LOCAL_PORT}:9000" >/tmp/
 MINIO_PF_PID=$!
 sleep 3
 
-RESULT_BYTES=$(curl -s --connect-to "${RESULT_HOST}:${RESULT_PORT}:127.0.0.1:${MINIO_LOCAL_PORT}" -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
+# WR-03 (28-REVIEW): capture the HTTP status ALONGSIDE the byte count -- a
+# MinIO 403 AccessDenied / 404 NoSuchKey XML error body is a few hundred
+# bytes, so size_download alone would read as a false PASS. Gate on BOTH
+# RESULT_CODE==200 AND RESULT_BYTES>0.
+RESULT_META=$(curl -s --connect-to "${RESULT_HOST}:${RESULT_PORT}:127.0.0.1:${MINIO_LOCAL_PORT}" -o /tmp/keda-loadproof-long-result.bin -w '%{http_code} %{size_download}' "$RESULT_URL")
 kill "$MINIO_PF_PID" >/dev/null 2>&1 || true
 MINIO_PF_PID=""
-if [ "${RESULT_BYTES:-0}" -le 0 ]; then
-	echo "FAIL: D-09(1) -- long job result URL returned 0 bytes" >&2
+RESULT_CODE=${RESULT_META%% *}
+RESULT_BYTES=${RESULT_META##* }
+if [ "$RESULT_CODE" != "200" ] || [ "${RESULT_BYTES:-0}" -le 0 ]; then
+	echo "FAIL: D-09(1) -- long job result download returned HTTP $RESULT_CODE / $RESULT_BYTES bytes (expected 200 and >0 bytes)" >&2
 	exit 1
 fi
 PASS_COUNT=$((PASS_COUNT + 1))
-echo "PASS: D-09(1) -- long job result downloads ($RESULT_BYTES bytes)"
+echo "PASS: D-09(1) -- long job result downloads (HTTP $RESULT_CODE, $RESULT_BYTES bytes)"
 
 # (2) exactly one queued->active transition (no false retry).
 QUEUED_TO_ACTIVE_COUNT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
@@ -882,7 +906,11 @@ while [ "$waited" -lt 90 ]; do
 	waited=$((waited + 3))
 done
 echo "termination capture: ${term_captured:-none-yet} (watcher lines: $(grep -c 'read_ts=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null || echo 0))"
-kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+# WR-04: kill the whole process GROUP ($SNAPSHOT_PID is also its group
+# leader thanks to `set -m` above) -- a plain `kill $SNAPSHOT_PID` only
+# signals the subshell, leaving the reparented `kubectl -w | while read`
+# pipeline running and still appending to $SC3_TIMESTAMPS_FILE.
+kill -- -"$SNAPSHOT_PID" >/dev/null 2>&1 || true
 wait "$SNAPSHOT_PID" 2>/dev/null || true
 SNAPSHOT_PID=""
 
