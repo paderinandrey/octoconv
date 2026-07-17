@@ -76,6 +76,20 @@ assert_nonempty() {
 	echo "PASS: $label == $value"
 }
 
+# assert_nonempty_redacted -- same non-empty check as assert_nonempty, but
+# NEVER echoes the raw value into the (committed) gate transcript. A
+# presigned result URL may embed a short-lived signature/token that must
+# never be printed verbatim (same T-28-04 pattern as keda-load-proof.sh).
+assert_nonempty_redacted() {
+	local value="$1" label="$2"
+	if [ -z "$value" ]; then
+		echo "FAIL: $label -- expected a non-empty value, got empty" >&2
+		exit 1
+	fi
+	PASS_COUNT=$((PASS_COUNT + 1))
+	echo "PASS: $label == [REDACTED, ${#value} chars]"
+}
+
 log() { echo ""; echo "--- $* ---"; }
 
 # ---------------------------------------------------------------------------
@@ -424,6 +438,75 @@ for i in $(seq 1 60); do
 	sleep 2
 done
 assert_eq "done" "$job_status" "image job $IMAGE_JOB_ID reaches done"
+
+# ---------------------------------------------------------------------------
+# STEP 9b (HARD-04/D-07): presigned direct-dial recheck. Reuses the image
+# class job (IMAGE_JOB_ID) that just reached done above -- extracts its
+# download_url and fetches it via a DIRECT curl from the OrbStack host, with
+# NO NEW kubectl port-forward and NO curl connect-to (curl option) rewrite (unlike
+# scripts/keda-load-proof.sh's D-09(1) check, which is FORCED into that
+# workaround because the in-cluster S3 endpoint is not otherwise
+# host-resolvable). Proving the URL resolves directly, from a
+# health-checked daemon, closes the 24-VERIFICATION degraded-transport
+# caveat (K8S-02).
+#
+# A wedged OrbStack daemon must FAIL LOUD here, distinguishable from a
+# genuinely broken presign -- never masked by silently falling back to a
+# port-forward workaround.
+# ---------------------------------------------------------------------------
+log "STEP 9b: HARD-04/D-07 -- presigned direct-dial from OrbStack host (no port-forward, no connect-to (curl option))"
+
+# (0) OrbStack-discipline pre-flight (defense-in-depth, reinforcing the
+# existing STEP-1 COMPOSE_UP guard): compose and k8s must never be hot
+# simultaneously. NB: this gate's own api port-forward binds LOCAL host
+# port 18090 (API_LOCAL_PORT), NOT :8090 -- there is no literal port
+# collision; this check is about OrbStack daemon/resource contention, not
+# a port clash.
+COMPOSE_UP_PRESIGN=$(docker compose ps --format '{{.Names}}' 2>/dev/null | grep -c '^octoconv-' || true)
+if [ "${COMPOSE_UP_PRESIGN:-0}" -gt 0 ]; then
+	echo "FAIL: compose stack appears to be UP ($COMPOSE_UP_PRESIGN octoconv-* containers running) near the presigned direct-dial step -- compose and k8s stacks must NEVER be hot simultaneously (D-13). Run 'docker compose ... down -v' first." >&2
+	exit 1
+fi
+echo "PASS: compose stack still down (0 octoconv-* containers) -- OrbStack discipline reinforced near direct-dial"
+
+# (1) OrbStack daemon health pre-flight -- loud-fail if wedged rather than
+# masking it with a workaround. This is what distinguishes "daemon wedged
+# (investigate: orb stop k8s && orb start k8s)" from "presign genuinely
+# broken (real failure)" below.
+if ! docker info >/dev/null 2>&1; then
+	echo "FAIL: OrbStack docker daemon is not responding (docker info failed) -- the daemon may be wedged. Try 'orb stop k8s && orb start k8s' and re-run; do NOT work around this with a port-forward." >&2
+	exit 1
+fi
+if ! kubectl get nodes >/dev/null 2>&1; then
+	echo "FAIL: kubectl cannot reach the OrbStack cluster immediately before the direct-dial step -- the daemon may be wedged. Try 'orb stop k8s && orb start k8s' and re-run." >&2
+	exit 1
+fi
+echo "PASS: OrbStack daemon healthy (docker info + kubectl get nodes both succeeded) immediately before direct-dial"
+
+# (2) Extract the download_url from the image job that already reached
+# done above (job body cached in /tmp/keda-gate-image-job.json).
+PRESIGNED_URL=$(grep -o '"download_url":"[^"]*"' /tmp/keda-gate-image-job.json | head -1 | cut -d'"' -f4 || true)
+assert_nonempty_redacted "$PRESIGNED_URL" "HARD-04: image job $IMAGE_JOB_ID download_url present (may embed a short-lived presigned signature -- never printed verbatim)"
+
+# (3) Direct dial: a bare curl against the presigned FQDN URL, with NO
+# connect-to (curl option) and NO new kubectl port-forward -- OrbStack's native
+# cluster-service routing from the host is the thing being proven here.
+# Bounded retry (curl --retry) absorbs a transient DNS/routing blip without
+# masking a genuine failure.
+PRESIGN_META=$(curl -s -o /tmp/keda-gate-presigned-result.bin -w '%{http_code} %{size_download}' \
+	--max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
+	"$PRESIGNED_URL")
+PRESIGN_CODE=${PRESIGN_META%% *}
+PRESIGN_BYTES=${PRESIGN_META##* }
+if [ "$PRESIGN_CODE" != "200" ] || [ "${PRESIGN_BYTES:-0}" -le 0 ]; then
+	echo "FAIL: HARD-04/D-07 -- direct-dial presigned URL fetch returned HTTP $PRESIGN_CODE / $PRESIGN_BYTES bytes (expected 200 and >0 bytes). The daemon pre-flight above passed, so this is a genuine presign/reachability failure, not a wedged daemon." >&2
+	exit 1
+fi
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: HARD-04/D-07 -- presigned result resolved via DIRECT host dial (no port-forward, no connect-to (curl option)): HTTP $PRESIGN_CODE, $PRESIGN_BYTES bytes"
+
+# (4) No new background/port-forward PID to register in teardown() -- the
+# entire point of D-07 is that this step adds NEITHER.
 
 IMAGE_REPLICAS_FINAL=$(waitForReplicasAtMost worker 0 180) || {
 	echo "FAIL: SC2/D-12c -- worker (image) never returned to 0 replicas within 180s after cooldownPeriod (observed: $IMAGE_REPLICAS_FINAL)" >&2
