@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.7
 milestone_name: Audio Engine & Hardening
-status: planning
+status: roadmapped
 last_updated: "2026-07-17T17:04:49.402Z"
 last_activity: 2026-07-17
 progress:
-  total_phases: 0
+  total_phases: 5
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,23 +17,23 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
+See: .planning/PROJECT.md (updated 2026-07-17 after v1.7 milestone start)
 
-**Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Milestone complete
+**Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио) и получить результат — без риска для стабильности или безопасности продакшена.
+**Current focus:** Phase 29 — v1.6 Hardening Tail (roadmap created, ready to plan)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 29 — v1.6 Hardening Tail (Not started)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-17 — Milestone v1.7 started
+Status: Roadmap created (Phases 29-33), ready for `/gsd:plan-phase 29`
+Last activity: 2026-07-17 — v1.7 roadmap created, 12/12 requirements mapped
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 66 (all v1.0–v1.5)
+- Total plans completed: 66 (all v1.0–v1.6)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -79,13 +79,14 @@ Last activity: 2026-07-17 — Milestone v1.7 started
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table. v1.6-specific decisions surfaced by research, to be recorded as Key Decisions before/at implementation:
+Decisions are logged in PROJECT.md Key Decisions table. v1.7-specific decisions surfaced by research, to be recorded as Key Decisions before/at implementation:
 
-- Phase 24 (Helm Chart Core): flat single chart (no subcharts, no Bitnami/MinIO-Operator deps) — hand-roll Postgres/Redis/MinIO as plain Deployment+PVC+Service matching the compose file's non-HA shape. `METRICS_ADDR=0.0.0.0` bind change and its compensating NetworkPolicy must ship together, never as a follow-up. `S3_ENDPOINT` uses the FQDN `<service>.<namespace>.svc.cluster.local` form. Per-engine-class `terminationGracePeriodSeconds` derived from real worst-case timeouts (image ≥120s, document ≥300s, html ≥60s), never the 30s default.
-- Phase 25 (MCP HTTP): per-request caller-key pass-through auth (Decision 2, resolved — not a single pod-held key). Open Key Decision to fix at planning: `local_path` contract gap for remote callers — three options (omit in HTTP mode / presigned-only / download-proxy tool), no default recommended. Live-verify go-sdk v1.6.1 `Stateless: true` + progress-notification streaming (LOW confidence).
-- Phase 26 (Operator presets REST): `OPERATOR_CLIENT_IDS` env allowlist + 404-no-leak (Decision 1, resolved — not an `is_operator` column + 403). Document `is_operator` column as future option (K8SV2-03).
-- Phase 27 (KEDA): Prometheus scaler against relocated `octoconv_queue_depth` (never asynq's internal Redis list keys). Queue-depth exposition relocation (KEDA-01) is the phase's first plan and a hard prerequisite for any ScaledObject. webhook-worker excluded from KEDA entirely — fixed `replicas: 2` (sole host of the advisory-lock sweeper). Per-class `pollingInterval`/`cooldownPeriod` tuning needs execution-time research (demo defaults are starting points only).
-- Phase 28 (Load-Proof): timestamped 0→N→0 evidence is a hard deliverable; the 0→N leg must be proven with the worker at genuine 0 replicas (easy to fake otherwise). Scale-down soak with a long document job in flight validates Phase 24's grace-period choice.
+- **Key Decision 1 — Stage-aware timeout classification (Phase 31, MUST resolve before `isAudioTerminal` is written):** ffmpeg-stage failure/timeout → terminal (malformed/adversarial input signal, same rationale as the image dimension-bomb guard); whisper-stage timeout on audio that already passed the ffprobe duration/format check → transient (mirror the image engine's classifier, no `context.DeadlineExceeded` terminal arm), bounded by `AUDIO_MAX_RETRY`. FEATURES.md/ARCHITECTURE.md recommended blanket-terminal (document precedent); PITFALLS.md's stage-aware split adopted as strictly-more-correct without added complexity. Do NOT copy-paste from a sibling class.
+- **Key Decision 2 — Model choice base vs small (Phase 32):** ship `base` (142 MiB) as the default with `small` as a later values/preset opt-in; keep the choice reversible (build-arg/preset variant), do not lock permanently in the Dockerfile with no revisit trigger. Bundling both by default is rejected (pushes image toward ~1GB, hurts Key Decision 3).
+- **Key Decision 3 — Model distribution bake-in vs volume (Phase 33):** bake-in is simplest and matches the offline constraint, but risks silently defeating the scale-from-zero SLA Phases 27/28 proved. Require a Phase-28-style timestamped load-proof for the audio class specifically (image-pull vs scale-from-zero measured) before calling KEDA integration done; treat bake-vs-volume as reversible based on that measurement.
+- **AudioUniqueTTL (Phase 31):** derive fresh from the real `AUDIO_ENGINE_TIMEOUT`/`AUDIO_MAX_RETRY` (never reuse image/document TTL) — the T-03-10 double-processing race is worst for the most expensive class; ship `TestAudioUniqueTTL` mirroring the three existing monotonicity/lower-bound tests.
+- **whisper.cpp threads/concurrency (Phase 32):** pass explicit `--threads` sized to the container's cgroup CPU limit (not host core count); size `AUDIO_WORKER_CONCURRENCY` from measured per-job RSS (likely 1). `-DGGML_NATIVE=OFF` is load-bearing (default `-march=native` SIGILLs on non-build-host CPUs).
+- **Accepted residual risk — hallucination on silence/music (Phase 30):** whisper exits 0 with structurally-valid garbage; no terminal-signature classifier catches it. Document as accepted residual risk; surface no-speech-probability in the JSON contract if the pinned binary exposes it cleanly (cheapest mitigation).
 
 ### Quick Tasks Completed
 
@@ -95,16 +96,17 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.6-specific decisions 
 
 ### Pending Todos
 
-- Plan Phase 24 (Helm Chart Core & Landmine Closure): K8S-01, K8S-02, K8S-03. Highest-risk, most novel, SEED-004-flagged work — must go first (every other v1.6 phase deploys through this chart or reuses its conventions).
+- Plan Phase 29 (v1.6 Hardening Tail): HARD-01, HARD-02, HARD-03, HARD-04. Zero audio dependency, all four independent and pre-diagnosed by 26/27/28-REVIEW — cheap, mechanical opener. WR-01 must land here so the audio ScaledObject (Phase 33) is authored correctly from its first commit.
 
 ### Blockers/Concerns
 
 None currently blocking. Sequencing carried into the roadmap:
 
-- Hard-ordered arc: 24 → 27 → 28. The chart must exist and expose a NetworkPolicy-scoped `/metrics` (24) before the queue-depth metric can be relocated and validated at zero replicas (27, first plan = KEDA-01), which must complete before any ScaledObject is written (27), which must complete before the load-proof can meaningfully run (28).
-- Phases 25 (MCP HTTP) and 26 (operator presets REST) are fully independent of the KEDA spine and of each other — freely reorderable/interleavable. Phase 26 needs zero k8s context.
-- Two milestone-critical fail-closed gates, both baked into their phases as deliverables (not follow-ups): (1) queue-depth exposition must move to the always-on api process before any ScaledObject exists — else a worker at 0 replicas has no pod exposing the metric KEDA needs; (2) webhook-worker must be excluded from KEDA entirely — scaling it to zero silently stops the fleet-wide reconciler sweeper.
-- Operational discipline (OrbStack): pre-build all 5 images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (three confirmed daemon wedges on record).
+- Hard-ordered spine: 29 (independent, first) → 30 → 31 → 32 (RTF go/no-go gate) → 33. AUD-07's measured RTF/`AUDIO_ENGINE_TIMEOUT` (Phase 32) is a hard input to AUD-08's KEDA cooldown/stabilization/grace-period tuning (Phase 33) — keep this ordering.
+- WR-01 (Phase 29) must precede authoring `scaledobject-audio.yaml` (Phase 33) — else a known-bad chart pattern gets copied into the new audio ScaledObject.
+- Two research phases likely need execution-time research (`--research-phase`): Phase 30 (whisper-cli v1.9.1 JSON schema field names verified live against the pinned binary; MP3 ID3v2 synchsafe-decode correctness) and Phase 32 (RTF/thread/memory sizing empirically measured against the real container `cpus`/`memory` limits). Phase 33 may need a scoped pass on init-container/PVC patterns if measured bake-in pull time proves unacceptable.
+- Operational discipline (OrbStack): pre-build all images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (four confirmed daemon wedges on record). A GB-scale audio image raises cold-pull time — measure it, do not assume it generalizes from the other three classes.
+- `MAX_UPLOAD_BYTES` (global 100 MiB default) may 413 legitimate long audio (an uncompressed 1-hour WAV is >600MB) — decide a per-format/engine ceiling deliberately during Phase 30/32, do not let it fail silently.
 
 ## Deferred Items
 
@@ -122,9 +124,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03, carried) | v1.3 requirements definition (2026-07-10) |
 | accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried) | v1.2 requirements definition (2026-07-09) |
 | accepted_risk | `file://` passive subresource read inside chromium-worker (shared UID nobody) | Accepted residual risk (v1.3 Phase 15) | v1.3 close (2026-07-12) |
-| seed | SEED-001: Lesson-recording analysis for tutors and language schools | Dormant | v1.2 close (2026-07-10) |
+| seed | SEED-001: Lesson-recording analysis for tutors and language schools | Foundation in v1.7 (transcription + JSON timestamp contract); mistake-analysis/deck = next milestone (LESN-01/02) | v1.2 close (2026-07-10) |
 | seed | SEED-003: MCP-сервер для OctoConv | ✓ Implemented (v1.5 Phase 21, MCP-01..05) | v1.4 planning (2026-07-12) |
-| seed | SEED-004: OctoConv on Kubernetes + KEDA autoscaling | Now K8S/KEDA/MCPH/OPER reqs, mapped to Phases 24-28 | v1.6 requirements definition (2026-07-14) |
+| seed | SEED-004: OctoConv on Kubernetes + KEDA autoscaling | ✓ Delivered (v1.6 Phases 24-28) | v1.6 requirements definition (2026-07-14) |
 | infra | k8s-валидация в CI (kind/k3d) | Deferred to v2 (K8SV2-01) | v1.6 requirements definition (2026-07-14) |
 | infra | `is_operator` column vs env-allowlist for operators | Deferred to v2 (K8SV2-03) | v1.6 requirements definition (2026-07-14) |
 | tech_debt | CACHED-hit log confirmation for CI docker-build (needs gh auth) | Operator-accepted residual | v1.4 close (2026-07-13) |
@@ -134,10 +136,10 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-17T00:59:51.010Z
-Stopped at: Phase 28 context gathered
-Resume file: .planning/phases/28-autoscale-load-proof/28-CONTEXT.md
+Last session: 2026-07-17 — v1.7 roadmap created (Phases 29-33)
+Stopped at: Roadmap created, 12/12 requirements mapped
+Resume file: .planning/ROADMAP.md (Phase Details → v1.7)
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Plan the first phase: `/gsd:plan-phase 29`

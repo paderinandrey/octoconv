@@ -71,24 +71,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| HARD-01 | TBD | Pending |
-| HARD-02 | TBD | Pending |
-| HARD-03 | TBD | Pending |
-| HARD-04 | TBD | Pending |
-| AUD-01 | TBD | Pending |
-| AUD-02 | TBD | Pending |
-| AUD-03 | TBD | Pending |
-| AUD-04 | TBD | Pending |
-| AUD-05 | TBD | Pending |
-| AUD-06 | TBD | Pending |
-| AUD-07 | TBD | Pending |
-| AUD-08 | TBD | Pending |
+| HARD-01 | Phase 29 | Pending |
+| HARD-02 | Phase 29 | Pending |
+| HARD-03 | Phase 29 | Pending |
+| HARD-04 | Phase 29 | Pending |
+| AUD-01 | Phase 30 | Pending |
+| AUD-02 | Phase 30 | Pending |
+| AUD-03 | Phase 30 | Pending |
+| AUD-04 | Phase 30 | Pending |
+| AUD-05 | Phase 31 | Pending |
+| AUD-06 | Phase 32 | Pending |
+| AUD-07 | Phase 32 | Pending |
+| AUD-08 | Phase 33 | Pending |
 
 **Coverage:**
 - v1 requirements: 12 total
-- Mapped to phases: TBD (filled by roadmap)
-- Unmapped: TBD
+- Mapped to phases: 12 (Phase 29: HARD-01..04; Phase 30: AUD-01/02/03/04; Phase 31: AUD-05; Phase 32: AUD-06/07; Phase 33: AUD-08)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-07-17*
-*Last updated: 2026-07-17 after v1.7 requirements definition*
+*Last updated: 2026-07-17 after v1.7 roadmap creation (traceability mapped to Phases 29-33)*
