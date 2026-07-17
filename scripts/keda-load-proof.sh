@@ -715,16 +715,28 @@ SC3_TIMESTAMPS_FILE="$EVIDENCE_DIR/sc3-timestamps-${RUN_TS}.txt"
 	echo "# long_job_id=$LONG_JOB_ID short_job_id=$SHORT_JOB_ID busy_pod=$BUSY_POD"
 } >"$SC3_TIMESTAMPS_FILE"
 
+# Watch-based capture (not a sampling poll): a graceful downscale victim
+# exposes its final container state under status.containerStatuses[0]
+# .state.terminated (NOT .lastState -- that is only populated on container
+# RESTART) for a very short window between process exit and API-object
+# removal; a periodic poll can miss it entirely (live-discovered on this
+# gate's first SC3-reaching run: 3s sampling of .lastState captured
+# nothing). `kubectl get pod -w --output-watch-events` streams EVERY status
+# update including the final DELETED event, which carries the last object
+# state with terminated.reason/exitCode/finishedAt.
 snapshotLoop() {
 	while true; do
-		local snap_ts phase term_reason term_exit term_finished
-		snap_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-		phase=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "GONE")
-		term_reason=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || echo "")
-		term_exit=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || echo "")
-		term_finished=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || echo "")
-		echo "read_ts=${snap_ts} pod=${BUSY_POD} phase=${phase:-GONE} term_reason=${term_reason} term_exit=${term_exit} term_finished=${term_finished}" >>"$SC3_TIMESTAMPS_FILE"
-		sleep 3
+		kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -w --output-watch-events \
+			-o jsonpath='{.type}{" phase="}{.object.status.phase}{" term_reason="}{.object.status.containerStatuses[0].state.terminated.reason}{" term_exit="}{.object.status.containerStatuses[0].state.terminated.exitCode}{" term_finished="}{.object.status.containerStatuses[0].state.terminated.finishedAt}{"\n"}' 2>/dev/null \
+			| while IFS= read -r watch_line; do
+				echo "read_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ") pod=${BUSY_POD} ${watch_line}" >>"$SC3_TIMESTAMPS_FILE"
+			done
+		# Watch stream ended (API blip or pod already gone). If the pod no
+		# longer exists, stop; otherwise re-attach the watch.
+		if ! kubectl get pod "$BUSY_POD" -n "$NAMESPACE" >/dev/null 2>&1; then
+			break
+		fi
+		sleep 1
 	done
 }
 snapshotLoop &
@@ -756,12 +768,13 @@ DOC_REPLICAS_AFTER_DOWNSCALE=$(waitForReplicasAtMost document-worker 1 "$DOC_DOW
 PASS_COUNT=$((PASS_COUNT + 1))
 echo "PASS: SC3 -- document-worker downscaled 2->${DOC_REPLICAS_AFTER_DOWNSCALE} after short job completion (D-08)"
 
-# Give the snapshot loop a few more cycles to catch the pod's terminal state
-# right after the downscale, then stop it.
-sleep 9
-kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
-wait "$SNAPSHOT_PID" 2>/dev/null || true
-SNAPSHOT_PID=""
+# NOTE: the pod-status watcher stays RUNNING here. The downscale only
+# DELIVERS SIGTERM to the busy pod -- the pod keeps running (Terminating)
+# until the in-flight long job completes (~PAGE_UNITS-calibrated minutes
+# later), and only THEN does its terminal state appear. The watcher is
+# stopped in STEP 8 after the long job reaches done and the termination
+# capture has been awaited (live-discovered: killing it 9s after the
+# downscale missed the pod's exit entirely).
 
 # ---------------------------------------------------------------------------
 # D-09 TRIPLE CHECK
@@ -837,11 +850,47 @@ SIGTERM_TS=$(kubectl get events -n "$NAMESPACE" \
 	-o jsonpath='{.items[0].firstTimestamp}' 2>/dev/null || true)
 assert_nonempty "$SIGTERM_TS" "D-09(3): kubelet Killing event SIGTERM timestamp captured for $BUSY_POD"
 
-POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)
-POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)
-POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || true)
+# The long job is done, so the busy pod (SIGTERM'd long ago) exits NOW.
+# Give the watch-based snapshotter a bounded window to capture the
+# terminal containerStatuses state (delivered on the MODIFIED/DELETED
+# watch events), then stop it.
+echo "waiting for the pod-status watcher to capture $BUSY_POD's terminal state (bounded 90s)..."
+term_captured=""
+waited=0
+while [ "$waited" -lt 90 ]; do
+	if grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null | grep -qv 'term_finished=$'; then
+		term_captured=1
+		break
+	fi
+	# Pod object fully gone AND nothing captured -- no point waiting longer.
+	if ! kubectl get pod "$BUSY_POD" -n "$NAMESPACE" >/dev/null 2>&1; then
+		sleep 3
+		if grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null | grep -qv 'term_finished=$'; then
+			term_captured=1
+		fi
+		break
+	fi
+	sleep 3
+	waited=$((waited + 3))
+done
+echo "termination capture: ${term_captured:-none-yet} (watcher lines: $(grep -c 'read_ts=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null || echo 0))"
+kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+wait "$SNAPSHOT_PID" 2>/dev/null || true
+SNAPSHOT_PID=""
+
+# Live read first (pod object may still exist in Terminating): prefer
+# state.terminated (the CURRENT container's final state on a deleted pod);
+# lastState.terminated only covers the restart case.
+POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true)
+POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)
+POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
 if [ -z "$POD_TERM_FINISHED" ]; then
-	# Pod object already GC'd -- fall back to the continuously-captured
+	POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)
+	POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)
+	POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || true)
+fi
+if [ -z "$POD_TERM_FINISHED" ]; then
+	# Pod object already removed -- fall back to the watch-captured
 	# snapshot file (Pitfall 3), taking the last non-empty term_finished
 	# line written by snapshotLoop.
 	# `|| true`: zero matching snapshot lines must fall through to the loud
