@@ -69,6 +69,7 @@ PASS_COUNT=0
 GATE_OK=""
 API_PF_PID=""
 DB_PF_PID=""
+MINIO_PF_PID=""
 SAMPLER_PID=""
 # BUSY_POD / SNAPSHOT_PID are set by the SC3 scenario below; kept declared
 # here (empty) so teardown() can unconditionally reference them and clear
@@ -171,6 +172,9 @@ teardown() {
 	fi
 	if [ -n "$DB_PF_PID" ]; then
 		kill "$DB_PF_PID" >/dev/null 2>&1 || true
+	fi
+	if [ -n "$MINIO_PF_PID" ]; then
+		kill "$MINIO_PF_PID" >/dev/null 2>&1 || true
 	fi
 
 	helm uninstall octoconv -n "$NAMESPACE" >/dev/null 2>&1 || true
@@ -410,7 +414,7 @@ if [ "$CALIBRATE" = "1" ]; then
 	cal_status=""
 	for i in $(seq 1 200); do
 		code=$(curl -s -o /tmp/keda-loadproof-cal-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$CAL_JOB_ID")
-		cal_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-cal-job.json | head -1 | cut -d'"' -f4)
+		cal_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-cal-job.json | head -1 | cut -d'"' -f4 || true)
 		if [ "$cal_status" = "done" ] || [ "$cal_status" = "failed" ]; then
 			break
 		fi
@@ -487,7 +491,9 @@ SAMPLE_UNTIL_EPOCH=$(($(date +%s) + 600))
 sampleLoop() {
 	while [ "$(date +%s)" -lt "$SAMPLE_UNTIL_EPOCH" ]; do
 		ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-		qd=$(kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/${NAMESPACE}/${EXTERNAL_METRIC_NAME}?labelSelector=scaledobject.keda.sh%2Fname%3Dworker-image-scaledobject" 2>/dev/null | grep -o '"value":"[0-9]*"' | head -1 | cut -d'"' -f4)
+		# `|| true`: a transient empty/errored metric read must not kill the
+		# background sampler under the inherited `set -euo pipefail`.
+		qd=$(kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/${NAMESPACE}/${EXTERNAL_METRIC_NAME}?labelSelector=scaledobject.keda.sh%2Fname%3Dworker-image-scaledobject" 2>/dev/null | grep -o '"value":"[0-9]*"' | head -1 | cut -d'"' -f4 || true)
 		wr=$(kubectl get deployment worker -n "$NAMESPACE" -o jsonpath='{.status.replicas}' 2>/dev/null || echo 0)
 		echo "${ts},${qd:-0},${wr:-0}" >>"$CSV_FILE"
 		sleep 5
@@ -499,17 +505,23 @@ SAMPLER_PID=$!
 echo "sampler started (pid=$SAMPLER_PID), capturing steady state before burst..."
 sleep 15
 
-# Synthesize a medium image fixture so each conversion takes a couple
-# seconds and the backlog stays above threshold long enough for the HPA to
-# add replicas (D-05, planner discretion). Fallback: 20x sample.png if
-# Pillow can't be pulled via uv for any reason.
+# Synthesize the burst fixture (D-05, planner discretion -- calibrated so
+# the queue does NOT drain before the scale-up fires): a 9500x9500 (90MP,
+# just under the app's MAX_IMAGE_PIXELS=100MP cap) RGB gradient. The
+# gradient compresses to <1MB on the wire (20 parallel uploads stay cheap)
+# but decodes to ~270MB raw, and combined with the values-loadproof.yaml
+# image-worker CPU throttle (200m) each png->jpg conversion takes ~10s --
+# live-benchmarked in the octoconv-worker:dev image at --cpus=0.2. Without
+# the throttle a 2-CPU worker converts even a 90MP png in ~0.3s and a
+# single pod drains all 20 jobs before Prometheus's 15s scrape ever sees
+# the backlog (live-discovered on this gate's first non-deadlocked run).
+# Fallback: 20x sample.png if Pillow can't be pulled via uv for any reason.
 BURST_FIXTURE="/tmp/loadproof-burst-${RUN_TS}.png"
 if ! uv run --with pillow python3 -c "
 from PIL import Image
-import os
-w, h = 2000, 1500
-img = Image.frombytes('RGB', (w, h), os.urandom(w * h * 3))
-img.save('${BURST_FIXTURE}')
+g = Image.linear_gradient('L').resize((9500, 9500))
+img = Image.merge('RGB', (g, g.transpose(Image.ROTATE_90), g.transpose(Image.ROTATE_180)))
+img.save('${BURST_FIXTURE}', optimize=False)
 " 2>/tmp/keda-loadproof-pillow.log; then
 	echo "NOTE: Pillow-via-uv synthesis failed, falling back to internal/e2e/testdata/sample.png for the burst fixture ($(cat /tmp/keda-loadproof-pillow.log))"
 	BURST_FIXTURE="internal/e2e/testdata/sample.png"
@@ -524,13 +536,23 @@ echo "burst fixture: $BURST_FIXTURE"
 # approach is the same root workaround for background-subshell scoping).
 BURST_JOB_IDS_FILE="/tmp/keda-loadproof-burst-jobids-${RUN_TS}.txt"
 : >"$BURST_JOB_IDS_FILE"
+# Collect the 20 submission-subshell PIDs and wait ONLY on those. A bare
+# `wait` here would also block on every other background child of this
+# shell -- the CSV sampler (runs for its full SAMPLE_UNTIL_EPOCH window)
+# and, fatally, the two `kubectl port-forward` processes, which never exit
+# -- deadlocking the gate right after the burst while KEDA scales up and
+# back down unobserved (live-discovered Rule-1 defect, first full run).
+BURST_PIDS=""
 for i in $(seq 1 20); do
 	(
 		jid=$(postJobPath "$BURST_FIXTURE" "jpg" "image/png")
 		echo "$jid" >>"$BURST_JOB_IDS_FILE"
 	) &
+	BURST_PIDS="$BURST_PIDS $!"
 done
-wait
+for pid in $BURST_PIDS; do
+	wait "$pid"
+done
 BURST_JOB_COUNT=$(wc -l <"$BURST_JOB_IDS_FILE" | tr -d '[:space:]')
 assert_eq "20" "$BURST_JOB_COUNT" "burst: 20 parallel image jobs submitted (png->jpg)"
 
@@ -562,7 +584,9 @@ waited=0
 metric_zero=""
 while [ "$waited" -lt "$DRAIN_TIMEOUT" ]; do
 	RAW_METRIC_NOW=$(kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/${NAMESPACE}/${EXTERNAL_METRIC_NAME}?labelSelector=scaledobject.keda.sh%2Fname%3Dworker-image-scaledobject" 2>/dev/null || true)
-	VAL=$(printf '%s' "$RAW_METRIC_NOW" | grep -o '"value":"[0-9]*"' | head -1 | cut -d'"' -f4)
+	# `|| true`: a transient empty metric read (WR-01-style) must not kill
+	# the drain poll under pipefail -- treat it as "not drained yet".
+	VAL=$(printf '%s' "$RAW_METRIC_NOW" | grep -o '"value":"[0-9]*"' | head -1 | cut -d'"' -f4 || true)
 	if [ "${VAL:-1}" = "0" ]; then
 		metric_zero=1
 		break
@@ -578,6 +602,14 @@ IMAGE_REPLICAS_FINAL=$(waitForReplicasAtMost worker 0 180) || {
 }
 PASS_COUNT=$((PASS_COUNT + 1))
 echo "PASS: SC2 -- worker (image) full-cycled back to 0 replicas (observed: $IMAGE_REPLICAS_FINAL)"
+
+# Let the sampler record the scaled-to-zero steady state for a few more
+# ticks before stopping it: waitForReplicasAtMost returns the INSTANT it
+# first observes 0, which can land between sampler ticks -- killing the
+# sampler immediately would leave the CSV's last row still showing N
+# replicas and the PNG timeline without its time-to-scale-to-zero marker
+# (D-01/D-06: the sampler must capture time-to-drain AND time-to-zero).
+sleep 15
 
 # Stop the sampler cleanly so the CSV has a clean end marker, then render
 # the D-02 PNG.
@@ -640,7 +672,7 @@ echo "waiting for long job $LONG_JOB_ID to reach status=active (confirms it is g
 long_status=""
 for i in $(seq 1 60); do
 	code=$(curl -s -o /tmp/keda-loadproof-long-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$LONG_JOB_ID")
-	long_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job.json | head -1 | cut -d'"' -f4)
+	long_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job.json | head -1 | cut -d'"' -f4 || true)
 	if [ "$long_status" = "active" ] || [ "$long_status" = "done" ] || [ "$long_status" = "failed" ]; then
 		break
 	fi
@@ -691,16 +723,28 @@ SC3_TIMESTAMPS_FILE="$EVIDENCE_DIR/sc3-timestamps-${RUN_TS}.txt"
 	echo "# long_job_id=$LONG_JOB_ID short_job_id=$SHORT_JOB_ID busy_pod=$BUSY_POD"
 } >"$SC3_TIMESTAMPS_FILE"
 
+# Watch-based capture (not a sampling poll): a graceful downscale victim
+# exposes its final container state under status.containerStatuses[0]
+# .state.terminated (NOT .lastState -- that is only populated on container
+# RESTART) for a very short window between process exit and API-object
+# removal; a periodic poll can miss it entirely (live-discovered on this
+# gate's first SC3-reaching run: 3s sampling of .lastState captured
+# nothing). `kubectl get pod -w --output-watch-events` streams EVERY status
+# update including the final DELETED event, which carries the last object
+# state with terminated.reason/exitCode/finishedAt.
 snapshotLoop() {
 	while true; do
-		local snap_ts phase term_reason term_exit term_finished
-		snap_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-		phase=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "GONE")
-		term_reason=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || echo "")
-		term_exit=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || echo "")
-		term_finished=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || echo "")
-		echo "read_ts=${snap_ts} pod=${BUSY_POD} phase=${phase:-GONE} term_reason=${term_reason} term_exit=${term_exit} term_finished=${term_finished}" >>"$SC3_TIMESTAMPS_FILE"
-		sleep 3
+		kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -w --output-watch-events \
+			-o jsonpath='{.type}{" phase="}{.object.status.phase}{" term_reason="}{.object.status.containerStatuses[0].state.terminated.reason}{" term_exit="}{.object.status.containerStatuses[0].state.terminated.exitCode}{" term_finished="}{.object.status.containerStatuses[0].state.terminated.finishedAt}{"\n"}' 2>/dev/null \
+			| while IFS= read -r watch_line; do
+				echo "read_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ") pod=${BUSY_POD} ${watch_line}" >>"$SC3_TIMESTAMPS_FILE"
+			done
+		# Watch stream ended (API blip or pod already gone). If the pod no
+		# longer exists, stop; otherwise re-attach the watch.
+		if ! kubectl get pod "$BUSY_POD" -n "$NAMESPACE" >/dev/null 2>&1; then
+			break
+		fi
+		sleep 1
 	done
 }
 snapshotLoop &
@@ -711,7 +755,7 @@ echo "waiting for short job $SHORT_JOB_ID to reach a terminal status..."
 short_status=""
 for i in $(seq 1 200); do
 	code=$(curl -s -o /tmp/keda-loadproof-short-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$SHORT_JOB_ID")
-	short_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-short-job.json | head -1 | cut -d'"' -f4)
+	short_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-short-job.json | head -1 | cut -d'"' -f4 || true)
 	if [ "$short_status" = "done" ] || [ "$short_status" = "failed" ]; then
 		break
 	fi
@@ -732,12 +776,13 @@ DOC_REPLICAS_AFTER_DOWNSCALE=$(waitForReplicasAtMost document-worker 1 "$DOC_DOW
 PASS_COUNT=$((PASS_COUNT + 1))
 echo "PASS: SC3 -- document-worker downscaled 2->${DOC_REPLICAS_AFTER_DOWNSCALE} after short job completion (D-08)"
 
-# Give the snapshot loop a few more cycles to catch the pod's terminal state
-# right after the downscale, then stop it.
-sleep 9
-kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
-wait "$SNAPSHOT_PID" 2>/dev/null || true
-SNAPSHOT_PID=""
+# NOTE: the pod-status watcher stays RUNNING here. The downscale only
+# DELIVERS SIGTERM to the busy pod -- the pod keeps running (Terminating)
+# until the in-flight long job completes (~PAGE_UNITS-calibrated minutes
+# later), and only THEN does its terminal state appear. The watcher is
+# stopped in STEP 8 after the long job reaches done and the termination
+# capture has been awaited (live-discovered: killing it 9s after the
+# downscale missed the pod's exit entirely).
 
 # ---------------------------------------------------------------------------
 # D-09 TRIPLE CHECK
@@ -749,7 +794,7 @@ echo "waiting for long job $LONG_JOB_ID to reach a terminal status..."
 long_final_status=""
 for i in $(seq 1 100); do
 	code=$(curl -s -o /tmp/keda-loadproof-long-job-final.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$LONG_JOB_ID")
-	long_final_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+	long_final_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4 || true)
 	if [ "$long_final_status" = "done" ] || [ "$long_final_status" = "failed" ]; then
 		break
 	fi
@@ -757,13 +802,40 @@ for i in $(seq 1 100); do
 done
 assert_eq "done" "$long_final_status" "D-09(1): long job $LONG_JOB_ID reaches done despite the downscale"
 
-RESULT_URL=$(grep -o '"result_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+# NOTE: under `set -euo pipefail` a grep with zero matches fails the whole
+# pipeline and kills the script BEFORE the fallback branch -- the API's
+# actual field is download_url (internal/api/handlers.go), so the
+# result_url probe legitimately matches nothing. `|| true` keeps both
+# probes non-fatal; emptiness is then caught loudly by the assert below.
+RESULT_URL=$(grep -o '"result_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4 || true)
 if [ -z "$RESULT_URL" ]; then
-	RESULT_URL=$(grep -o '"download_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+	RESULT_URL=$(grep -o '"download_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4 || true)
 fi
 assert_nonempty_redacted "$RESULT_URL" "D-09(1): long job result URL present in job status (may embed a short-lived presigned signature -- never printed verbatim)"
 
-RESULT_BYTES=$(curl -s -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
+# The presigned URL embeds the IN-CLUSTER S3 endpoint
+# (minio.<ns>.svc.cluster.local:9000), which this host cannot resolve --
+# and the host name is part of the S3 v4 signature, so it cannot be
+# rewritten. Port-forward minio on a free LOCAL port (OrbStack itself
+# already listens on host port 9000, so the URL's own port cannot be
+# bound) and redirect the TCP connection there via curl --connect-to:
+# the URL, Host header, and signature stay byte-identical while only the
+# transport goes through the port-forward. Same sanctioned reachability
+# mechanism as the api/postgres port-forwards above.
+RESULT_HOSTPORT=$(printf '%s' "$RESULT_URL" | awk -F/ '{print $3}')
+RESULT_HOST=${RESULT_HOSTPORT%%:*}
+RESULT_PORT=${RESULT_HOSTPORT##*:}
+if [ "$RESULT_PORT" = "$RESULT_HOSTPORT" ]; then
+	RESULT_PORT=80
+fi
+MINIO_LOCAL_PORT="19000"
+kubectl port-forward -n "$NAMESPACE" svc/minio "${MINIO_LOCAL_PORT}:9000" >/tmp/keda-loadproof-minio-pf.log 2>&1 &
+MINIO_PF_PID=$!
+sleep 3
+
+RESULT_BYTES=$(curl -s --connect-to "${RESULT_HOST}:${RESULT_PORT}:127.0.0.1:${MINIO_LOCAL_PORT}" -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
+kill "$MINIO_PF_PID" >/dev/null 2>&1 || true
+MINIO_PF_PID=""
 if [ "${RESULT_BYTES:-0}" -le 0 ]; then
 	echo "FAIL: D-09(1) -- long job result URL returned 0 bytes" >&2
 	exit 1
@@ -786,16 +858,54 @@ SIGTERM_TS=$(kubectl get events -n "$NAMESPACE" \
 	-o jsonpath='{.items[0].firstTimestamp}' 2>/dev/null || true)
 assert_nonempty "$SIGTERM_TS" "D-09(3): kubelet Killing event SIGTERM timestamp captured for $BUSY_POD"
 
-POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)
-POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)
-POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || true)
+# The long job is done, so the busy pod (SIGTERM'd long ago) exits NOW.
+# Give the watch-based snapshotter a bounded window to capture the
+# terminal containerStatuses state (delivered on the MODIFIED/DELETED
+# watch events), then stop it.
+echo "waiting for the pod-status watcher to capture $BUSY_POD's terminal state (bounded 90s)..."
+term_captured=""
+waited=0
+while [ "$waited" -lt 90 ]; do
+	if grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null | grep -qv 'term_finished=$'; then
+		term_captured=1
+		break
+	fi
+	# Pod object fully gone AND nothing captured -- no point waiting longer.
+	if ! kubectl get pod "$BUSY_POD" -n "$NAMESPACE" >/dev/null 2>&1; then
+		sleep 3
+		if grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null | grep -qv 'term_finished=$'; then
+			term_captured=1
+		fi
+		break
+	fi
+	sleep 3
+	waited=$((waited + 3))
+done
+echo "termination capture: ${term_captured:-none-yet} (watcher lines: $(grep -c 'read_ts=' "$SC3_TIMESTAMPS_FILE" 2>/dev/null || echo 0))"
+kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+wait "$SNAPSHOT_PID" 2>/dev/null || true
+SNAPSHOT_PID=""
+
+# Live read first (pod object may still exist in Terminating): prefer
+# state.terminated (the CURRENT container's final state on a deleted pod);
+# lastState.terminated only covers the restart case.
+POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true)
+POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)
+POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.terminated.finishedAt}' 2>/dev/null || true)
 if [ -z "$POD_TERM_FINISHED" ]; then
-	# Pod object already GC'd -- fall back to the continuously-captured
+	POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)
+	POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)
+	POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || true)
+fi
+if [ -z "$POD_TERM_FINISHED" ]; then
+	# Pod object already removed -- fall back to the watch-captured
 	# snapshot file (Pitfall 3), taking the last non-empty term_finished
 	# line written by snapshotLoop.
-	POD_TERM_FINISHED=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_finished=\([^ ]*\).*/\1/p')
-	POD_TERM_REASON=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_reason=\([^ ]*\).*/\1/p')
-	POD_TERM_EXIT=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_exit=\([^ ]*\).*/\1/p')
+	# `|| true`: zero matching snapshot lines must fall through to the loud
+	# assert_nonempty FAIL below, not a silent pipefail death here.
+	POD_TERM_FINISHED=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_finished=\([^ ]*\).*/\1/p' || true)
+	POD_TERM_REASON=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_reason=\([^ ]*\).*/\1/p' || true)
+	POD_TERM_EXIT=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_exit=\([^ ]*\).*/\1/p' || true)
 fi
 assert_nonempty "$POD_TERM_FINISHED" "D-09(3): pod $BUSY_POD terminated.finishedAt captured (live or via continuous snapshot)"
 
@@ -803,9 +913,17 @@ JOB_FINISHED_AT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/oct
 	"SELECT finished_at FROM jobs WHERE id='${LONG_JOB_ID}';" | tr -d '[:space:]')
 assert_nonempty "$JOB_FINISHED_AT" "D-09(3): jobs.finished_at captured for long job $LONG_JOB_ID"
 
+# Also record the SHORT job's finished_at: (Killing event ts) minus
+# (short job finished_at) is the OBSERVED 2->1 settling time under the
+# 15s scaleDownStabilizationSeconds override -- the live answer to
+# 28-RESEARCH.md Open Question 1, recorded as tuning input (SUMMARY).
+SHORT_JOB_FINISHED_AT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
+	"SELECT finished_at FROM jobs WHERE id='${SHORT_JOB_ID}';" | tr -d '[:space:]' || true)
+
 {
 	echo ""
 	echo "# D-09 triple-check raw evidence"
+	echo "short_job_finished_at=$SHORT_JOB_FINISHED_AT"
 	echo "sigterm_killing_event_ts=$SIGTERM_TS"
 	echo "pod_terminated_reason=$POD_TERM_REASON"
 	echo "pod_terminated_exit_code=$POD_TERM_EXIT"
