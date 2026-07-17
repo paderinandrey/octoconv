@@ -214,6 +214,30 @@ for d in postgres redis minio api prometheus webhook-worker; do
 done
 
 # ---------------------------------------------------------------------------
+# STEP 4b (Rule-1 fix, live-discovered): seed asynq's queue registry
+# (Redis "asynq:queues" SET) for all four queues via a direct redis-cli
+# exec into the redis pod. WR-01 (D-01, Phase 29): ignoreNullValues=false
+# means a queue that has NEVER had a real task (asynq only adds a queue
+# name to "asynq:queues" on its FIRST real enqueue -- the SAME issue
+# 27-01 already fixed for the E2E suite, internal/e2e/e2e_test.go
+# seedQueueRegistry) reports an ABSENT PromQL result, not a genuine zero.
+# KEDA now treats an absent result as a scaler ERROR and holds
+# fallback.replicas:1 INDEFINITELY on a truly fresh install (Redis has no
+# prior state) rather than ever settling to 0 -- the fallback blip D-01's
+# in-template comment accepts as a trade-off, but STEP 6 below needs a
+# genuine zero to prove SC1. Seeding the registry directly (zero tasks
+# created, no worker processing triggered) makes GetQueueInfo return real
+# zero-valued counts, exactly mirroring what happens naturally the moment
+# the first real job is submitted in production.
+# ---------------------------------------------------------------------------
+log "STEP 4b: seed asynq queue registry (Redis) so the absent-metric fallback (D-01) resolves to a real zero"
+
+REDIS_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=redis" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+assert_nonempty "$REDIS_POD" "redis pod discovered for queue-registry seeding"
+kubectl exec -n "$NAMESPACE" "$REDIS_POD" -- redis-cli SADD asynq:queues image document html webhook >/dev/null
+echo "PASS: asynq:queues seeded (image, document, html, webhook) -- zero tasks created, no worker processing triggered"
+
+# ---------------------------------------------------------------------------
 # STEP 5 (SC3/D-12d/D-09 part 1 -- checked at START): webhook-worker fixed
 # at 2 replicas, no ScaledObject referencing it. Checked again at MID and
 # END below (D-12d requires "throughout").
