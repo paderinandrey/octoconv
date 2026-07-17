@@ -455,7 +455,7 @@ echo "waiting for image job $IMAGE_JOB_ID to reach a terminal status..."
 job_status=""
 for i in $(seq 1 60); do
 	code=$(curl -s -o /tmp/keda-gate-image-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$IMAGE_JOB_ID")
-	job_status=$(grep -o '"status":"[^"]*"' /tmp/keda-gate-image-job.json | head -1 | cut -d'"' -f4)
+	job_status=$(grep -o '"status":"[^"]*"' /tmp/keda-gate-image-job.json | head -1 | cut -d'"' -f4 || true)
 	if [ "$job_status" = "done" ] || [ "$job_status" = "failed" ]; then
 		break
 	fi

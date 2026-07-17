@@ -501,7 +501,7 @@ http_post_job "$WORKDIR/resp-opsys-job.json" \
 	-F "file=@$WORKDIR/sample.png;type=image/png"
 assert_eq "202" "$HTTP_STATUS" "regular client POST job with operator-created system preset $NAME_OP_B -> 202"
 
-JOB_ID_OPSYS=$(grep -o '"job_id":"[^"]*"' "$WORKDIR/resp-opsys-job.json" | head -1 | cut -d'"' -f4)
+JOB_ID_OPSYS=$(grep -o '"job_id":"[^"]*"' "$WORKDIR/resp-opsys-job.json" | head -1 | cut -d'"' -f4 || true)
 [ -n "$JOB_ID_OPSYS" ] || {
 	echo "FAIL: no job_id in operator-system-preset job response: $(cat "$WORKDIR/resp-opsys-job.json")" >&2
 	exit 1
@@ -511,7 +511,7 @@ echo "--- polling job $JOB_ID_OPSYS for done ---"
 status=""
 for i in $(seq 1 60); do
 	http_json GET "/v1/jobs/$JOB_ID_OPSYS" "$WORKDIR/resp-opsys-job-poll.json" "$REGULAR_KEY"
-	status=$(grep -o '"status":"[^"]*"' "$WORKDIR/resp-opsys-job-poll.json" | head -1 | cut -d'"' -f4)
+	status=$(grep -o '"status":"[^"]*"' "$WORKDIR/resp-opsys-job-poll.json" | head -1 | cut -d'"' -f4 || true)
 	if [ "$status" = "done" ] || [ "$status" = "failed" ]; then
 		break
 	fi

@@ -520,7 +520,7 @@ sleep 15
 # the backlog (live-discovered on this gate's first non-deadlocked run).
 # Fallback: 20x sample.png if Pillow can't be pulled via uv for any reason.
 BURST_FIXTURE="/tmp/loadproof-burst-${RUN_TS}.png"
-if ! uv run --with pillow python3 -c "
+if ! uv run --python 3.12 --with pillow python3 -c "
 from PIL import Image
 g = Image.linear_gradient('L').resize((9500, 9500))
 img = Image.merge('RGB', (g, g.transpose(Image.ROTATE_90), g.transpose(Image.ROTATE_180)))
@@ -760,13 +760,17 @@ snapshotLoop() {
 		sleep 1
 	done
 }
-# WR-04 (28-REVIEW): run the watcher subshell in its OWN process group
-# (`set -m` job control inside the subshell) so its `kubectl get pod -w |
-# while read` pipeline -- which reparents on a bare `kill $SNAPSHOT_PID` --
-# can be killed as a whole group (`kill -- -PID`) instead of leaking an
-# orphaned kubectl watch that outlives the entire gate.
-( set -m; snapshotLoop ) &
+# WR-04 (28-REVIEW) + 29-REVIEW WR-01: enable job control in the PARENT
+# (`set -m`) BEFORE backgrounding so the `snapshotLoop &` job becomes its own
+# process-group leader (PGID == $SNAPSHOT_PID). `set -m` inside the subshell
+# (the prior approach) did NOT make the subshell a group leader from the
+# parent, so `kill -- -PID` targeted a group that never contained the
+# `kubectl get pod -w | while read` pipeline and the watch leaked. With
+# parent-level job control the whole group is killable via `kill -- -PID`.
+set -m
+snapshotLoop &
 SNAPSHOT_PID=$!
+set +m
 echo "pod1 snapshot loop started (pid=$SNAPSHOT_PID, own process group), polling every ~3s through the SC3 window"
 
 echo "waiting for short job $SHORT_JOB_ID to reach a terminal status..."
