@@ -1,0 +1,172 @@
+=== Phase 28 autoscale load-proof: live flagship gate (KEDA-03) ===
+run timestamp: 20260717T100342Z
+evidence dir: .planning/phases/28-autoscale-load-proof/evidence
+mode: FULL GATE (SC1/SC2 burst + SC3 downscale soak)
+
+--- STEP 1: preflight ---
+PASS: kubectl reaches the OrbStack cluster (context: orbstack)
+PASS: compose stack is down (0 octoconv-* containers running)
+PASS: KEDA v2.20.1 re-verified resolvable in kedacore/keda (live)
+
+--- STEP 2: helm install KEDA v2.20.1 into namespace keda ---
+NAME: keda
+LAST DEPLOYED: Fri Jul 17 13:03:44 2026
+NAMESPACE: keda
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+:::^.     .::::^:     :::::::::::::::    .:::::::::.                   .^.                  
+7???~   .^7????~.     7??????????????.   :?????????77!^.              .7?7.                 
+7???~  ^7???7~.       ~!!!!!!!!!!!!!!.   :????!!!!7????7~.           .7???7.                
+7???~^7????~.                            :????:    :~7???7.         :7?????7.               
+7???7????!.           ::::::::::::.      :????:      .7???!        :7??77???7.              
+7????????7:           7???????????~      :????:       :????:      :???7?5????7.             
+7????!~????^          !77777777777^      :????:       :????:     ^???7?#P7????7.            
+7???~  ^????~                            :????:      :7???!     ^???7J#@J7?????7.           
+7???~   :7???!.                          :????:   .:~7???!.    ~???7Y&@#7777????7.          
+7???~    .7???7:      !!!!!!!!!!!!!!!    :????7!!77????7^     ~??775@@@GJJYJ?????7.         
+7???~     .!????^     7?????????????7.   :?????????7!~:      !????G@@@@@@@@5??????7:        
+::::.       :::::     :::::::::::::::    .::::::::..        .::::JGGGB@@@&7:::::::::        
+                                                                      ?@@#~                  
+                                                                      P@B^                   
+                                                                    :&G:                    
+                                                                    !5.                     
+                                                                    .Kubernetes Event-driven Autoscaling (KEDA) - Application autoscaling made simple.
+
+Get started by deploying Scaled Objects to your cluster:
+    - Information about Scaled Objects : https://keda.sh/docs/latest/concepts/
+    - Samples: https://github.com/kedacore/samples
+
+Get information about the deployed ScaledObjects:
+  kubectl get scaledobject [--namespace <namespace>]
+
+Get details about a deployed ScaledObject:
+  kubectl describe scaledobject <scaled-object-name> [--namespace <namespace>]
+
+Get information about the deployed TriggerAuthentications:
+  kubectl get triggerauthentication [--namespace <namespace>]
+
+Get details about a deployed TriggerAuthentication:
+  kubectl describe triggerauthentication <trigger-authentication-name> [--namespace <namespace>]
+
+Get an overview of the Horizontal Pod Autoscalers (HPA) that KEDA is using behind the scenes:
+  kubectl get hpa [--all-namespaces] [--namespace <namespace>]
+
+Learn more about KEDA:
+- Documentation: https://keda.sh/
+- Support: https://keda.sh/support/
+- File an issue: https://github.com/kedacore/keda/issues/new/choose
+PASS: KEDA v2.20.1 installed/upgraded, operator Deployments Available
+
+--- STEP 3: waiting for v1beta1.external.metrics.k8s.io to become Available ---
+PASS: v1beta1.external.metrics.k8s.io Available:True
+
+--- STEP 4: helm install octoconv -f values-local.yaml -f values-loadproof.yaml ---
+NAME: octoconv
+LAST DEPLOYED: Fri Jul 17 13:04:09 2026
+NAMESPACE: octoconv
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+OctoConv has been deployed to namespace "octoconv".
+
+In-cluster API URL (for other in-cluster services):
+  http://api.octoconv.svc.cluster.local:8090
+
+Note: /metrics on every pod is NOT publicly exposed — it is intended to be
+scoped by a NetworkPolicy to the observability namespace only (see plan 02).
+Do not assume it is reachable from arbitrary pods in this namespace.
+
+Check pod status:
+  kubectl --context orbstack -n octoconv get pods
+PASS: helm install octoconv complete (async install; readiness gated below)
+
+--- waiting for always-on / min-1 Deployments to become Available ---
+deployment.apps/postgres condition met
+PASS: deployment/postgres Available
+deployment.apps/redis condition met
+PASS: deployment/redis Available
+deployment.apps/minio condition met
+PASS: deployment/minio Available
+deployment.apps/api condition met
+PASS: deployment/api Available
+deployment.apps/prometheus condition met
+PASS: deployment/prometheus Available
+deployment.apps/webhook-worker condition met
+PASS: deployment/webhook-worker Available
+
+--- STEP 5: port-forward api+postgres, mint client key ---
+waiting for port-forwarded /healthz...
+PASS: api reachable via port-forward, /healthz 200 ({"postgres":"ok","redis":"ok","s3":"ok","status":"ok"})
+PASS: minted gate client + API key == [REDACTED, 43 chars]
+
+--- STEP 6: SC1/SC2 -- image-class burst-of-20, 0->N->0 with CSV+PNG evidence ---
+waiting for worker (image) to settle at 0 replicas (KEDA cooldownPeriod=60s + margin, WR-02 fresh-install settling)...
+PASS: worker (image) Deployment status.replicas before burst (TRUE zero precondition, D-04) == 0
+PASS: worker-image-scaledobject discovered external metric name (live, not hardcoded) == s0-prometheus
+PASS: octoconv_queue_depth (image) resolved via kubectl get --raw at 0 replicas: {"kind":"ExternalMetricValueList","apiVersion":"external.metrics.k8s.io/v1beta1","metadata":{},"items":[{"metricName":"s0-prometheus","metricLabels":null,"timestamp":"2026-07-17T10:04:43Z","value":"0"}]}
+sampler started (pid=41694), capturing steady state before burst...
+burst fixture: /tmp/loadproof-burst-20260717T100342Z.png
+PASS: burst: 20 parallel image jobs submitted (png->jpg) == 20
+PASS: SC1 -- worker (image) scaled 0->4 within 60s of the 20-job burst
+
+--- Recording peak worker (image) replicas (informational -- reaching 4 is a fact, not an assertion, D-04) ---
+OBSERVED (not asserted): peak worker (image) replicas during burst = 4 (maxReplicaCount=4)
+
+--- SC2/D-06 -- draining burst queue, then confirming N->0 ---
+PASS: burst queue drained (octoconv_queue_depth image returned to 0) == 1
+PASS: SC2 -- worker (image) full-cycled back to 0 replicas (observed: 0)
+Rendered evidence PNG: .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-20260717T100342Z.png
+rows: 32, pod-count column: worker_replicas
+PASS: SC1/SC2 evidence rendered -- CSV: .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-20260717T100342Z.csv, PNG: .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-20260717T100342Z.png
+
+--- STEP 7: SC3 -- document-class downscale-soak (long job survives a real KEDA downscale) ---
+waiting for document-worker to settle at 0 replicas (KEDA cooldownPeriod=120s + margin)...
+PASS: document-worker Deployment status.replicas before SC3 (TRUE zero precondition) == 0
+Generated heavy docx: /tmp/heavy-sc3-20260717T100342Z.docx
+page-units: 3900
+PASS: SC3: long heavy-docx job submitted FIRST (page-units=3900) == 37392708-5893-407e-bac5-0762ad549a86
+PASS: SC3 -- document-worker scaled 0->1 after long job 37392708-5893-407e-bac5-0762ad549a86
+waiting for long job 37392708-5893-407e-bac5-0762ad549a86 to reach status=active (confirms it is genuinely being processed before pod1 identification)...
+PASS: SC3: long job 37392708-5893-407e-bac5-0762ad549a86 reaches status=active == active
+PASS: SC3: short sample.docx job submitted SECOND == f533434a-1d5b-482d-9a32-21fb33cd288b
+PASS: SC3 -- document-worker scaled 1->2 after short job f533434a-1d5b-482d-9a32-21fb33cd288b
+PASS: SC3: pod1 (busy pod, earliest creationTimestamp) identified == document-worker-d5db9bb7f-8dhw8
+pod/document-worker-d5db9bb7f-8dhw8 annotated
+PASS: SC3 -- pod-deletion-cost=-1000 annotated on busy pod document-worker-d5db9bb7f-8dhw8 (before downscale decision)
+pod1 snapshot loop started (pid=46643), polling every ~3s through the SC3 window
+waiting for short job f533434a-1d5b-482d-9a32-21fb33cd288b to reach a terminal status...
+PASS: SC3: short job f533434a-1d5b-482d-9a32-21fb33cd288b reaches done == done
+PASS: SC3 -- document-worker downscaled 2->1 after short job completion (D-08)
+
+--- STEP 8: D-09 triple-check -- long job survived the downscale gracefully ---
+waiting for long job 37392708-5893-407e-bac5-0762ad549a86 to reach a terminal status...
+PASS: D-09(1): long job 37392708-5893-407e-bac5-0762ad549a86 reaches done despite the downscale == done
+PASS: D-09(1): long job result URL present in job status (may embed a short-lived presigned signature -- never printed verbatim) == [REDACTED, 364 chars]
+PASS: D-09(1) -- long job result downloads (4629779 bytes)
+PASS: D-09(2): exactly one queued->active transition for long job 37392708-5893-407e-bac5-0762ad549a86 (no false retry) == 1
+PASS: D-09(3): kubelet Killing event SIGTERM timestamp captured for document-worker-d5db9bb7f-8dhw8 == 2026-07-17T10:08:56Z
+waiting for the pod-status watcher to capture document-worker-d5db9bb7f-8dhw8's terminal state (bounded 90s)...
+termination capture: 1 (watcher lines: 6)
+PASS: D-09(3): pod document-worker-d5db9bb7f-8dhw8 terminated.finishedAt captured (live or via continuous snapshot) == 2026-07-17T10:11:18Z
+PASS: D-09(3): jobs.finished_at captured for long job 37392708-5893-407e-bac5-0762ad549a86 == 2026-07-1710:11:18.847726+00
+PASS: D-09(3) -- SIGTERM (2026-07-17T10:08:56Z) occurred BEFORE job completion (2026-07-1710:11:18.847726+00)
+PASS: D-09(3) -- pod document-worker-d5db9bb7f-8dhw8 terminated gracefully (reason=Completed exit=0), well before terminationGracePeriodSeconds=330s
+PASS: SC3 evidence -- .planning/phases/28-autoscale-load-proof/evidence/sc3-timestamps-20260717T100342Z.txt
+
+=== ALL 27 ASSERTIONS PASSED ===
+SC1 (D-04/D-05): image-class burst-of-20 scaled worker 0->=2 replicas within 60s of true zero -- PASS
+SC2 (D-06): image worker full-cycled back to 0 replicas after burst drain -- PASS
+SC3 (D-07/D-08): long document job survived a genuine KEDA/HPA 2->1 downscale via deterministic pod-deletion-cost victim selection -- PASS
+SC4/D-09: triple-check verified -- job done+downloadable, exactly one queued->active transition, graceful SIGTERM-before-completion exit -- PASS
+Evidence: .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-20260717T100342Z.csv, .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-20260717T100342Z.png, .planning/phases/28-autoscale-load-proof/evidence/sc3-timestamps-20260717T100342Z.txt, .planning/phases/28-autoscale-load-proof/evidence/gate-transcript-20260717T100342Z.log
+
+=== TEARDOWN (D-12: OrbStack must never be left hot) ===
+waiting for octoconv workloads to be gone...
+octoconv namespace deployments remaining: 0
+
+✅ PASS -- Phase 28 load-proof gate run complete (27 checks). Transcript: .planning/phases/28-autoscale-load-proof/evidence/gate-transcript-20260717T100342Z.log

@@ -1,0 +1,17 @@
+# Phase 28 SC3 downscale-soak evidence -- run 20260717T100342Z
+# long_job_id=37392708-5893-407e-bac5-0762ad549a86 short_job_id=f533434a-1d5b-482d-9a32-21fb33cd288b busy_pod=document-worker-d5db9bb7f-8dhw8
+read_ts=2026-07-17T10:08:44Z pod=document-worker-d5db9bb7f-8dhw8 ADDED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-17T10:08:56Z pod=document-worker-d5db9bb7f-8dhw8 MODIFIED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-17T10:08:56Z pod=document-worker-d5db9bb7f-8dhw8 MODIFIED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-17T10:11:19Z pod=document-worker-d5db9bb7f-8dhw8 MODIFIED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-17T10:11:18Z
+read_ts=2026-07-17T10:11:20Z pod=document-worker-d5db9bb7f-8dhw8 MODIFIED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-17T10:11:18Z
+read_ts=2026-07-17T10:11:20Z pod=document-worker-d5db9bb7f-8dhw8 DELETED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-17T10:11:18Z
+
+# D-09 triple-check raw evidence
+short_job_finished_at=2026-07-1710:08:45.176094+00
+sigterm_killing_event_ts=2026-07-17T10:08:56Z
+pod_terminated_reason=Completed
+pod_terminated_exit_code=0
+pod_terminated_finished_at=2026-07-17T10:11:18Z
+job_finished_at=2026-07-1710:11:18.847726+00
+queued_to_active_count=1
