@@ -1,8 +1,8 @@
 # Phase 29: v1.6 Hardening Tail - Pattern Map
 
 **Mapped:** 2026-07-18
-**Files analyzed:** 10 (3 ScaledObject templates treated as one repeated pattern + 7 distinct files)
-**Analogs found:** 9 / 10 (in-repo self-analogs; 1 item — checksum/config annotation — has no in-chart precedent, standard Helm idiom supplied instead)
+**Files analyzed:** 11 (3 ScaledObject templates treated as one repeated pattern + 8 distinct files, incl. _helpers.tpl)
+**Analogs found:** 10 / 11 (in-repo self-analogs; 1 item — checksum/config annotation — has no in-chart precedent, standard Helm idiom supplied instead, adapted to this chart's single-file convention via a named-template)
 
 This is a pure hardening/bugfix phase: every touched file already exists. "Analog" below in most cases means **sibling file in the same near-identical trio** (ScaledObject) or **the file's own established internal pattern** that the fix must stay consistent with.
 
@@ -13,7 +13,8 @@ This is a pure hardening/bugfix phase: every touched file already exists. "Analo
 | `deploy/chart/octoconv/templates/scaledobject-image.yaml` | config (Helm template) | event-driven (metric-triggered scaler) | `scaledobject-document.yaml` / `scaledobject-html.yaml` (siblings) | exact (near-identical trio) |
 | `deploy/chart/octoconv/templates/scaledobject-document.yaml` | config (Helm template) | event-driven | `scaledobject-image.yaml` / `scaledobject-html.yaml` (siblings) | exact |
 | `deploy/chart/octoconv/templates/scaledobject-html.yaml` | config (Helm template) | event-driven | `scaledobject-image.yaml` / `scaledobject-document.yaml` (siblings) | exact |
-| `deploy/chart/octoconv/templates/prometheus.yaml` | config (Helm template) | batch/config-mount | none in-chart (no `checksum/config` precedent anywhere in `deploy/chart/octoconv/templates/`) | no analog — standard Helm idiom |
+| `deploy/chart/octoconv/templates/prometheus.yaml` | config (Helm template) | batch/config-mount | none in-chart for `checksum/config`; the scrape-config extraction mirrors `_helpers.tpl`'s existing `define` idiom | partial — standard Helm idiom, named-template variant |
+| `deploy/chart/octoconv/templates/_helpers.tpl` | config (Helm named-templates) | — | itself (existing `octoconv.name` / `octoconv.commonEnv` defines) | exact (self-extend) |
 | `deploy/chart/octoconv/values.yaml` | config | — (comment-only touch) | itself (existing `keda.*` block) | exact (self-edit) |
 | `scripts/presets-rest-acceptance.sh` | test (live acceptance gate) | request-response (HTTP assertions) | itself (existing client-mint/base-url/no-leak-404 sections) | exact (self-extend) |
 | `docker-compose.yml` (api service env block) | config | — | own file's `webhookWorker`/`values.yaml`-side `operatorClientIds` comment (Go side); NO in-file `${VAR:-}` precedent — closest analog is shell-script usage in `scripts/keda-gate.sh` | role-match, no exact in-file precedent |
@@ -63,38 +64,67 @@ Change `state=~"pending|active"` → `state=~"pending|active|retry"` on all thre
               periodSeconds: 15
   {{- end }}
 ```
-Bug: Go template truthy-check on `{{- if ... }}` treats the numeric value `0` identically to unset/`null` — a caller who explicitly wants `stabilizationWindowSeconds: 0` (instant downscale) silently gets the k8s default (300s) instead. Fix per D-06 with `hasKey`/explicit-nil check, e.g.:
+Bug: Go template truthy-check on `{{- if ... }}` treats the numeric value `0` identically to unset/`null` — a caller who explicitly wants `stabilizationWindowSeconds: 0` (instant downscale) silently gets the k8s default (300s) instead. Fix per D-06 with a guard requiring BOTH `hasKey` AND `ne ... nil` — both mandatory:
 ```yaml
-  {{- if hasKey .Values.keda.document "scaleDownStabilizationSeconds" }}
-  {{- if ne .Values.keda.document.scaleDownStabilizationSeconds nil }}
+  {{- if and (hasKey .Values.keda.document "scaleDownStabilizationSeconds") (ne .Values.keda.document.scaleDownStabilizationSeconds nil) }}
   ...
   {{- end }}
-  {{- end }}
 ```
-(exact idiom is Claude's discretion per D-08 — any pattern that distinguishes "unset/null" from "explicit 0" is acceptable; keep the same 2-space Helm indent style used throughout this file).
+(or the nested two-`if` equivalent). **`hasKey` alone is not sufficient** — it is TRUE for the production default `scaleDownStabilizationSeconds: null` (`values.yaml:157`), which would emit a broken `stabilizationWindowSeconds: <no value>` block on every default render (the WR-01-class silent bug this phase closes). The pair distinguishes three states: unset/null → block NOT rendered (k8s 300s default preserved); explicit `0` → `stabilizationWindowSeconds: 0`; explicit N → N. Exact `and`-form vs nested-`if` form is Claude's discretion per D-08; keep the same 2-space Helm indent style used throughout this file.
 
 **Shared boilerplate to preserve on every edit** (do not touch): the `{{- if and .Values.keda.enabled .Values.prometheus.enabled }}` co-dependency guard (`scaledobject-image.yaml:13`), `fallback: {failureThreshold: 3, replicas: 1}` block, `metadata.labels` via `octoconv.labels` include.
 
 ---
 
-### `deploy/chart/octoconv/templates/prometheus.yaml` (config, D-02)
+### `deploy/chart/octoconv/templates/prometheus.yaml` + `_helpers.tpl` (config, D-02 / WR-05)
 
-**No in-chart analog** — grepped every template in `deploy/chart/octoconv/templates/` for `checksum` / `sha256`: zero hits. This is a first-of-kind addition to this chart.
+**No in-chart `checksum/config` analog** — grepped every template in `deploy/chart/octoconv/templates/` for `checksum` / `sha256`: zero hits. This is a first-of-kind addition to this chart.
 
-**Target location** — the pod template metadata block, `prometheus.yaml:29-33`:
+**CRITICAL — do NOT use the whole-file self-hash idiom here.** The common community snippet `checksum/config: {{ include (print $.Template.BasePath "/prometheus.yaml") . | sha256sum }}` assumes the ConfigMap lives in a DIFFERENT file from the Deployment carrying the annotation. In this chart, `prometheus.yaml` deliberately keeps the Deployment, ConfigMap, AND Service in ONE file (single-file convention, matching `redis.yaml`, per the file header at `prometheus.yaml:2`). Hashing that same file from inside its own pod-template annotation is self-referential → **infinite template recursion → `helm template`/`helm lint` hard-fail (exit 1)** (empirically reproduced by the phase checker). The "whole-file self-hash, zero refactor" framing is NOT viable for this file's convention.
+
+**Correct approach — extract the scrape-config CONTENT into a shared named-template.**
+
+The ConfigMap data block to extract (`prometheus.yaml:65-74`):
 ```yaml
-  template:
-    metadata:
-      labels:
-        {{- include "octoconv.labels" . | nindent 8 }}
-        {{- include "octoconv.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: octoconv-api
+        metrics_path: /metrics
+        static_configs:
+          - targets:
+              - api.{{ .Values.global.namespace }}.svc.cluster.local:9090
 ```
-Add an `annotations:` block here (standard Helm idiom — same "template rendering forces pod restart on config drift" pattern used community-wide):
+
+1. In `_helpers.tpl`, add a named-template (mirror the existing `define` style at `_helpers.tpl:4-6` / `49-55`):
+```yaml
+{{- define "octoconv.prometheusScrapeConfig" -}}
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: octoconv-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api.{{ .Values.global.namespace }}.svc.cluster.local:9090
+{{- end -}}
+```
+2. In `prometheus.yaml`, replace the inline ConfigMap body with an include (keep the `prometheus.yml: |` key + indentation so the rendered ConfigMap is byte-equivalent):
+```yaml
+data:
+  prometheus.yml: |
+    {{- include "octoconv.prometheusScrapeConfig" . | nindent 4 }}
+```
+3. In `prometheus.yaml`, add the annotation to the pod-template metadata (`prometheus.yaml:29-33`, sibling of the existing `labels:`) hashing the SAME named-template — no recursion because it hashes only the scrape-config content, not the enclosing file:
 ```yaml
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/prometheus.yaml") . | sha256sum }}
+        checksum/config: {{ include "octoconv.prometheusScrapeConfig" . | sha256sum }}
 ```
-Claude's Discretion (per CONTEXT.md line 36): whether the checksum covers the whole `prometheus.yaml` file (self-referential — includes the Deployment spec too, simplest, matches the common Helm community pattern of hashing the whole template that defines both the ConfigMap and consuming Deployment) or narrows to just the `ConfigMap`'s `data.prometheus.yml` block via a `toYaml`/sub-template. The whole-file self-hash is the more common idiom and requires zero refactor of this single-file convention (this file already deliberately keeps Deployment+ConfigMap+Service in one file, matching `redis.yaml`'s "same single-file convention" per the file's own header comment at `prometheus.yaml:3`).
+Both consumers (ConfigMap data + pod-template annotation) now derive from one source: a scrape-config change rolls the pod, and `helm template`/`lint` render clean.
+
+**Claude's Discretion** (per CONTEXT.md): whether the named-template holds the whole scrape-config block (recommended, simplest) or is narrowed further — but the whole-file `Template.BasePath` self-hash is explicitly OFF the table.
 
 **Existing conventions to preserve in this file**: `{{- if .Values.prometheus.enabled }}` top-level guard (`prometheus.yaml:16`), `app.kubernetes.io/component: prometheus` labeling discipline (deliberately NOT `octoconv.io/tier: app` — see PITFALL 1 comment at `prometheus.yaml:8-14`), `---` doc separators between Deployment/ConfigMap/Service.
 
@@ -256,7 +286,7 @@ SAMPLE_IMAGE = os.path.join(
     "internal", "e2e", "testdata", "sample.png",
 )
 ```
-(exact relative depth: `scripts/fixtures/gen_heavy_docx.py` → repo root is two `..` up, matching `internal/e2e/testdata/sample.png`'s existing path components already used in the current (broken) join). Preserve the existing `have_sample_image = os.path.isfile(SAMPLE_IMAGE)` graceful-degradation call site (line 63) unchanged — only the constant's construction changes.
+(exact relative depth: `scripts/fixtures/gen_heavy_docx.py` → repo root is two `..` up, matching `internal/e2e/testdata/sample.png`'s existing path components already used in the current (broken) join). Preserve the existing `have_sample_image = os.path.isfile(SAMPLE_IMAGE)` graceful-degradation call site (line 63) unchanged — only the constant's construction changes, plus a loud stderr WARNING when the fixture is absent.
 
 ---
 
@@ -293,6 +323,7 @@ D-07's new step in `keda-gate.sh` REPLACES this `--connect-to`/port-forward work
 - `assert_nonempty`/`assert_eq` (`keda-gate.sh:59-77`) for the new health-check and byte-count assertions — same shape as `keda-load-proof.sh`'s (byte-identical helper, both scripts keep their own copy per each file's "copied verbatim" comment, e.g. `keda-load-proof.sh:106`).
 - Teardown/trap (`keda-gate.sh:86-119`) — any new port-forward or background PID this step introduces must be added to `teardown()`'s kill sequence, matching the `API_PF_PID`/`DB_PF_PID` pattern already there.
 - The job whose result URL gets probed already exists in this script — SC2's image-class job (`keda-gate.sh:365-373`, `IMAGE_JOB_ID`) is the natural attachment point: after `waitForReplicasAtLeast worker 1 120`, poll the job to `done` (pattern already used at `keda-gate.sh:416-426` for the SC2/D-12c drain wait), extract its `download_url` (same `grep -o '"download_url":"[^"]*"'` extraction shape used in `keda-load-proof.sh:812`), then run the new direct-dial step against it.
+- Pre-flight OrbStack discipline: before the k8s gate port-forwards svc/api to host :8090 (the SAME port the compose api binds), assert `docker compose ps -q` is empty and loud-fail otherwise — a still-running compose stack would collide with the port-forward.
 
 ## Shared Patterns
 
@@ -315,6 +346,10 @@ Loud-fail, self-documenting PASS/FAIL transcript lines, EXIT-trap teardown that 
 **Source:** `deploy/chart/octoconv/templates/scaledobject-image.yaml:13` (and identical in the other two)
 **Apply to:** any edit to the three ScaledObject templates — must never break `{{- if and .Values.keda.enabled .Values.prometheus.enabled }}`.
 
+### Helm named-template `define`/`include`
+**Source:** `deploy/chart/octoconv/templates/_helpers.tpl:4-6` (`octoconv.name`), `:49-55` (`octoconv.commonEnv`)
+**Apply to:** the new `octoconv.prometheusScrapeConfig` named-template (D-02) — a single source `include`-d by BOTH the Prometheus ConfigMap data and the pod-template checksum annotation, avoiding the whole-file self-hash recursion.
+
 ### Helm values-file comment discipline
 **Source:** `deploy/chart/octoconv/values.yaml:34-37` (operatorClientIds), `:96-97,109-110,123-126` (multi-line block-comment-above-key style), `:157` (inline trailing-comment style)
 **Apply to:** `values.yaml` D-08 invariant comment addition, and any new ScaledObject template comment rewrites (D-01/D-03).
@@ -327,7 +362,7 @@ Loud-fail, self-documenting PASS/FAIL transcript lines, EXIT-trap teardown that 
 
 | File | Role | Data Flow | Reason |
 |---|---|---|---|
-| `deploy/chart/octoconv/templates/prometheus.yaml` (checksum/config annotation, D-02) | config | batch/config-mount | No `checksum/*` or `sha256sum` usage anywhere in `deploy/chart/octoconv/templates/` — this chart has never needed a config-drift-triggered pod restart before. Use the standard community Helm idiom (`{{ include (print $.Template.BasePath "/prometheus.yaml") . \| sha256sum }}` under `spec.template.metadata.annotations`) documented above. |
+| `deploy/chart/octoconv/templates/prometheus.yaml` (checksum/config annotation, D-02 / WR-05) | config | batch/config-mount | No `checksum/*` or `sha256sum` usage anywhere in `deploy/chart/octoconv/templates/`. The standard community whole-file self-hash idiom (`{{ include (print $.Template.BasePath "/prometheus.yaml") . \| sha256sum }}`) is NOT usable here — this file holds Deployment+ConfigMap+Service together, so a self-hash recurses infinitely (`helm template`/`lint` exit 1). Adapted idiom: extract the scrape-config content into an `octoconv.prometheusScrapeConfig` named-template in `_helpers.tpl`, hash THAT (`{{ include "octoconv.prometheusScrapeConfig" . \| sha256sum }}`), and `include` it in both the ConfigMap data and the pod-template annotation. |
 | `scripts/keda-gate.sh` (presigned direct-dial step, D-07) | test | request-response | No presigned-URL-fetch code exists in `keda-gate.sh` today (only in its sibling `keda-load-proof.sh`, and that one is port-forward-based, i.e. the OPPOSITE of what D-07 wants). Adapt `keda-load-proof.sh`'s block by REMOVING the port-forward/`--connect-to` workaround, not by copying it. |
 
 ## Metadata

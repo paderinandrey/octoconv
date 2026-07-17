@@ -14,9 +14,9 @@
 <decisions>
 ## Implementation Decisions
 
-### HARD-01 + соседние KEDA-робастность (WR-01/WR-02/WR-06)
+### HARD-01 + соседние KEDA-робастность (WR-01/WR-05/WR-06)
 - **D-01:** WR-01 fix = flip `ignoreNullValues: "true"` → `"false"` на всех трёх ScaledObject-шаблонах (image/document/html). Сустайнед absence метрики (api недоступна) становится scaler error → `fallback.replicas: 1` держит по одной реплике на класс вместо ложного scale-to-zero с живым бэклогом. Цена — безобидный fallback-blip на fresh install / коротком рестарте api до первого enqueue (принимаем, fail-safe в сторону доступности, как webhook-worker fail-closed). Обновить in-template комментарий: удалить рассуждение про «genuinely empty queue» как основание для true.
-- **D-02:** WR-02 (взят в scope — один корень с WR-01): добавить `checksum/config` аннотацию в pod-template Prometheus Deployment (`sha256sum` над prometheus.yaml template) — helm upgrade при смене scrape-config катит под, иначе stale scrape вырождается в тот же пустой-результат WR-01. Стандартный Helm-паттерн.
+- **D-02:** WR-05 checksum (взят в scope — один корень с WR-01): добавить `checksum/config` аннотацию в pod-template Prometheus Deployment — helm upgrade при смене scrape-config катит под, иначе stale scrape вырождается в тот же пустой-результат WR-01. Стандартный Helm-паттерн. **ВАЖНО (idiom fix):** prometheus.yaml — единый файл Deployment+ConfigMap+Service, поэтому хэшировать ВЕСЬ файл нельзя (self-hash того же файла, что содержит и аннотацию → бесконечная рекурсия шаблона, `helm template`/`lint` падает exit 1). Вместо этого вынести scrape-config-контент (тело `data.prometheus.yml`) в named-template в `_helpers.tpl` (`octoconv.prometheusScrapeConfig`), `include`-ить его И в ConfigMap `data:`, И в аннотации `checksum/config: {{ include "octoconv.prometheusScrapeConfig" . | sha256sum }}` — хэшируется только контент scrape-config, не весь файл, рекурсии нет. NB: реальный WR-02 из 27-REVIEW (Helm-rendered `spec.replicas` дерётся с KEDA на каждом `helm upgrade`) уже ЗАКРЫТ в Phase 28 (D-10 — `{{- if and .Values.keda.enabled .Values.prometheus.enabled }}` conditional в deployment-worker.yaml); в scope этой фазы он не входит.
 - **D-03:** WR-06 (взят в scope): изменить PromQL-триггер всех трёх ScaledObject на `state=~"pending|active|retry"` (было pending+active) — retry-таски это неизбежная имминентная работа; убирает blind spot, где воркер на 0 реплик не поднимается на retry-бэклог до reconciler-свипа (~12.6 мин worst case). Обновить D-04-комментарий про выбор состояний. МЕНЯЕТ поведение скейлинга — перепроверить живым гейтом (HARD-04 прогон).
 
 ### HARD-02 — operator live acceptance (OPER-01)
@@ -24,16 +24,16 @@
 - **D-05:** Пробросить `OPERATOR_CLIENT_IDS` в compose api-сервис: `OPERATOR_CLIENT_IDS: "${OPERATOR_CLIENT_IDS:-}"` в docker-compose.yml (сейчас переменной там нет — WR-03). Скрипт минтит двух клиентов (operator + regular), экспортит UUID оператора в `OPERATOR_CLIENT_IDS`, пересоздаёт/рестартит api-сервис чтобы подхватить env, затем гоняет матрицу. Против COMPOSE-стека (дешевле k8s; фаза не трогает k8s-специфику API).
 
 ### HARD-03 — gate-tooling warnings (шесть из 28-REVIEW)
-- **D-06:** Закрыть все шесть, каждый с диффом и re-run соответствующего гейта: (1) falsy-`0` в ScaledObject stabilization-шаблоне (`if hasKey`/explicit-nil вместо truthy-чека, чтобы значение 0 не терялось); (2) SC3 stale-pod гонка в keda-load-proof.sh (не брать earliest creationTimestamp — исключать Terminating); (3) false-PASS download-чек (`curl -f`/http_code); (4) orphaned watcher-процесс (kill child pipeline, не только subshell); (5) pin интерпретатора в render_evidence.py (`uv run --python 3.11` или shebang-guard); (6) CWD-независимая SAMPLE_IMAGE в gen_heavy_docx.py (resolve относительно __file__).
+- **D-06:** Закрыть все шесть, каждый с диффом и re-run соответствующего гейта: (1) falsy-`0` в ScaledObject stabilization-шаблоне (`if hasKey` AND explicit-`ne ... nil` — ОБА условия, не только hasKey — чтобы значение 0 не терялось И чтобы production-дефолт `null` не рендерил битый блок); (2) SC3 stale-pod гонка в keda-load-proof.sh (не брать earliest creationTimestamp — исключать Terminating); (3) false-PASS download-чек (`curl -f`/http_code); (4) orphaned watcher-процесс (kill child pipeline, не только subshell); (5) pin интерпретатора в render_evidence.py (`uv run --python 3.11` или shebang-guard); (6) CWD-независимая SAMPLE_IMAGE в gen_heavy_docx.py (resolve относительно __file__).
 
 ### HARD-04 — presigned direct-dial recheck (K8S-02)
 - **D-07:** Шаг в `scripts/keda-gate.sh` (не отдельный install-цикл): (1) пред-проверка здоровья OrbStack-демона/прокси (loud-fail если клин — не маскировать обходом); (2) прямой `curl` по presigned FQDN-URL с OrbStack-хоста БЕЗ `--connect-to`/port-forward; bounded retry. Если демон клинит — гейт честно падает с диагностикой, а не проходит через workaround. Закрывает degraded-transport оговорку из 24-VERIFICATION.
 
 ### Структура фазы (планировщику)
-- **D-08:** Группировка в 3 плана: План A — chart-робастность оффлайн (HARD-01 D-01/02/03 + HARD-03 gate-шаблон-фикс подпункт 1 — всё трогает ScaledObject/prometheus/values, один владелец шаблонов, оффлайн helm template/lint проверки). План B — HARD-02 compose acceptance (Go-код не трогается, только скрипт+compose). План C — HARD-03 остальные скрипт-фиксы (2-6) + HARD-04 live-гейт присоединение. Причина группировки: HARD-01 и gate-шаблон-фикс HARD-03 оба трогают ScaledObject-шаблон — нельзя параллельно (конфликт), поэтому оба в План A.
+- **D-08:** Группировка в 3 плана: План A — chart-робастность оффлайн (HARD-01 D-01/02/03 + HARD-03 gate-шаблон-фикс подпункт 1 — всё трогает ScaledObject/prometheus/values/_helpers.tpl, один владелец шаблонов, оффлайн helm template/lint проверки). План B — HARD-02 compose acceptance (Go-код не трогается, только скрипт+compose). План C — HARD-03 остальные скрипт-фиксы (2-6) + HARD-04 live-гейт присоединение. Причина группировки: HARD-01 и gate-шаблон-фикс HARD-03 оба трогают ScaledObject-шаблон — нельзя параллельно (конфликт), поэтому оба в План A. План B не трогает `_helpers.tpl` — wave-1 параллелизм A‖B сохраняется.
 
 ### Claude's Discretion
-- Точная форма checksum-аннотации (весь prometheus.yaml vs только config-блок)
+- Точная форма checksum-аннотации в рамках named-template подхода (весь scrape-config-блок как один named-template vs дальнейшее сужение) — но НЕ whole-file self-hash (рекурсия)
 - Порядок волн (A и B независимы — могут параллельно; C зависит от A по ScaledObject-состоянию для гейт-прогона)
 - Как именно скрипт рестартит compose api (`docker compose up -d --force-recreate api` vs down/up)
 - Точные диффы шести gate-tooling фиксов в рамках описанного намерения
@@ -47,10 +47,11 @@
 
 ### KEDA robustness (HARD-01)
 - `deploy/chart/octoconv/templates/scaledobject-image.yaml` (ignoreNullValues:41, PromQL query, fallback block — identical shape in scaledobject-document.yaml / scaledobject-html.yaml)
-- `deploy/chart/octoconv/templates/prometheus.yaml` (pod-template — checksum annotation target for WR-02)
+- `deploy/chart/octoconv/templates/prometheus.yaml` (pod-template — checksum annotation target for WR-05)
+- `deploy/chart/octoconv/templates/_helpers.tpl` (named-template `octoconv.prometheusScrapeConfig` host for the WR-05 checksum — shared by the ConfigMap data and the pod-template annotation)
 - `deploy/chart/octoconv/values.yaml` (keda.* cooldownPeriod values — WR-06 invariant context)
 - `internal/queue/queue.go` (retry backoff schedules — the WR-06 invariant these must relate to)
-- `.planning/milestones/v1.6-phases/27-keda-autoscaling/27-REVIEW.md` (WR-01/WR-02/WR-06 full text + suggested fixes)
+- `.planning/milestones/v1.6-phases/27-keda-autoscaling/27-REVIEW.md` (WR-01/WR-05/WR-06 full text + suggested fixes; real WR-02 spec.replicas already closed by Phase 28 D-10)
 
 ### Operator acceptance (HARD-02)
 - `scripts/presets-rest-acceptance.sh` (the script to extend with a system-scope section)
@@ -82,7 +83,7 @@
 - Gate scripts: bash `set -euo pipefail`, loud-fail, EXIT-trap teardown, no silent workarounds
 
 ### Integration Points
-- `deploy/chart/octoconv/templates/scaledobject-*.yaml` + `prometheus.yaml` (single owner — plan A serializes ScaledObject edits)
+- `deploy/chart/octoconv/templates/scaledobject-*.yaml` + `prometheus.yaml` + `_helpers.tpl` (single owner — plan A serializes ScaledObject/helper edits)
 - `docker-compose.yml` api service (HARD-02 env passthrough)
 - `scripts/keda-gate.sh` STEP for presigned-from-host (HARD-04)
 
