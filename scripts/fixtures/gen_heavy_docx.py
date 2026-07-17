@@ -8,7 +8,7 @@ there is no local soffice/libreoffice binary on this host, so DO NOT attempt
 to time this locally; see 28-RESEARCH.md Pitfall 4).
 
 Invoked ONLY via ephemeral uv, e.g.:
-    uv run --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
+    uv run --python 3.12 --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
         --page-units 300 --out /tmp/heavy.docx
 
 This script imports only `docx` (python-docx) plus stdlib. It is NEVER added
@@ -23,6 +23,7 @@ committed to the repo.
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import docx
 from docx.oxml import OxmlElement
@@ -30,7 +31,14 @@ from docx.oxml.ns import qn
 
 # Reuse the existing image fixture so no new binary asset needs to be
 # committed for this generator (28-RESEARCH.md Code Examples).
-SAMPLE_IMAGE = os.path.join("internal", "e2e", "testdata", "sample.png")
+#
+# WR-06 (28-REVIEW): resolve relative to THIS FILE, not the caller's CWD.
+# The gate happens to `cd` to the repo root first, but any other invocation
+# (the docstring's own example run from elsewhere, a future caller, manual
+# calibration) would otherwise silently set have_sample_image=False and
+# generate a materially lighter document while still reporting the same
+# --page-units -- invalidating the D-07 calibration with zero signal.
+SAMPLE_IMAGE = str(Path(__file__).resolve().parents[2] / "internal" / "e2e" / "testdata" / "sample.png")
 
 
 def add_toc_field(document):
@@ -61,6 +69,12 @@ def build_document(page_units, out_path):
     d.add_page_break()
 
     have_sample_image = os.path.isfile(SAMPLE_IMAGE)
+    if not have_sample_image:
+        print(
+            f"WARNING: {SAMPLE_IMAGE} not found -- generating WITHOUT images; "
+            "calibration will not match image-bearing runs",
+            file=sys.stderr,
+        )
 
     for i in range(page_units):
         d.add_heading(f"Section {i}", level=1)

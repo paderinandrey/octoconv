@@ -6,7 +6,7 @@ depth and pod (replica) count plotted on one shared time axis, headless
 (Agg backend -- no DISPLAY required).
 
 Invoked ONLY via ephemeral uv, e.g.:
-    uv run --with matplotlib python3 scripts/fixtures/render_evidence.py \
+    uv run --python 3.12 --with matplotlib python3 scripts/fixtures/render_evidence.py \
         --csv .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-<ts>.csv \
         --png .planning/phases/28-autoscale-load-proof/evidence/sc1-sc2-burst-<ts>.png
 
@@ -69,7 +69,12 @@ def main():
         if pod_col:
             pod_count_label = pod_col
         for row in reader:
-            ts.append(datetime.fromisoformat(row["timestamp"]))
+            # WR-05 (28-REVIEW): datetime.fromisoformat only accepts a
+            # trailing "Z" on Python 3.11+; the sampler always writes
+            # "%Y-%m-%dT%H:%M:%SZ". Normalize defensively so this parses on
+            # ANY 3.x interpreter, independent of the `uv run --python`
+            # pin at the call site (belt-and-suspenders).
+            ts.append(datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")))
             queue_depth.append(int(row.get("queue_depth") or 0))
             pod_count.append(int(row.get(pod_col) or 0) if pod_col else 0)
 
