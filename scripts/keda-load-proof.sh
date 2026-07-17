@@ -795,22 +795,24 @@ assert_nonempty_redacted "$RESULT_URL" "D-09(1): long job result URL present in 
 # The presigned URL embeds the IN-CLUSTER S3 endpoint
 # (minio.<ns>.svc.cluster.local:9000), which this host cannot resolve --
 # and the host name is part of the S3 v4 signature, so it cannot be
-# rewritten. Port-forward minio on the URL's own port and pin the
-# in-cluster hostname to 127.0.0.1 via curl --resolve: the URL (and its
-# signature) stay byte-identical while the TCP connection goes through the
-# port-forward. Same sanctioned reachability mechanism as the api/postgres
-# port-forwards above.
+# rewritten. Port-forward minio on a free LOCAL port (OrbStack itself
+# already listens on host port 9000, so the URL's own port cannot be
+# bound) and redirect the TCP connection there via curl --connect-to:
+# the URL, Host header, and signature stay byte-identical while only the
+# transport goes through the port-forward. Same sanctioned reachability
+# mechanism as the api/postgres port-forwards above.
 RESULT_HOSTPORT=$(printf '%s' "$RESULT_URL" | awk -F/ '{print $3}')
 RESULT_HOST=${RESULT_HOSTPORT%%:*}
 RESULT_PORT=${RESULT_HOSTPORT##*:}
 if [ "$RESULT_PORT" = "$RESULT_HOSTPORT" ]; then
 	RESULT_PORT=80
 fi
-kubectl port-forward -n "$NAMESPACE" svc/minio "${RESULT_PORT}:9000" >/tmp/keda-loadproof-minio-pf.log 2>&1 &
+MINIO_LOCAL_PORT="19000"
+kubectl port-forward -n "$NAMESPACE" svc/minio "${MINIO_LOCAL_PORT}:9000" >/tmp/keda-loadproof-minio-pf.log 2>&1 &
 MINIO_PF_PID=$!
 sleep 3
 
-RESULT_BYTES=$(curl -s --resolve "${RESULT_HOST}:${RESULT_PORT}:127.0.0.1" -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
+RESULT_BYTES=$(curl -s --connect-to "${RESULT_HOST}:${RESULT_PORT}:127.0.0.1:${MINIO_LOCAL_PORT}" -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
 kill "$MINIO_PF_PID" >/dev/null 2>&1 || true
 MINIO_PF_PID=""
 if [ "${RESULT_BYTES:-0}" -le 0 ]; then
