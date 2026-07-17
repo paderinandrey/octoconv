@@ -420,14 +420,16 @@ psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
 | A3 | `python-docx`'s low-level OXML API (`OxmlElement`/`qn`) TOC-field-insertion pattern shown in Code Examples works unmodified in python-docx 1.2.0 (the exact version resolved live this session) | Code Examples | If the API surface differs slightly, the TOC field may need adjustment; core page/table/image generation (the primary duration driver) does not depend on this and is unaffected |
 | A4 | `python-docx` and `matplotlib` package ages/download counts in the Package Legitimacy Audit table | Package Legitimacy Audit | Purely informational context (both are extremely well-known, long-established libraries); no material risk since neither is persisted into the dependency graph |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Exact effective HPA sync/KEDA polling floor for the tuned `scaleDownStabilizationSeconds`**
+   - RESOLVED: operationally handled by 28-03 Task 1 — the live in-cluster calibration run observationally confirms the 2→1 downscale settling time once scaleDownStabilizationSeconds is low and re-derives the long-job target duration from the OBSERVED number if it diverges from the 15s working assumption (28-03 Task 1 action + its <interfaces> Open-Question note).
    - What we know: KEDA's document class `pollingInterval` is 15s (values.yaml, verified); the Kubernetes HPA controller's own sync period defaults to 15s (`--horizontal-pod-autoscaler-sync-period`), and this flag could not be inspected on OrbStack's control plane this session (`kube-system` shows no accessible `kube-controller-manager` pod — OrbStack likely runs the control plane outside a visible Pod).
    - What's unclear: Whether OrbStack's k8s distribution has customized this flag away from the Kubernetes default.
    - Recommendation: Treat 15s as the working assumption (Kubernetes default, `[CITED]`), but have the calibration/trial-run step (already planned per D-07) also observationally confirm the 2→1 transition timing once `scaleDownStabilizationSeconds` is set low, adjusting the long-job target duration from the OBSERVED number rather than the theoretical one if they diverge.
 
 2. **Exact evidence-log TTL for `kubectl events` on this OrbStack version**
+   - RESOLVED: operationally handled by 28-02 Task 3 — the SC3 scenario polls and persists pod / event snapshots continuously (Pitfall 3), reading the Killing-event SIGTERM promptly within the same gate run rather than depending on long event retention, so any TTL well under ~1h is sufficient.
    - What we know: Kubernetes' common default is ~1h; OrbStack has not been independently confirmed to match.
    - What's unclear: Whether OrbStack customizes `--event-ttl` on `kube-apiserver`.
    - Recommendation: Design the gate to read/persist events promptly (within the same script run, well under any plausible TTL) rather than depending on long retention — already the natural implementation given the gate's teardown-on-exit design (D-12).
