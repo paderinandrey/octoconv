@@ -8,7 +8,16 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current Milestone: (не начат — v1.6 shipped 2026-07-17)
+## Current Milestone: v1.7 Audio Engine & Hardening
+
+**Goal:** Четвёртый engine-класс — офлайн-транскрипция аудио через whisper.cpp по проверенному паттерну (отдельная очередь/воркер/бинарник, hardened exec, KEDA) — плюс закрытие hardening-хвоста v1.6.
+
+**Target features:**
+- Hardening-хвост v1.6: WR-01 (семантика пустого PromQL при падении api), live-скрипт OPER-01 + проброс OPERATOR_CLIENT_IDS в compose, гейт-тулинг warnings из 28-REVIEW, K8S-02 direct-dial перепроверка
+- Audio engine-класс: audio-форматы → транскрипт через whisper.cpp CLI в отдельном контейнере; magic-bytes валидация, transient/terminal retry, отдельная asynq-очередь + KEDA ScaledObject, chart-интеграция
+- SEED-001 фундамент: контракт результата транскрипции (формат, таймстампы) проектируется с прицелом на будущий разбор урока (ошибки + spaced-repetition колода — следующий милстоун)
+
+**Key context:** движок локальный (без внешних API — воркеры остаются офлайн); анализ ошибок отложен; k8s-в-CI отложен (K8SV2-01); SEED-001 — рамка вертикали. Прошлое состояние: v1.6 shipped 2026-07-17 (см. Context).
 
 <details>
 <summary>v1.6 Kubernetes & KEDA — SHIPPED 2026-07-17</summary>
@@ -80,9 +89,11 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- v1.6 shipped 2026-07-17. Next milestone not yet defined — run /gsd:new-milestone. -->
+<!-- Milestone v1.7 (Audio Engine & Hardening). -->
 
-(нет — определяются при старте следующего милстоуна)
+- [ ] Клиент может отправить аудиофайл и получить транскрипт (whisper.cpp, офлайн) через тот же async-пайплайн, что и остальные классы
+- [ ] Audio-класс встроен в полный контур: валидация содержимого, retry-семантика, KEDA-скейлинг, chart
+- [ ] Hardening-хвост v1.6 закрыт (WR-01, OPER-01 live-гейт, гейт-тулинг, K8S-02 direct-dial)
 
 ### Out of Scope
 
@@ -165,4 +176,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-17 after v1.6 milestone*
+*Last updated: 2026-07-17 after v1.7 milestone start*
