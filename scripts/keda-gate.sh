@@ -219,12 +219,15 @@ assert_eq "0" "${WEBHOOK_SO_COUNT_START:-0}" "ScaledObjects targeting webhook-wo
 # ---------------------------------------------------------------------------
 log "STEP 6: SC1 -- octoconv_queue_depth resolves at genuinely 0 replicas"
 
-# The worker Deployment's chart-owned spec.replicas defaults to 1 (helm
-# renders it that way before KEDA's HPA takes ownership). KEDA only scales
-# it down to minReplicaCount=0 once it has observed the queue empty across
-# its cooldownPeriod (60s for image) from ScaledObject creation -- this is
-# expected startup behavior, not a failure, so poll rather than assert
-# immediately. Bounded to cooldownPeriod (60s) + generous margin.
+# Post-WR-02 (Phase 28 D-10): the chart no longer renders spec.replicas for
+# the image worker when keda.enabled && prometheus.enabled are both true, so
+# Kubernetes defaults an unset replicas to 1 on fresh Deployment CREATE.
+# KEDA only scales it down to minReplicaCount=0 once it has observed the
+# queue empty across its cooldownPeriod (60s for image) from ScaledObject
+# creation -- this is expected fresh-install settling, not a failure (it is
+# inherent to omitted-replicas semantics, not the pre-WR-02 upgrade-reset
+# bug), so poll rather than assert immediately. Bounded to cooldownPeriod
+# (60s) + generous margin.
 echo "waiting for worker (image) to settle at 0 replicas (KEDA cooldownPeriod=60s + margin)..."
 IMAGE_REPLICAS_BEFORE="1"
 waited=0
