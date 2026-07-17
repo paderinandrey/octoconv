@@ -53,3 +53,24 @@ envFrom:
   - secretRef:
       name: octoconv-secret
 {{- end }}
+
+{{/*
+Prometheus scrape-config content (D-02/WR-05). Shared by templates/prometheus.yaml's
+ConfigMap `data.prometheus.yml` body AND its pod-template `checksum/config`
+annotation. prometheus.yaml is a single file holding the Deployment,
+ConfigMap, AND Service together — hashing the WHOLE FILE from inside that
+same file's pod-template annotation is a self-reference that recurses
+infinitely and fails `helm template`/`helm lint`. Hashing only THIS
+named-template's rendered content avoids the recursion while still rolling
+the Prometheus pod whenever the scrape config actually changes.
+*/}}
+{{- define "octoconv.prometheusScrapeConfig" -}}
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: octoconv-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - api.{{ .Values.global.namespace }}.svc.cluster.local:9090
+{{- end }}
