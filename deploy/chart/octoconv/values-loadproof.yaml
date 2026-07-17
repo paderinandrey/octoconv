@@ -1,0 +1,31 @@
+# Load-proof overlay — layered ON TOP of values-local.yaml, NEVER standalone
+# (same convention as values-e2e.yaml):
+#
+#   helm install octoconv deploy/chart/octoconv \
+#     -f deploy/chart/octoconv/values-local.yaml \
+#     -f deploy/chart/octoconv/values-loadproof.yaml -n octoconv
+#
+# Sets exactly two knobs needed for the live 0→N→0 load-proof gate (plans
+# 28-02/28-03) to have deterministic timing; both are dev/test-only and are
+# never applied to a production values file.
+
+keda:
+  document:
+    # Fast, deterministic 2->1 downscale (Phase 28 D-07/D-08, RESEARCH.md
+    # Pitfall 1). cooldownPeriod (values.yaml) governs only the 1->0
+    # transition; the standard-HPA-governed N->N-1 step defaults to a 300s
+    # stabilization window that would push the SC3 downscale past the long
+    # document job's own DOCUMENT_ENGINE_TIMEOUT=300s and silently
+    # invalidate the scenario's timing assumptions. 15s makes the downscale
+    # observable within the gate's polling window.
+    scaleDownStabilizationSeconds: 15
+
+documentWorker:
+  extraEnv:
+    # One job per pod (Phase 28 D-08): with the default ConfigMap value of
+    # "2", a single document-worker pod could pick up both the long-first
+    # and short-second SC3 jobs, making pod<->job victim selection
+    # ambiguous. Forcing concurrency=1 guarantees the submission order
+    # (long job first) deterministically maps pod1=long-job, so the
+    # downscale-victim annotation targets the correct pod.
+    DOCUMENT_WORKER_CONCURRENCY: "1"

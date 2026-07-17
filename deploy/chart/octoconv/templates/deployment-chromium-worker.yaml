@@ -22,7 +22,15 @@ metadata:
     {{- include "octoconv.labels" . | nindent 4 }}
     app.kubernetes.io/component: chromium-worker
 spec:
+  {{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+  # spec.replicas intentionally omitted when KEDA/HPA owns this Deployment
+  # (WR-02, Phase 28 D-10): rendering a fixed value here would make every
+  # `helm upgrade` reset a scaled-to-zero class back to this default,
+  # fighting the HPA. Once KEDA/HPA has taken ownership it manages
+  # spec.replicas directly via the scale subresource.
+  {{- else }}
   replicas: {{ .Values.chromiumWorker.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "octoconv.selectorLabels" (dict "component" "chromium-worker" "root" $) | nindent 6 }}
