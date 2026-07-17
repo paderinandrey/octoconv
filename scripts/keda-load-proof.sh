@@ -17,11 +17,12 @@
 #     submitted FIRST, a short document job SECOND (DOCUMENT_WORKER_
 #     CONCURRENCY=1 makes pod1=long/pod2=short deterministic); the gate
 #     annotates the busy pod (pod1) with controller.kubernetes.io/
-#     pod-deletion-cost=-1000 BEFORE the 2->1 downscale fires (never
-#     `kubectl delete pod` -- SC3 requires a genuine KEDA/HPA downscale
-#     event); the D-09 triple-check then proves the long job survived the
-#     downscale gracefully (SIGTERM before completion, no false retry,
-#     graceful exit before terminationGracePeriodSeconds).
+#     pod-deletion-cost=-1000 BEFORE the 2->1 downscale fires (this script
+#     never issues an imperative pod-deletion command -- SC3 requires a
+#     genuine KEDA/HPA downscale event); the D-09 triple-check then proves
+#     the long job survived the downscale gracefully (SIGTERM before
+#     completion, no false retry, graceful exit before
+#     terminationGracePeriodSeconds).
 #   SC4 (D-01/D-02/D-03): CSV sampler + rendered PNG + gate transcript are
 #     the timestamped evidence artifacts, committed under
 #     .planning/phases/28-autoscale-load-proof/evidence/.
@@ -69,10 +70,12 @@ GATE_OK=""
 API_PF_PID=""
 DB_PF_PID=""
 SAMPLER_PID=""
-# BUSY_POD is set by the SC3 scenario (Task 3 insertion point below); kept
-# declared here (empty) so teardown() can unconditionally reference it and
-# clear its pod-deletion-cost annotation regardless of which scenario ran.
+# BUSY_POD / SNAPSHOT_PID are set by the SC3 scenario below; kept declared
+# here (empty) so teardown() can unconditionally reference them and clear
+# the pod-deletion-cost annotation / kill the pod-snapshot loop regardless
+# of which scenario ran (D-12: nothing left running after EXIT).
 BUSY_POD=""
+SNAPSHOT_PID=""
 
 # D-03: evidence artifacts (CSV, PNG, gate transcript, SC3 timestamps) are
 # committed under this directory alongside the SUMMARY.
@@ -138,6 +141,10 @@ teardown() {
 	if [ -n "$SAMPLER_PID" ]; then
 		kill "$SAMPLER_PID" >/dev/null 2>&1 || true
 		wait "$SAMPLER_PID" 2>/dev/null || true
+	fi
+	if [ -n "$SNAPSHOT_PID" ]; then
+		kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+		wait "$SNAPSHOT_PID" 2>/dev/null || true
 	fi
 	if [ -n "$BUSY_POD" ]; then
 		kubectl annotate pod "$BUSY_POD" -n "$NAMESPACE" \
@@ -571,6 +578,261 @@ uv run --with matplotlib python3 scripts/fixtures/render_evidence.py \
 echo "PASS: SC1/SC2 evidence rendered -- CSV: $CSV_FILE, PNG: $EVIDENCE_DIR/sc1-sc2-burst-${RUN_TS}.png"
 
 # =============================================================================
-# === SC3 INSERTION POINT (Task 3 appends the downscale-soak scenario here,
-# === after SC1/SC2, before the final ALL-PASSED summary) ===================
+# STEP 7 (SC3/D-07/D-08/D-09): document-class downscale-soak. Independent of
+# the image burst above (document queue only). A long (calibrated ~200s)
+# and a short document job scale document-worker 0->2; the busy pod (the
+# one running the long job) is deterministically annotated with a low
+# pod-deletion-cost BEFORE the 2->1 downscale fires, so the ReplicaSet
+# controller's best-effort victim selection targets it -- the downscale
+# itself remains a genuine KEDA/HPA event (this script never issues an
+# imperative pod-deletion command).
 # =============================================================================
+log "STEP 7: SC3 -- document-class downscale-soak (long job survives a real KEDA downscale)"
+
+echo "waiting for document-worker to settle at 0 replicas (KEDA cooldownPeriod=120s + margin)..."
+DOC_REPLICAS_BEFORE="1"
+waited=0
+while [ "$waited" -lt 180 ]; do
+	DOC_REPLICAS_BEFORE=$(kubectl get deployment document-worker -n "$NAMESPACE" -o jsonpath='{.status.replicas}' 2>/dev/null || echo "0")
+	DOC_REPLICAS_BEFORE="${DOC_REPLICAS_BEFORE:-0}"
+	if [ "$DOC_REPLICAS_BEFORE" = "0" ]; then
+		break
+	fi
+	sleep 5
+	waited=$((waited + 5))
+done
+assert_eq "0" "$DOC_REPLICAS_BEFORE" "document-worker Deployment status.replicas before SC3 (TRUE zero precondition)"
+
+# Generate the calibrated heavy docx (D-07) into scratch space -- never
+# committed, generated at gate-run time.
+LONG_DOCX="/tmp/heavy-sc3-${RUN_TS}.docx"
+uv run --with python-docx python3 scripts/fixtures/gen_heavy_docx.py \
+	--page-units "$PAGE_UNITS" --out "$LONG_DOCX"
+
+# Submit the LONG job FIRST.
+LONG_JOB_ID=$(postJobPath "$LONG_DOCX" "pdf" "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+assert_nonempty "$LONG_JOB_ID" "SC3: long heavy-docx job submitted FIRST (page-units=$PAGE_UNITS)"
+
+DOC_REPLICAS_1=$(waitForReplicasAtLeast document-worker 1 180) || {
+	echo "FAIL: SC3 -- document-worker never reached >=1 replica within 180s of the long-job submission (observed: $DOC_REPLICAS_1)" >&2
+	exit 1
+}
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: SC3 -- document-worker scaled 0->${DOC_REPLICAS_1} after long job $LONG_JOB_ID"
+
+echo "waiting for long job $LONG_JOB_ID to reach status=active (confirms it is genuinely being processed before pod1 identification)..."
+long_status=""
+for i in $(seq 1 60); do
+	code=$(curl -s -o /tmp/keda-loadproof-long-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$LONG_JOB_ID")
+	long_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job.json | head -1 | cut -d'"' -f4)
+	if [ "$long_status" = "active" ] || [ "$long_status" = "done" ] || [ "$long_status" = "failed" ]; then
+		break
+	fi
+	sleep 3
+done
+assert_eq "active" "$long_status" "SC3: long job $LONG_JOB_ID reaches status=active"
+
+# Submit the SHORT job SECOND (DOCUMENT_WORKER_CONCURRENCY=1 keeps pod1 full
+# with the long job, so the short job deterministically goes to a NEW pod2).
+SHORT_JOB_ID=$(postJob "sample.docx" "pdf" "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+assert_nonempty "$SHORT_JOB_ID" "SC3: short sample.docx job submitted SECOND"
+
+DOC_REPLICAS_2=$(waitForReplicasAtLeast document-worker 2 180) || {
+	echo "FAIL: SC3 -- document-worker never reached >=2 replicas within 180s of the short-job submission (observed: $DOC_REPLICAS_2)" >&2
+	exit 1
+}
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: SC3 -- document-worker scaled ${DOC_REPLICAS_1}->${DOC_REPLICAS_2} after short job $SHORT_JOB_ID"
+
+# Identify pod1 = the document-worker pod with the EARLIEST
+# creationTimestamp -- this is the pod that has been running since the long
+# job's submission, i.e. the busy pod (DOCUMENT_WORKER_CONCURRENCY=1
+# guarantees it never picked up the short job).
+BUSY_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=document-worker" \
+	--sort-by=.metadata.creationTimestamp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -z "$BUSY_POD" ]; then
+	BUSY_POD=$(kubectl get pod -n "$NAMESPACE" -l "app=document-worker" \
+		--sort-by=.metadata.creationTimestamp -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+fi
+assert_nonempty "$BUSY_POD" "SC3: pod1 (busy pod, earliest creationTimestamp) identified"
+
+# Annotate pod1 IMMEDIATELY -- must land BEFORE the short job completes /
+# before the ReplicaSet controller's 2->1 deletion decision. This is a
+# best-effort influence on victim selection; the downscale itself remains a
+# genuine KEDA/HPA event -- an imperative pod-deletion command is never
+# issued here.
+kubectl annotate pod "$BUSY_POD" -n "$NAMESPACE" \
+	controller.kubernetes.io/pod-deletion-cost=-1000 --overwrite
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: SC3 -- pod-deletion-cost=-1000 annotated on busy pod $BUSY_POD (before downscale decision)"
+
+# D-09 evidence file + continuous pod1 snapshotting (Pitfall 3: terminated
+# pods get GC'd -- capture continuously through the whole SC3 window, not
+# once at the end).
+SC3_TIMESTAMPS_FILE="$EVIDENCE_DIR/sc3-timestamps-${RUN_TS}.txt"
+{
+	echo "# Phase 28 SC3 downscale-soak evidence -- run $RUN_TS"
+	echo "# long_job_id=$LONG_JOB_ID short_job_id=$SHORT_JOB_ID busy_pod=$BUSY_POD"
+} >"$SC3_TIMESTAMPS_FILE"
+
+snapshotLoop() {
+	while true; do
+		local snap_ts phase term_reason term_exit term_finished
+		snap_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+		phase=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "GONE")
+		term_reason=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || echo "")
+		term_exit=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || echo "")
+		term_finished=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || echo "")
+		echo "read_ts=${snap_ts} pod=${BUSY_POD} phase=${phase:-GONE} term_reason=${term_reason} term_exit=${term_exit} term_finished=${term_finished}" >>"$SC3_TIMESTAMPS_FILE"
+		sleep 3
+	done
+}
+snapshotLoop &
+SNAPSHOT_PID=$!
+echo "pod1 snapshot loop started (pid=$SNAPSHOT_PID), polling every ~3s through the SC3 window"
+
+echo "waiting for short job $SHORT_JOB_ID to reach a terminal status..."
+short_status=""
+for i in $(seq 1 200); do
+	code=$(curl -s -o /tmp/keda-loadproof-short-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$SHORT_JOB_ID")
+	short_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-short-job.json | head -1 | cut -d'"' -f4)
+	if [ "$short_status" = "done" ] || [ "$short_status" = "failed" ]; then
+		break
+	fi
+	sleep 3
+done
+assert_eq "done" "$short_status" "SC3: short job $SHORT_JOB_ID reaches done"
+
+# After the short job completes, the document pending+active signal drops
+# toward 1 and the values-loadproof.yaml override
+# (scaleDownStabilizationSeconds=15s) makes the 2->1 downscale fast and
+# deterministic instead of the Kubernetes 300s HPA default (28-RESEARCH.md
+# Pitfall 1). Window = 15s override + generous margin for HPA/KEDA sync.
+DOC_DOWNSCALE_WINDOW=120
+DOC_REPLICAS_AFTER_DOWNSCALE=$(waitForReplicasAtMost document-worker 1 "$DOC_DOWNSCALE_WINDOW") || {
+	echo "FAIL: SC3 -- document-worker never downscaled 2->1 within ${DOC_DOWNSCALE_WINDOW}s of the short job completing (observed: $DOC_REPLICAS_AFTER_DOWNSCALE)" >&2
+	exit 1
+}
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: SC3 -- document-worker downscaled 2->${DOC_REPLICAS_AFTER_DOWNSCALE} after short job completion (D-08)"
+
+# Give the snapshot loop a few more cycles to catch the pod's terminal state
+# right after the downscale, then stop it.
+sleep 9
+kill "$SNAPSHOT_PID" >/dev/null 2>&1 || true
+wait "$SNAPSHOT_PID" 2>/dev/null || true
+SNAPSHOT_PID=""
+
+# ---------------------------------------------------------------------------
+# D-09 TRIPLE CHECK
+# ---------------------------------------------------------------------------
+log "STEP 8: D-09 triple-check -- long job survived the downscale gracefully"
+
+# (1) long job reaches done AND its result downloads.
+echo "waiting for long job $LONG_JOB_ID to reach a terminal status..."
+long_final_status=""
+for i in $(seq 1 100); do
+	code=$(curl -s -o /tmp/keda-loadproof-long-job-final.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$LONG_JOB_ID")
+	long_final_status=$(grep -o '"status":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+	if [ "$long_final_status" = "done" ] || [ "$long_final_status" = "failed" ]; then
+		break
+	fi
+	sleep 3
+done
+assert_eq "done" "$long_final_status" "D-09(1): long job $LONG_JOB_ID reaches done despite the downscale"
+
+RESULT_URL=$(grep -o '"result_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+if [ -z "$RESULT_URL" ]; then
+	RESULT_URL=$(grep -o '"download_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
+fi
+assert_nonempty "$RESULT_URL" "D-09(1): long job result URL present in job status"
+
+RESULT_BYTES=$(curl -s -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
+if [ "${RESULT_BYTES:-0}" -le 0 ]; then
+	echo "FAIL: D-09(1) -- long job result URL returned 0 bytes" >&2
+	exit 1
+fi
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: D-09(1) -- long job result downloads ($RESULT_BYTES bytes)"
+
+# (2) exactly one queued->active transition (no false retry).
+QUEUED_TO_ACTIVE_COUNT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
+	"SELECT count(*) FROM job_events WHERE job_id='${LONG_JOB_ID}' AND from_status='queued' AND to_status='active';" | tr -d '[:space:]')
+assert_eq "1" "$QUEUED_TO_ACTIVE_COUNT" "D-09(2): exactly one queued->active transition for long job $LONG_JOB_ID (no false retry)"
+
+# (3) SIGTERM timestamp from the kubelet's Killing event (NEVER the pod's
+# own deletion-deadline field, which is a scheduling deadline, not the
+# moment SIGTERM was actually sent -- 28-RESEARCH.md Pitfall 2), pod exit
+# timestamp from the continuously-captured snapshot (or a final live read if
+# the pod object still exists), and jobs.finished_at via psql.
+SIGTERM_TS=$(kubectl get events -n "$NAMESPACE" \
+	--field-selector involvedObject.name="$BUSY_POD",reason=Killing \
+	-o jsonpath='{.items[0].firstTimestamp}' 2>/dev/null || true)
+assert_nonempty "$SIGTERM_TS" "D-09(3): kubelet Killing event SIGTERM timestamp captured for $BUSY_POD"
+
+POD_TERM_REASON=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)
+POD_TERM_EXIT=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)
+POD_TERM_FINISHED=$(kubectl get pod "$BUSY_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.finishedAt}' 2>/dev/null || true)
+if [ -z "$POD_TERM_FINISHED" ]; then
+	# Pod object already GC'd -- fall back to the continuously-captured
+	# snapshot file (Pitfall 3), taking the last non-empty term_finished
+	# line written by snapshotLoop.
+	POD_TERM_FINISHED=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_finished=\([^ ]*\).*/\1/p')
+	POD_TERM_REASON=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_reason=\([^ ]*\).*/\1/p')
+	POD_TERM_EXIT=$(grep 'term_finished=' "$SC3_TIMESTAMPS_FILE" | grep -v 'term_finished=$' | tail -1 | sed -n 's/.*term_exit=\([^ ]*\).*/\1/p')
+fi
+assert_nonempty "$POD_TERM_FINISHED" "D-09(3): pod $BUSY_POD terminated.finishedAt captured (live or via continuous snapshot)"
+
+JOB_FINISHED_AT=$(psql "postgres://octo:octo-pass@127.0.0.1:${DB_LOCAL_PORT}/octo_db" -tAc \
+	"SELECT finished_at FROM jobs WHERE id='${LONG_JOB_ID}';" | tr -d '[:space:]')
+assert_nonempty "$JOB_FINISHED_AT" "D-09(3): jobs.finished_at captured for long job $LONG_JOB_ID"
+
+{
+	echo ""
+	echo "# D-09 triple-check raw evidence"
+	echo "sigterm_killing_event_ts=$SIGTERM_TS"
+	echo "pod_terminated_reason=$POD_TERM_REASON"
+	echo "pod_terminated_exit_code=$POD_TERM_EXIT"
+	echo "pod_terminated_finished_at=$POD_TERM_FINISHED"
+	echo "job_finished_at=$JOB_FINISHED_AT"
+	echo "queued_to_active_count=$QUEUED_TO_ACTIVE_COUNT"
+} >>"$SC3_TIMESTAMPS_FILE"
+
+# ASSERT: SIGTERM occurred before job completion, and the container exited
+# gracefully (Completed/exit 0), never SIGKILL/OOMKilled -- i.e. the process
+# finished the in-flight conversion and exited cleanly inside its own
+# ShutdownTimeout window, well before terminationGracePeriodSeconds=330s.
+SIGTERM_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$SIGTERM_TS" +%s 2>/dev/null || date -u -d "$SIGTERM_TS" +%s 2>/dev/null || echo "0")
+JOB_FINISHED_EPOCH=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${JOB_FINISHED_AT%%.*}" +%s 2>/dev/null || date -u -d "$JOB_FINISHED_AT" +%s 2>/dev/null || echo "0")
+if [ "${SIGTERM_EPOCH:-0}" -le 0 ] || [ "${JOB_FINISHED_EPOCH:-0}" -le 0 ]; then
+	echo "FAIL: D-09(3) -- could not parse SIGTERM_TS ($SIGTERM_TS) or JOB_FINISHED_AT ($JOB_FINISHED_AT) into comparable epochs" >&2
+	exit 1
+fi
+if [ "$SIGTERM_EPOCH" -ge "$JOB_FINISHED_EPOCH" ]; then
+	echo "FAIL: D-09(3) -- SIGTERM ($SIGTERM_TS) did not occur before job completion ($JOB_FINISHED_AT); the downscale-survives-in-flight-job proof does not hold" >&2
+	exit 1
+fi
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: D-09(3) -- SIGTERM ($SIGTERM_TS) occurred BEFORE job completion ($JOB_FINISHED_AT)"
+
+if [ "$POD_TERM_REASON" != "Completed" ] && [ "$POD_TERM_EXIT" != "0" ]; then
+	echo "FAIL: D-09(3) -- pod $BUSY_POD did not terminate gracefully (reason=$POD_TERM_REASON exit=$POD_TERM_EXIT); expected Completed/exit 0, not a SIGKILL/OOMKilled path" >&2
+	exit 1
+fi
+PASS_COUNT=$((PASS_COUNT + 1))
+echo "PASS: D-09(3) -- pod $BUSY_POD terminated gracefully (reason=$POD_TERM_REASON exit=$POD_TERM_EXIT), well before terminationGracePeriodSeconds=330s"
+
+echo "PASS: SC3 evidence -- $SC3_TIMESTAMPS_FILE"
+
+# =============================================================================
+# ALL-PASSED summary -- set only after every SC1/SC2/SC3 assertion above has
+# passed. Teardown (STEP 9) runs unconditionally via the EXIT trap.
+# =============================================================================
+GATE_OK="1"
+echo ""
+echo "=== ALL $PASS_COUNT ASSERTIONS PASSED ==="
+echo "SC1 (D-04/D-05): image-class burst-of-20 scaled worker 0->=2 replicas within 60s of true zero -- PASS"
+echo "SC2 (D-06): image worker full-cycled back to 0 replicas after burst drain -- PASS"
+echo "SC3 (D-07/D-08): long document job survived a genuine KEDA/HPA 2->1 downscale via deterministic pod-deletion-cost victim selection -- PASS"
+echo "SC4/D-09: triple-check verified -- job done+downloadable, exactly one queued->active transition, graceful SIGTERM-before-completion exit -- PASS"
+echo "Evidence: $CSV_FILE, $EVIDENCE_DIR/sc1-sc2-burst-${RUN_TS}.png, $SC3_TIMESTAMPS_FILE, $LOG_FILE"
