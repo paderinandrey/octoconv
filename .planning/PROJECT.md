@@ -69,6 +69,7 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Настоящая ISO 19005-2b валидация PDF/A: veraPDF в document-worker (Debian-JRE, amd64 pin), terminal fail-closed, замеренный go/no-go (p95 4.65s/10s) — Phase 23 (PDFA-01..02)
 - ✓ Operator-only REST для system-пресетов: /v1/system/presets за OPERATOR_CLIENT_IDS env-allowlist (fail-closed/fail-loud), byte-identical no-leak 404, ноль миграций; попутно закрыт version-collision в repo.Create (deactivate→recreate) — Phase 26 (OPER-01, verification 5/5)
 - ✓ KEDA-автоскейл per engine-class: queue-depth экспозиция перенесена на always-on api (все 4 очереди; воркеры больше не регистрируют коллектор), per-class asynq ShutdownTimeout (8s-дефолт делал grace-периоды мёртвыми), in-chart Prometheus + 3 ScaledObject (minReplicaCount 0, pending+active PromQL, двойной флаг keda.enabled&&prometheus.enabled), webhook-worker жёстко 2 реплики без ScaledObject; live-гейт scripts/keda-gate.sh 18/18 на OrbStack (SC1 через external metrics API при 0 реплик, все 3 класса 0→1, image полный цикл →0) — Phase 27 (KEDA-01/02, verification 8/8; залповый 0→N→0 под нагрузкой — Phase 28)
+- ✓ Load-proof автоскейла с таймстамп-доказательством: залп 20 image-джобов при истинном нуле → 4 реплики за 11s (SC1 ≥2/60s), drain +76s, scale-to-zero +136s; 178s document-конверсия пережила настоящий KEDA/HPA-даунскейл 2→1 (SIGTERM за 142.8s до завершения, exit 0, ровно один queued→active, 188s запаса grace); evidence (CSV+PNG+транскрипт 27/27+таймстампы) закоммичен в phases/28/evidence/; попутно WR-02 закрыт (условный spec.replicas на scaled-классах) + values-gated HPA scaleDown stabilization override — Phase 28 (KEDA-03, verification 10/10; четвёртый OrbStack-клин задокументирован и восстановлен k8s hard-cycle) — milestone v1.6 phases complete
 
 ### Active
 
@@ -158,4 +159,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-17 after Phase 27 completion (KEDA autoscaling)*
+*Last updated: 2026-07-17 after Phase 28 completion (autoscale load-proof) — all v1.6 phases complete*
