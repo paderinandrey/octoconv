@@ -524,13 +524,23 @@ echo "burst fixture: $BURST_FIXTURE"
 # approach is the same root workaround for background-subshell scoping).
 BURST_JOB_IDS_FILE="/tmp/keda-loadproof-burst-jobids-${RUN_TS}.txt"
 : >"$BURST_JOB_IDS_FILE"
+# Collect the 20 submission-subshell PIDs and wait ONLY on those. A bare
+# `wait` here would also block on every other background child of this
+# shell -- the CSV sampler (runs for its full SAMPLE_UNTIL_EPOCH window)
+# and, fatally, the two `kubectl port-forward` processes, which never exit
+# -- deadlocking the gate right after the burst while KEDA scales up and
+# back down unobserved (live-discovered Rule-1 defect, first full run).
+BURST_PIDS=""
 for i in $(seq 1 20); do
 	(
 		jid=$(postJobPath "$BURST_FIXTURE" "jpg" "image/png")
 		echo "$jid" >>"$BURST_JOB_IDS_FILE"
 	) &
+	BURST_PIDS="$BURST_PIDS $!"
 done
-wait
+for pid in $BURST_PIDS; do
+	wait "$pid"
+done
 BURST_JOB_COUNT=$(wc -l <"$BURST_JOB_IDS_FILE" | tr -d '[:space:]')
 assert_eq "20" "$BURST_JOB_COUNT" "burst: 20 parallel image jobs submitted (png->jpg)"
 
