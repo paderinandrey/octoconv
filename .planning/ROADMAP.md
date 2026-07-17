@@ -105,7 +105,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 
 ### v1.7 Audio Engine & Hardening (Phases 29-33) — IN PROGRESS
 
-- [ ] **Phase 29: v1.6 Hardening Tail** - Close WR-01 empty-PromQL semantics, OPER-01 compose passthrough + live gate, gate-tooling warnings, K8S-02 direct-dial recheck
+- [x] **Phase 29: v1.6 Hardening Tail** - Close WR-01 empty-PromQL semantics, OPER-01 compose passthrough + live gate, gate-tooling warnings, K8S-02 direct-dial recheck (completed 2026-07-17)
 - [ ] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts
 - [ ] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing
 - [ ] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go
@@ -133,7 +133,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 **Plans**: 3 plans
 - [x] 29-01-PLAN.md — Chart robustness offline: ignoreNullValues flip + retry-inclusive PromQL + Prometheus checksum + falsy-0 stabilization (HARD-01, HARD-03 fix #1)
 - [x] 29-02-PLAN.md — Operator compose acceptance: OPERATOR_CLIENT_IDS passthrough + system-scope acceptance section, live gate (HARD-02)
-- [ ] 29-03-PLAN.md — Gate-tooling fixes #2-6 + presigned direct-dial recheck, live keda-gate.sh run (HARD-03 remainder, HARD-04)
+- [x] 29-03-PLAN.md — Gate-tooling fixes #2-6 + presigned direct-dial recheck, live keda-gate.sh run (HARD-03 remainder, HARD-04)
 
 ### Phase 30: Audio Engine Foundation
 **Goal**: A standalone `AudioConverter` transcribes a local audio file to txt/srt/vtt/json with fail-closed content validation, built and testable against the binary before any queue/k8s plumbing.
@@ -212,7 +212,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 26. Operator System-Presets REST | v1.6 | 2/2 | Complete    | 2026-07-14 |
 | 27. KEDA Autoscaling | v1.6 | 3/3 | Complete    | 2026-07-16 |
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
-| 29. v1.6 Hardening Tail | v1.7 | 2/3 | In Progress|  |
+| 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete   | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 0/? | Not started | - |
 | 31. Queue, Worker & Routing Integration | v1.7 | 0/? | Not started | - |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
