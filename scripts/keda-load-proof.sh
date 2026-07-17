@@ -124,6 +124,22 @@ assert_nonempty() {
 	echo "PASS: $label == $value"
 }
 
+# assert_nonempty_redacted -- same non-empty check as assert_nonempty, but
+# NEVER echoes the raw value into the (committed) gate transcript (T-28-04:
+# this whole run is teed to $EVIDENCE_DIR/gate-transcript-*.log, so secrets
+# like $CLIENT_KEY, or a presigned result URL that may embed a short-lived
+# signature/token, must never be printed verbatim). Use this instead of
+# assert_nonempty for any value that is itself sensitive.
+assert_nonempty_redacted() {
+	local value="$1" label="$2"
+	if [ -z "$value" ]; then
+		echo "FAIL: $label -- expected a non-empty value, got empty" >&2
+		exit 1
+	fi
+	PASS_COUNT=$((PASS_COUNT + 1))
+	echo "PASS: $label == [REDACTED, ${#value} chars]"
+}
+
 log() { echo ""; echo "--- $* ---"; }
 
 # ---------------------------------------------------------------------------
@@ -299,7 +315,7 @@ export API_KEY_SALT="dev-only-change-me-in-real-deploys"
 SUFFIX=$(date +%s)
 CLIENT_OUT=$(go run ./cmd/manage-clients create "keda-loadproof-${SUFFIX}")
 CLIENT_KEY=$(printf '%s\n' "$CLIENT_OUT" | awk -F': ' '/^api key/{print $2}')
-assert_nonempty "$CLIENT_KEY" "minted gate client + API key"
+assert_nonempty_redacted "$CLIENT_KEY" "minted gate client + API key"
 
 # postJob submits a testdata fixture (relative filename under
 # internal/e2e/testdata/) -- reused verbatim shape from keda-gate.sh.
@@ -745,7 +761,7 @@ RESULT_URL=$(grep -o '"result_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.j
 if [ -z "$RESULT_URL" ]; then
 	RESULT_URL=$(grep -o '"download_url":"[^"]*"' /tmp/keda-loadproof-long-job-final.json | head -1 | cut -d'"' -f4)
 fi
-assert_nonempty "$RESULT_URL" "D-09(1): long job result URL present in job status"
+assert_nonempty_redacted "$RESULT_URL" "D-09(1): long job result URL present in job status (may embed a short-lived presigned signature -- never printed verbatim)"
 
 RESULT_BYTES=$(curl -s -o /tmp/keda-loadproof-long-result.bin -w '%{size_download}' "$RESULT_URL")
 if [ "${RESULT_BYTES:-0}" -le 0 ]; then
