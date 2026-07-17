@@ -499,17 +499,23 @@ SAMPLER_PID=$!
 echo "sampler started (pid=$SAMPLER_PID), capturing steady state before burst..."
 sleep 15
 
-# Synthesize a medium image fixture so each conversion takes a couple
-# seconds and the backlog stays above threshold long enough for the HPA to
-# add replicas (D-05, planner discretion). Fallback: 20x sample.png if
-# Pillow can't be pulled via uv for any reason.
+# Synthesize the burst fixture (D-05, planner discretion -- calibrated so
+# the queue does NOT drain before the scale-up fires): a 9500x9500 (90MP,
+# just under the app's MAX_IMAGE_PIXELS=100MP cap) RGB gradient. The
+# gradient compresses to <1MB on the wire (20 parallel uploads stay cheap)
+# but decodes to ~270MB raw, and combined with the values-loadproof.yaml
+# image-worker CPU throttle (200m) each png->jpg conversion takes ~10s --
+# live-benchmarked in the octoconv-worker:dev image at --cpus=0.2. Without
+# the throttle a 2-CPU worker converts even a 90MP png in ~0.3s and a
+# single pod drains all 20 jobs before Prometheus's 15s scrape ever sees
+# the backlog (live-discovered on this gate's first non-deadlocked run).
+# Fallback: 20x sample.png if Pillow can't be pulled via uv for any reason.
 BURST_FIXTURE="/tmp/loadproof-burst-${RUN_TS}.png"
 if ! uv run --with pillow python3 -c "
 from PIL import Image
-import os
-w, h = 2000, 1500
-img = Image.frombytes('RGB', (w, h), os.urandom(w * h * 3))
-img.save('${BURST_FIXTURE}')
+g = Image.linear_gradient('L').resize((9500, 9500))
+img = Image.merge('RGB', (g, g.transpose(Image.ROTATE_90), g.transpose(Image.ROTATE_180)))
+img.save('${BURST_FIXTURE}', optimize=False)
 " 2>/tmp/keda-loadproof-pillow.log; then
 	echo "NOTE: Pillow-via-uv synthesis failed, falling back to internal/e2e/testdata/sample.png for the burst fixture ($(cat /tmp/keda-loadproof-pillow.log))"
 	BURST_FIXTURE="internal/e2e/testdata/sample.png"

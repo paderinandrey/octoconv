@@ -5,8 +5,8 @@
 #     -f deploy/chart/octoconv/values-local.yaml \
 #     -f deploy/chart/octoconv/values-loadproof.yaml -n octoconv
 #
-# Sets exactly two knobs needed for the live 0→N→0 load-proof gate (plans
-# 28-02/28-03) to have deterministic timing; both are dev/test-only and are
+# Sets exactly three knobs needed for the live 0→N→0 load-proof gate (plans
+# 28-02/28-03) to have deterministic timing; all are dev/test-only and are
 # never applied to a production values file.
 
 keda:
@@ -19,6 +19,20 @@ keda:
     # invalidate the scenario's timing assumptions. 15s makes the downscale
     # observable within the gate's polling window.
     scaleDownStabilizationSeconds: 15
+
+worker:
+  resources:
+    limits:
+      # Throttle the image worker so the SC1 20-job burst backlog persists
+      # long enough for Prometheus (15s scrape) + KEDA (5s poll) + HPA to
+      # observe and react (Phase 28 D-05: the fixture/scenario is calibrated
+      # so the queue does NOT drain before the scale-up fires). At the
+      # production limit of "2" a single worker pod converts a 90MP png in
+      # ~0.3s and drains all 20 burst jobs in under 2s -- faster than any
+      # scrape can see the backlog (live-benchmarked in octoconv-worker:dev).
+      # At 200m each conversion takes ~10s, keeping queue_depth near 20 for
+      # well over a minute at 1 replica. memory is inherited from values.yaml.
+      cpu: "200m"
 
 documentWorker:
   extraEnv:
