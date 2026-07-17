@@ -1,5 +1,30 @@
 # Milestones
 
+## v1.6 Kubernetes & KEDA (Shipped: 2026-07-17)
+
+**Known deferred items at close:** 3 (stale v1.3-era quick-task record + 2 dormant seeds, SEED-004 substantively delivered — see STATE.md Deferred Items)
+
+**Phases completed:** 5 phases, 14 plans, 33 tasks
+
+**Key accomplishments:**
+
+- Single flat Helm chart (`deploy/chart/octoconv`) with a complete interface-first `values.yaml`, dev-cred `values-local.yaml`, shared config/secret templates carrying the FQDN `S3_ENDPOINT`/`0.0.0.0` `METRICS_ADDR` landmine fixes, and hand-rolled Postgres/Redis/MinIO Deployments — lint-clean and accepted by a live OrbStack `kubectl apply --dry-run=server`.
+- Five app Deployments (api + 4 engine-class workers) with dependency-aware probes and per-class grace periods, the atomic metrics-bind NetworkPolicy closure, chromium's /dev/shm memory mount, fixed 2-replica webhook-worker, and an idempotent createbucket post-install hook Job — zero source-tree changes, no migrate hook (api self-migrates per D-05 refinement).
+- 1. [Rule 3 - Blocking] `--wait` + post-install hook chicken-egg
+- Streamable-HTTP MCP endpoint with per-request caller-key pass-through, presigned-only remote results, and an unconditional session-key-binding hijack guard — after a live spike proved go-sdk v1.6.1 stateless mode delivers in-flight progress notifications.
+- Dockerfile.mcp-http + gated single-replica Deployment/ClusterIP Service/NetworkPolicy for cmd/mcp-http, wired with key-free env (OCTOCONV_BASE_URL + MCP_HTTP_ADDR only) and verified entirely offline (helm lint, template gating, server dry-run).
+- D-08 live hard gate PASSED: a real streamable-HTTP MCP session against a chart-deployed mcp-http pod completed initialize, tools/list=5, a real png→jpg conversion with a per-request minted caller key returning a presigned-only result (no local_path), a 401-without-key rejection, and a bonus session-hijack 403 — plus Phase 24's deferred SC3 presigned-from-host recheck, which again required the `--connect-to`-equivalent fallback path (OrbStack proxy wedge, same as 24-03).
+- Operator-only REST CRUD for system-scope presets under `/v1/system/presets`, gated by an `OPERATOR_CLIENT_IDS` env allowlist that fails closed when empty and fails loud when malformed, reusing the existing scope-agnostic `PresetAdmin` interface unchanged.
+- Fixed `presets.Repo.Create` to compute the next version via `COALESCE(MAX(version),0)+1` across active AND inactive rows, closing the "deactivate a preset then it's permanently unusable" 500 bug for both system and user scope, with a `pgconn` 23505 backstop mapping any residual race to `ErrAlreadyExists` (409).
+- Moved `octoconv_queue_depth` from the four worker binaries to the always-on api process (single `prometheus.MustRegister` call for all four queues) and set per-class `asynq.Config.ShutdownTimeout` on all four workers, both live-verified against the full compose stack.
+- Three per-class KEDA ScaledObjects (image/document/html) scaling from zero on an in-chart Prometheus's `octoconv_queue_depth` signal, with both landmine gaps from RESEARCH.md (NetworkPolicy monitoring-namespace mismatch, missing api :9090 Service port) closed in the same plan.
+- Authored and executed `scripts/keda-gate.sh` on OrbStack k8s: KEDA v2.20.1 installed live, the full D-12 proof passed 18/18 assertions (metric resolves at genuinely 0 replicas, all three classes scale 0→1 from one real job each, image cycles back to 0, webhook-worker fixed at 2 throughout), and teardown left the cluster completely clean — human-verify checkpoint approved.
+- Field-level `spec.replicas` omission on the three KEDA-scaled Deployments plus a values-gated document-class HPA scaleDown stabilization override, both production-inert by default and both machine-verified via `helm template` — the chart substrate the live load-proof gate (28-02/28-03) depends on.
+- Three new tools -- a calibratable python-docx heavy-fixture generator, a headless matplotlib CSV-to-PNG dual-axis renderer, and a self-contained 854-line `keda-load-proof.sh` gate implementing the SC1/SC2 image-burst 0->N->0 scenario and the SC3 document-class downscale-soak with deterministic pod-deletion-cost victim selection and the D-09 triple-check -- all statically verified (bash -n, uv smoke runs) and ready for the live in-cluster run in plan 28-03.
+- A single ALL-27-ASSERTIONS-PASSED live gate run against the real OrbStack cluster proving the full 0→4→0 image-class burst cycle (first replica +6s, peak 4 = maxReplicaCount at +11s, drain +76s, scale-to-zero +136s) and a 178s document conversion gracefully surviving a genuine KEDA/HPA 2→1 downscale (SIGTERM 142.8s before job completion, Completed/exit-0 with 188s of the 330s grace window unused) — all captured as committed, credential-free, timestamped evidence.
+
+---
+
 ## v1.5 MCP Access & Document Fidelity (Shipped: 2026-07-13)
 
 **Phases completed:** 4 phases, 10 plans, 22 tasks

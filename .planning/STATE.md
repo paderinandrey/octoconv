@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.6
 milestone_name: Kubernetes & KEDA
-status: milestone_complete
-stopped_at: Milestone complete (Phase 28 was final phase)
-last_updated: 2026-07-17T13:55:37.825Z
-last_activity: 2026-07-17 -- Phase 28 execution started
+status: Awaiting next milestone
+stopped_at: Phase 28 context gathered
+last_updated: "2026-07-17T14:46:11.302Z"
+last_activity: 2026-07-17 — Milestone v1.6 completed and archived
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 14
   completed_plans: 14
-  percent: 80
+  percent: 100
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-07-14 after v1.6 milestone start)
 
 ## Current Position
 
-Phase: 28
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-07-17
+Phase: Milestone v1.6 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-17 — Milestone v1.6 completed and archived
 
 ## Performance Metrics
 
@@ -141,4 +141,4 @@ Resume file: .planning/phases/28-autoscale-load-proof/28-CONTEXT.md
 
 ## Operator Next Steps
 
-- Run `/gsd:plan-phase 24` to plan the first v1.6 phase (Helm Chart Core & Landmine Closure).
+- Start the next milestone with /gsd-new-milestone

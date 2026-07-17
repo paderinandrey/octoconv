@@ -199,6 +199,41 @@
 
 ---
 
+## Milestone: v1.6 — Kubernetes & KEDA
+
+**Shipped:** 2026-07-17
+**Phases:** 5 | **Plans:** 14
+
+### What Was Built
+Первый инфраструктурный милстоун: единый Helm-чарт всего стека на OrbStack k8s (in-cluster E2E как Job), MCP streamable-HTTP с per-request key pass-through, operator system-presets REST, KEDA scale-from-zero per engine-class (queue-depth перенесён на always-on api) и флагманский load-proof с закоммиченным таймстамп-evidence: 0→4→0 за 136s, 178s document-джоб пережил живой KEDA-даунскейл.
+
+### What Worked
+- Жёсткое правило «KEDA-01 до любых ScaledObject» (фикс экспозиции метрики на compose до k8s-работы) сняло chicken-and-egg риск целиком
+- Research-фаза дважды поймала load-bearing проблемы до кода: asynq ShutdownTimeout 8s (grace-периоды были мёртвой конфигурацией) и HPA scaleDown stabilization 300s (SC3 был бы физически недостижим)
+- Live-гейты как самодостаточные скрипты с EXIT-trap teardown и live-discovery имён метрик — воспроизводимы с нуля, evidence коммитится
+- Plan-checker дважды поймал сломанную shell-логику verify-команд (grep -qv, приоритет &&/||) до исполнения
+
+### What Was Inefficient
+- Калибровка тяжёлого docx потребовала 12 живых прогонов; VM-клин посреди неё инвалидировал раннюю калибровку (~37% сдвиг производительности после hard-cycle)
+- Четвёртый задокументированный OrbStack-клин + один обрыв API-соединения агента + один session-limit — три восстановления за один милстоун
+- Decision-coverage гейт требует литеральных D-NN в must_haves — планировщик дважды узнавал об этом постфактум (стоит вшить в промпт планировщика перманентно)
+
+### Patterns Established
+- Values-gated поведенческие оверрайды: производственные дефолты нетронуты, тестовые оверлеи (values-loadproof) включают отладочные ручки (stabilization window, CPU throttle, concurrency=1)
+- pod-deletion-cost для детерминированного выбора жертвы при живом HPA-даунскейле
+- Redaction-хелперы в гейтах, чей транскрипт коммитится как evidence
+- Field-level условный рендер (spec.replicas) vs whole-resource гейтинг — когда ресурс должен существовать для HPA-ownership
+
+### Key Lessons
+- KEDA cooldownPeriod управляет только 1→0; N→1 — это чистый HPA со своим 300s-окном: тюнинг скейлинга требует знать, какой контроллер владеет каким переходом
+- asynq Inspector читает Redis напрямую — экспозиция метрики отделима от воркера, что и делает scale-from-zero возможным
+- «Проверено на N=1» ≠ «проверено»: E2E-проверка отсутствия метрики только на image-воркере принята сознательно с задокументированным обоснованием (статический grep покрывает остальных)
+
+### Cost Observations
+- Model mix: opus для планирования, sonnet для research/execute/verify — ревизии планов дешевле повторного плана
+- Sessions: 1 длинная оркестрация (фазы 27-28 + закрытие); 2 восстановления субагентов через SendMessage-resume вместо пере-спавна
+- Notable: live-гейты — доминирующая стоимость по времени (4 полных итерации гейта в 28-03), но evidence-первый подход исключил повторную верификацию
+
 ## Cross-Milestone Trends
 
 ### Process Evolution

@@ -8,7 +8,10 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current Milestone: v1.6 Kubernetes & KEDA
+## Current Milestone: (не начат — v1.6 shipped 2026-07-17)
+
+<details>
+<summary>v1.6 Kubernetes & KEDA — SHIPPED 2026-07-17</summary>
 
 **Goal:** Весь стек OctoConv поднимается в Kubernetes из Helm-чарта, воркеры автоскейлятся KEDA по глубине очередей (0→N→0 под нагрузкой — доказано), MCP получает in-cluster HTTP-эндпоинт, а пресеты — system-scope REST.
 
@@ -19,7 +22,9 @@ OctoConv — внутренний асинхронный сервис конве
 - MCP streamable HTTP (MCPV2-01): контейнер в кластере, внутренний эндпоинт
 - system-пресеты REST (PRAPIV2-01)
 
-**Key context:** первый инфраструктурный милстоун; research first (KEDA-скейлеры prometheus vs redis, OrbStack k8s специфика — локальные образы без registry, Helm-паттерны, in-cluster E2E адаптация). Прошлое состояние: v1.5 shipped 2026-07-13 (см. Context).
+**Key context:** первый инфраструктурный милстоун; research first. Прошлое состояние: v1.5 shipped 2026-07-13 (см. Context).
+
+</details>
 
 ## Requirements
 
@@ -67,17 +72,17 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ MCP-сервер: cmd/mcp-server (stdio, go-sdk v1.6.1 — первая новая зависимость с v1.0), 5 инструментов, блокирующий convert_file с progress, zero-privilege HTTP-клиент с редакцией ключа — Phase 21 (MCP-01..05, live stdio-гейт ×2; SEED-003 implemented)
 - ✓ CFB-различение: собственный bounded-парсер директории (cycle-guard, fuzz 3.5M/0), три различённых 422 — Phase 22 (CFB-01..02)
 - ✓ Настоящая ISO 19005-2b валидация PDF/A: veraPDF в document-worker (Debian-JRE, amd64 pin), terminal fail-closed, замеренный go/no-go (p95 4.65s/10s) — Phase 23 (PDFA-01..02)
+- ✓ Полный стек разворачивается в k8s одной командой (`helm install deploy/chart/octoconv` + values-local) на OrbStack и проходит E2E внутри кластера как Job (9/9, presigned FQDN, NetworkPolicy-scoped /metrics, migrate/createbucket ordering) — Phase 24 (K8S-01..03)
+- ✓ MCP доступен как in-cluster streamable-HTTP-эндпоинт: cmd/mcp-http, per-request caller-key pass-through (под без ключей), presigned-only результаты, live-гейт с реальной конверсией и 401/403-кейсами — Phase 25 (MCPH-01/02)
 - ✓ Operator-only REST для system-пресетов: /v1/system/presets за OPERATOR_CLIENT_IDS env-allowlist (fail-closed/fail-loud), byte-identical no-leak 404, ноль миграций; попутно закрыт version-collision в repo.Create (deactivate→recreate) — Phase 26 (OPER-01, verification 5/5)
 - ✓ KEDA-автоскейл per engine-class: queue-depth экспозиция перенесена на always-on api (все 4 очереди; воркеры больше не регистрируют коллектор), per-class asynq ShutdownTimeout (8s-дефолт делал grace-периоды мёртвыми), in-chart Prometheus + 3 ScaledObject (minReplicaCount 0, pending+active PromQL, двойной флаг keda.enabled&&prometheus.enabled), webhook-worker жёстко 2 реплики без ScaledObject; live-гейт scripts/keda-gate.sh 18/18 на OrbStack (SC1 через external metrics API при 0 реплик, все 3 класса 0→1, image полный цикл →0) — Phase 27 (KEDA-01/02, verification 8/8; залповый 0→N→0 под нагрузкой — Phase 28)
 - ✓ Load-proof автоскейла с таймстамп-доказательством: залп 20 image-джобов при истинном нуле → 4 реплики за 11s (SC1 ≥2/60s), drain +76s, scale-to-zero +136s; 178s document-конверсия пережила настоящий KEDA/HPA-даунскейл 2→1 (SIGTERM за 142.8s до завершения, exit 0, ровно один queued→active, 188s запаса grace); evidence (CSV+PNG+транскрипт 27/27+таймстампы) закоммичен в phases/28/evidence/; попутно WR-02 закрыт (условный spec.replicas на scaled-классах) + values-gated HPA scaleDown stabilization override — Phase 28 (KEDA-03, verification 10/10; четвёртый OrbStack-клин задокументирован и восстановлен k8s hard-cycle) — milestone v1.6 phases complete
 
 ### Active
 
-<!-- Milestone v1.6 (Kubernetes & KEDA). -->
+<!-- v1.6 shipped 2026-07-17. Next milestone not yet defined — run /gsd:new-milestone. -->
 
-- [ ] Полный стек разворачивается в k8s одной командой (helm install) и проходит E2E внутри кластера
-- [ ] Каждый engine-class воркер автоскейлится KEDA по глубине своей очереди; 0→N→0 доказано под нагрузкой
-- [ ] MCP доступен как in-cluster HTTP-эндпоинт
+(нет — определяются при старте следующего милстоуна)
 
 ### Out of Scope
 
@@ -100,6 +105,7 @@ OctoConv — внутренний асинхронный сервис конве
 - v1.1-аудит (`v1.1-MILESTONE-AUDIT.md`) прошёл без блокеров и без tech debt (4/4 требования, 5/5 точек интеграции, живые smoke-тесты всех новых механизмов по отдельности и в комбинации против пересобранного docker-стека) — впервые за проект milestone закрылся с нулевым переносом.
 - Code review при исполнении Phase 2 (v1.0) нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
 - **Milestone v1.2 (Document Engine Class) shipped 2026-07-10.** 4 фазы (8–11), 13 планов (вкл. gap-closure 11-04), 71 коммит, +2754 строк Go (без .planning), ~2 дня. Второй класс движков: docx/xlsx/pptx/odt/ods/odp → PDF через LibreOffice headless в отдельном контейнере, live E2E по всем 6 парам. Аудит: 10/10 требований, 10/10 интеграционных связей. Полный отчёт: `.planning/milestones/v1.2-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
+- **Milestone v1.6 (Kubernetes & KEDA) shipped 2026-07-17.** 5 фаз (24-28), 14 планов, 33 задачи, 129 коммитов, +5978/−56 строк (без .planning), ~3.5 дня. Первый инфраструктурный милстоун: Helm-чарт на OrbStack k8s, KEDA scale-from-zero per engine-class, таймстампированный load-proof 0→4→0 (evidence в phases/28/evidence/), MCP streamable-HTTP, operator system-presets REST. Аудит: passed 9/9, advisory tech debt (OPER-01 live-script gap, WR-01 trigger semantics, gate-tooling warnings). Четвёртый задокументированный OrbStack-клин случился и восстановлен в ходе load-proof. Полный отчёт: `.planning/milestones/v1.6-*`.
 - **Milestone v1.5 (MCP Access & Document Fidelity) shipped 2026-07-13.** 4 фазы (20–23), 10 планов, 71 коммит, +5537/−84 строк (без .planning). Аудит: 12/12, 6/6 интеграции. Первый measured go/no-go гейт (veraPDF JVM). Полный отчёт: `.planning/milestones/v1.5-*`.
 - **Milestone v1.4 (CI, Presets & Debt Cleanup) shipped 2026-07-13.** 3 фазы (17–19), 8 планов, 54 коммита, +2261/−60 строк (без .planning), ~2 дня. Аудит: 11/11 требований, 6/6 интеграции. Репозиторий публичный; CI живой (badge passing). Полный отчёт: `.planning/milestones/v1.4-*`.
 - **Milestone v1.3 (Document Class v2) shipped 2026-07-12.** 5 фаз (12–16), 17 планов (вкл. gap-closure 16-05), 147 коммитов, +4773/−145 строк (без .planning), ~2 дня. Аудит: 14/14 требований, 7/7 интеграционных проверок, 8/8 E2E-потоков. Полный отчёт: `.planning/milestones/v1.3-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
@@ -159,4 +165,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-17 after Phase 28 completion (autoscale load-proof) — all v1.6 phases complete*
+*Last updated: 2026-07-17 after v1.6 milestone*
