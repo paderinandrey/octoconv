@@ -1,9 +1,11 @@
 {{/*
 KEDA ScaledObject — document worker (LibreOffice/PDF pipeline). Scales the
-`document-worker` Deployment from 0 on
-sum(octoconv_queue_depth{queue="document", state=~"pending|active"}) via
-the Prometheus scaler (D-04 — pending+active only, never
-retry/scheduled/archived).
+`document-worker` Deployment from 0 on the summed octoconv_queue_depth for
+queue document, counting pending + active + retry states, via the
+Prometheus scaler (D-03 — retry-inclusive, never scheduled/archived.
+Retry-state tasks are imminent work; excluding them left a zeroed class
+blind to a retry backlog until the reconciler's next sweep, ~12.6 min
+worst case).
 
 CO-DEPENDENCY GUARD: see scaledobject-image.yaml header — gated on BOTH
 keda.enabled AND prometheus.enabled together.
@@ -18,6 +20,15 @@ SC3's timing assumptions. keda.document.scaleDownStabilizationSeconds below
 overrides ONLY that HPA window; it defaults to null (production keeps the
 k8s 300s default) and is set to a fast value ONLY by the load-proof overlay
 (values-loadproof.yaml). Do not conflate this knob with cooldownPeriod.
+
+FALSY-0 GUARD (HARD-03/D-06 fix #1): the block below is gated on BOTH
+`hasKey` AND `ne ... nil`, not `hasKey` alone. A bare `hasKey` is TRUE for
+the production default `scaleDownStabilizationSeconds: null` (values.yaml)
+and would render a broken `stabilizationWindowSeconds: <no value>` block on
+every default install — the exact silent-bug class this phase exists to
+close. The pair distinguishes three states: unset/null -> block NOT
+rendered (k8s 300s default preserved); explicit 0 -> instant downscale
+rendered; explicit N -> N rendered.
 */}}
 {{- if and .Values.keda.enabled .Values.prometheus.enabled }}
 apiVersion: keda.sh/v1alpha1
@@ -35,7 +46,7 @@ spec:
   maxReplicaCount: {{ .Values.keda.document.maxReplicaCount }}
   pollingInterval: {{ .Values.keda.document.pollingInterval }}
   cooldownPeriod: {{ .Values.keda.document.cooldownPeriod }}
-  {{- if .Values.keda.document.scaleDownStabilizationSeconds }}
+  {{- if and (hasKey .Values.keda.document "scaleDownStabilizationSeconds") (ne .Values.keda.document.scaleDownStabilizationSeconds nil) }}
   advanced:
     horizontalPodAutoscalerConfig:
       behavior:
@@ -53,10 +64,15 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://prometheus.{{ .Values.global.namespace }}.svc.cluster.local:9090
-        query: sum(octoconv_queue_depth{queue="document", state=~"pending|active"})
+        query: sum(octoconv_queue_depth{queue="document", state=~"pending|active|retry"})
         threshold: {{ .Values.keda.document.threshold | quote }}
-        # An empty PromQL result (genuinely empty queue) is treated as 0,
-        # NOT a scaler failure — false would make a routine api restart
-        # spuriously trip fallback.replicas across this class (Pitfall 4).
-        ignoreNullValues: "true"
+        # Sustained absence of a PromQL result (e.g. api unreachable or
+        # unscrapeable) now reads as a scaler ERROR, not queue-empty (D-01)
+        # — fallback.replicas: 1 holds one replica for this class instead
+        # of falsely scaling to zero with a live backlog behind an outage.
+        # Trade-off: a benign one-shot fallback blip is possible on fresh
+        # install / a short api restart before the first enqueue — accepted,
+        # fail-safe toward availability (same philosophy as webhook-worker's
+        # fail-closed default).
+        ignoreNullValues: "false"
 {{- end }}

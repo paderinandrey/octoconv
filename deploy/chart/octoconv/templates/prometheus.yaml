@@ -12,6 +12,14 @@ subject Prometheus itself to the metrics NetworkPolicy's :9090 ingress
 restriction, which is backwards: Prometheus is the caller, api is the callee.
 Instead it gets its own app.kubernetes.io/component: prometheus label, which
 networkpolicy-metrics.yaml's corrected :9090 rule admits by podSelector.
+
+CONFIG-DRIFT CHECKSUM (D-02/WR-05): the pod-template below carries a
+checksum/config annotation hashing a shared scrape-config named-template
+defined in _helpers.tpl, NOT this whole file. This file holds the
+Deployment + ConfigMap + Service together, so a whole-file self-hash from
+inside the Deployment's own pod-template would recurse infinitely and fail
+helm template/lint. The ConfigMap's data.prometheus.yml below includes that
+same named-template, so both are always derived from one source.
 */}}
 {{- if .Values.prometheus.enabled }}
 apiVersion: apps/v1
@@ -31,6 +39,8 @@ spec:
       labels:
         {{- include "octoconv.labels" . | nindent 8 }}
         {{- include "octoconv.selectorLabels" (dict "component" "prometheus" "root" $) | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "octoconv.prometheusScrapeConfig" . | sha256sum }}
     spec:
       containers:
         - name: prometheus
@@ -64,14 +74,7 @@ metadata:
     app.kubernetes.io/component: prometheus
 data:
   prometheus.yml: |
-    global:
-      scrape_interval: 15s
-    scrape_configs:
-      - job_name: octoconv-api
-        metrics_path: /metrics
-        static_configs:
-          - targets:
-              - api.{{ .Values.global.namespace }}.svc.cluster.local:9090
+    {{- include "octoconv.prometheusScrapeConfig" . | nindent 4 }}
 ---
 apiVersion: v1
 kind: Service

@@ -142,6 +142,14 @@ prometheus:
 # webhook class deliberately has NO block here — it is hard-excluded from
 # autoscaling (D-09), fixed at replicas: 2 in webhookWorker above.
 # These are demo starting values; production tuning is Phase 28.
+#
+# INVARIANT (WR-06): each class's cooldownPeriod below must exceed that
+# class's max per-task retry backoff step (internal/queue/queue.go —
+# imageRetrySchedule tops out at 15s; documentRetrySchedule/htmlRetrySchedule
+# top out at 30s), otherwise a ScaledObject can cool down to 0 replicas
+# while a task is still legitimately mid-retry, stranding it until the
+# reconciler recovers it. image=60s / document=120s / html=90s below all
+# comfortably clear their respective schedules.
 keda:
   enabled: false
   image:
