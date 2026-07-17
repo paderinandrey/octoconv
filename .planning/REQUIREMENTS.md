@@ -9,10 +9,10 @@ Requirements for milestone v1.7 (Audio Engine & Hardening). Each maps to roadmap
 
 ### Hardening (v1.6 tail)
 
-- [ ] **HARD-01**: KEDA-триггер корректно ведёт себя при недоступности api — пустой PromQL-результат не читается как «очередь пуста» (WR-01: даунскейл занятого класса с живым бэклогом невозможен, либо задокументированный компенсирующий механизм в триггере)
-- [ ] **HARD-02**: Оператор может прогнать живой REST-сценарий `/v1/system/presets` (CRUD оператором + no-leak 404 для не-оператора) против compose-стека — `OPERATOR_CLIENT_IDS` проброшен в compose api-сервис, скрипт-приёмка существует и проходит
-- [ ] **HARD-03**: Шесть warning'ов гейт-тулинга из 28-REVIEW закрыты (falsy-`0` в ScaledObject-шаблоне stabilization, SC3 stale-pod гонка, false-PASS download-чек без `-f`, orphaned watcher-процесс, pin интерпретатора в render_evidence.py, CWD-зависимая SAMPLE_IMAGE в gen_heavy_docx.py)
-- [ ] **HARD-04**: Presigned result URL резолвится с OrbStack-хоста прямым дайлом (K8S-02 перепроверка без `kubectl port-forward` / `curl --connect-to` обхода)
+- [x] **HARD-01**: KEDA-триггер корректно ведёт себя при недоступности api — пустой PromQL-результат не читается как «очередь пуста» (WR-01: даунскейл занятого класса с живым бэклогом невозможен, либо задокументированный компенсирующий механизм в триггере)
+- [x] **HARD-02**: Оператор может прогнать живой REST-сценарий `/v1/system/presets` (CRUD оператором + no-leak 404 для не-оператора) против compose-стека — `OPERATOR_CLIENT_IDS` проброшен в compose api-сервис, скрипт-приёмка существует и проходит
+- [x] **HARD-03**: Шесть warning'ов гейт-тулинга из 28-REVIEW закрыты (falsy-`0` в ScaledObject-шаблоне stabilization, SC3 stale-pod гонка, false-PASS download-чек без `-f`, orphaned watcher-процесс, pin интерпретатора в render_evidence.py, CWD-зависимая SAMPLE_IMAGE в gen_heavy_docx.py)
+- [x] **HARD-04**: Presigned result URL резолвится с OrbStack-хоста прямым дайлом (K8S-02 перепроверка без `kubectl port-forward` / `curl --connect-to` обхода)
 
 ### Audio Engine — Input & Validation
 
@@ -71,10 +71,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| HARD-01 | Phase 29 | Pending |
-| HARD-02 | Phase 29 | Pending |
-| HARD-03 | Phase 29 | Pending |
-| HARD-04 | Phase 29 | Pending |
+| HARD-01 | Phase 29 | Complete |
+| HARD-02 | Phase 29 | Complete |
+| HARD-03 | Phase 29 | Complete |
+| HARD-04 | Phase 29 | Complete |
 | AUD-01 | Phase 30 | Pending |
 | AUD-02 | Phase 30 | Pending |
 | AUD-03 | Phase 30 | Pending |
