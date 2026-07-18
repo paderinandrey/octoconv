@@ -3,6 +3,7 @@ package convert
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -320,6 +321,42 @@ func TestAudioConverter_UnsupportedTargetFailsFast(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(dir, "norm.wav")); statErr == nil {
 			t.Errorf("Convert(-> %s) created norm.wav; stage 1 (ffmpeg) must not run for an unsupported target", out)
 		}
+	}
+}
+
+// TestAudioConverter_InsufficientBudgetFailsFast pins WR-04: when the
+// whole-attempt ctx has less than minFfmpegBudget remaining (an upstream
+// stage — e.g. a stalled S3 download — pre-consumed the budget), Convert
+// fails fast BEFORE invoking ffmpeg with the distinct budget error rather
+// than starting a doomed stage 1 that would be killed near-instantly and
+// misclassified as a terminal "audio: ffmpeg:" input failure. The error
+// deliberately carries NO "audio: ffmpeg:" prefix (so the worker's
+// isAudioTerminal classifies it transient and asynq retries) and wraps
+// context.DeadlineExceeded for errors.Is callers. Runs ungated (no binaries
+// required precisely because nothing may be executed — proven by the absent
+// norm.wav).
+func TestAudioConverter_InsufficientBudgetFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "out.txt")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second) // well below minFfmpegBudget
+	defer cancel()
+
+	err := (AudioConverter{}).Convert(ctx, filepath.Join(dir, "in.wav"), outPath, nil)
+	if err == nil {
+		t.Fatal("Convert(near-exhausted budget) = nil, want insufficient-budget error")
+	}
+	if !strings.Contains(err.Error(), "insufficient attempt budget remaining") {
+		t.Errorf("Convert(near-exhausted budget) error = %q, want it to mention \"insufficient attempt budget remaining\"", err.Error())
+	}
+	if strings.Contains(err.Error(), "audio: ffmpeg:") {
+		t.Errorf("Convert(near-exhausted budget) error = %q must NOT carry the terminal \"audio: ffmpeg:\" stage prefix (WR-04)", err.Error())
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Convert(near-exhausted budget) error = %v, want errors.Is context.DeadlineExceeded", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "norm.wav")); statErr == nil {
+		t.Error("Convert(near-exhausted budget) created norm.wav; stage 1 (ffmpeg) must not run below minFfmpegBudget")
 	}
 }
 

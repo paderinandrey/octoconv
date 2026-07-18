@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // audioModelPath stores the AUDIO_MODEL_PATH budget for every subsequent
@@ -44,6 +45,17 @@ var (
 // issue OPTS-01/02 already closed once for LibreOffice's PDF/A filter
 // suffix and AudioOpts.Language's allowlist).
 const defaultAudioModelPath = "/models/ggml-base.bin"
+
+// minFfmpegBudget is the minimum whole-attempt budget that must remain on
+// Convert's ctx before stage 1 (ffmpeg normalize) is allowed to start
+// (WR-04). Deliberately small relative to AUDIO_ENGINE_TIMEOUT's 600s
+// default: the floor is NOT a completion guarantee for ffmpeg — it only
+// removes the deterministic misclassification where an upstream stage
+// (stalled S3 download) consumed nearly the whole attempt deadline and the
+// resulting near-instant ffmpeg kill was blamed on the input as a terminal
+// "audio: ffmpeg:" timeout. Below this floor Convert fails fast with a
+// distinct transient budget error instead (see the check in Convert).
+const minFfmpegBudget = 30 * time.Second
 
 // AudioConverter transcribes audio by shelling out to `ffmpeg` (normalize)
 // then `whisper-cli` (transcribe) -- the fourth engine class (EngineAudio),
@@ -201,6 +213,25 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 
 	workDir := filepath.Dir(outPath) // caller's per-job workDir; already unique, already cleaned up
 	normPath := filepath.Join(workDir, "norm.wav")
+
+	// WR-04: the caller's ctx is a single whole-attempt deadline that also
+	// covered the S3 download (and ffprobe guard) before Convert ran. If an
+	// upstream stage (e.g. a transiently stalled S3 transfer) pre-consumed
+	// most of that budget, starting ffmpeg now would kill it near-instantly
+	// with "audio: ffmpeg: ffmpeg killed: context deadline exceeded" — which
+	// the worker's isAudioTerminal classifies TERMINAL (Key Decision 1's
+	// premise: an ffmpeg-stage timeout signals malformed input), permanently
+	// failing a job whose real problem was network-transient. Requiring a
+	// minimum remaining budget before stage 1 makes a near-exhausted deadline
+	// surface as this distinct budget error instead, which carries no
+	// "audio: ffmpeg:" prefix and matches no terminal signature — so it
+	// classifies transient and asynq retries the attempt. Accepted residual:
+	// an upstream stall that still leaves >= minFfmpegBudget remaining can in
+	// principle be misattributed to ffmpeg; the floor only removes the
+	// near-total-exhaustion case deterministically.
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < minFfmpegBudget {
+		return fmt.Errorf("audio: insufficient attempt budget remaining: %w", context.DeadlineExceeded)
+	}
 
 	// Stage 1: ffmpeg normalize. A distinguishable "ffmpeg:" prefix on this
 	// stage's errors lets the worker-layer classifier (Phase 31,

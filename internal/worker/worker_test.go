@@ -304,6 +304,17 @@ func TestIsAudioTerminal(t *testing.T) {
 	if isAudioTerminal(errors.New("dial tcp: connection refused")) {
 		t.Fatal("expected isAudioTerminal(transient network error) = false")
 	}
+
+	// WR-04: whisper.go's pre-ffmpeg minimum-budget guard fires when an
+	// upstream stage (stalled S3 download) pre-consumed the whole-attempt
+	// deadline. Its distinct error shape deliberately carries NO
+	// "audio: ffmpeg:" prefix, so it must classify transient (asynq retries
+	// the network-transient attempt) instead of the terminal
+	// corrupt-input misclassification the guard exists to prevent.
+	budgetErr := fmt.Errorf("convert: %w", fmt.Errorf("audio: insufficient attempt budget remaining: %w", context.DeadlineExceeded))
+	if isAudioTerminal(budgetErr) {
+		t.Fatal("expected isAudioTerminal(insufficient-budget error) = false (upstream budget exhaustion is transient, WR-04)")
+	}
 }
 
 // TestIsAudioTerminalOutputSignatures pins WR-03: validateAudioOutput's
