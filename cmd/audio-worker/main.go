@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -85,6 +86,17 @@ func main() {
 	// spaces working.
 	convert.SetAudioModelPath(stripInlineComment(os.Getenv("AUDIO_MODEL_PATH")))
 
+	// T-32-04/AUD-06/AUD-07 SC4: size whisper-cli's --threads to the
+	// container's real cgroup CPU quota, not host core count (PITFALLS.md
+	// Pitfall 5) -- same env-only-in-main + setter convention as
+	// AUDIO_MODEL_PATH above, and the same happens-before boundary (must
+	// run before srv.Start(mux) below, the point asynq's worker goroutines
+	// begin concurrently reading audioThreads). Logged at startup: this is
+	// operator-visible evidence the RTF measurement and Phase 33 depend on.
+	threads, threadSource := resolveAudioThreads()
+	convert.SetAudioThreads(threads)
+	log.Printf("🧵 audio threads=%d (source=%s)", threads, threadSource)
+
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeAudioConvert, h.HandleAudioConvert)
 
@@ -144,6 +156,25 @@ func main() {
 		log.Printf("metrics graceful shutdown failed: %v", err)
 	}
 	log.Println("bye 👋")
+}
+
+// resolveAudioThreads implements the AUDIO_THREADS -> cgroup -> NumCPU
+// precedence chain (T-32-04/AUD-07 SC4): an explicit operator override
+// (AUDIO_THREADS, an escape hatch matching every other tunable's env-override
+// convention) wins outright when set to a positive value; otherwise the
+// container's real cgroup v2 CPU quota (convert.CgroupCPULimit()) is used
+// when available; a process running outside any cgroup v2 container (e.g.
+// local `go run` dev flow, or a cgroup v1 host) falls through to
+// runtime.NumCPU() as the last resort. Returns the resolved thread count
+// and a short source label for startup logging.
+func resolveAudioThreads() (int, string) {
+	if n := envInt("AUDIO_THREADS", 0); n > 0 {
+		return n, "env override"
+	}
+	if n, ok := convert.CgroupCPULimit(); ok {
+		return n, "cgroup"
+	}
+	return runtime.NumCPU(), "NumCPU fallback"
 }
 
 func envInt(key string, def int) int {

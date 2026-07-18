@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -243,32 +244,46 @@ func TestAudioConverter_Contract(t *testing.T) {
 // TestWhisperArgs asserts the exact whisper-cli argv construction, in
 // particular that an absent language passes -l auto EXPLICITLY (WR-03) --
 // whisper-cli's own built-in default is -l en, which would silently
-// mis-transcribe non-English audio while exiting 0.
+// mis-transcribe non-English audio while exiting 0 -- and that an explicit
+// -t <threads> pair is always present regardless of language/translate opts
+// (T-32-04): whisper-cli's own default is host core count, which under a
+// container cgroup CPU quota causes throttling rather than reflecting the
+// container's real budget (PITFALLS.md Pitfall 5).
 func TestWhisperArgs(t *testing.T) {
 	cases := []struct {
-		name string
-		o    AudioOpts
-		want []string
+		name    string
+		o       AudioOpts
+		threads int
+		want    []string
 	}{
 		{
-			name: "no opts defaults to -l auto",
-			o:    AudioOpts{},
-			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "auto"},
+			name:    "no opts defaults to -l auto",
+			o:       AudioOpts{},
+			threads: 2,
+			want:    []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "auto", "-t", "2"},
 		},
 		{
-			name: "explicit language passed through",
-			o:    AudioOpts{Language: "ru"},
-			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru"},
+			name:    "explicit language passed through",
+			o:       AudioOpts{Language: "ru"},
+			threads: 2,
+			want:    []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru", "-t", "2"},
 		},
 		{
-			name: "translate appends -tr",
-			o:    AudioOpts{Language: "ru", Translate: true},
-			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru", "-tr"},
+			name:    "translate appends -tr",
+			o:       AudioOpts{Language: "ru", Translate: true},
+			threads: 2,
+			want:    []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru", "-tr", "-t", "2"},
+		},
+		{
+			name:    "threads=1",
+			o:       AudioOpts{},
+			threads: 1,
+			want:    []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "auto", "-t", "1"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := whisperArgs("/m/ggml.bin", "/w/norm.wav", "/w/out", []string{"-otxt"}, tc.o)
+			got := whisperArgs("/m/ggml.bin", "/w/norm.wav", "/w/out", []string{"-otxt"}, tc.o, tc.threads)
 			if len(got) != len(tc.want) {
 				t.Fatalf("whisperArgs = %v, want %v", got, tc.want)
 			}
@@ -278,6 +293,26 @@ func TestWhisperArgs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSetAudioThreads_AudioThreadCount pins the 2-tier audioThreadCount
+// resolver: SetAudioThreads(n) for n > 0 wins outright; n <= 0 (including
+// the zero value nothing ever set) falls through to runtime.NumCPU().
+// audioThreads is process-wide package state (mirrors audioModelPath), so
+// this test restores it afterward to avoid bleeding into sibling tests.
+func TestSetAudioThreads_AudioThreadCount(t *testing.T) {
+	orig := audioThreads
+	defer func() { audioThreads = orig }()
+
+	SetAudioThreads(4)
+	if got := audioThreadCount(); got != 4 {
+		t.Errorf("audioThreadCount() after SetAudioThreads(4) = %d, want 4", got)
+	}
+
+	SetAudioThreads(0)
+	if got := audioThreadCount(); got != runtime.NumCPU() {
+		t.Errorf("audioThreadCount() after SetAudioThreads(0) = %d, want runtime.NumCPU() = %d", got, runtime.NumCPU())
 	}
 }
 
