@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -76,8 +77,13 @@ func main() {
 	// directly. This MUST run before srv.Start(mux) below: that is the
 	// point asynq's worker goroutines begin concurrently reading
 	// audioModelPath, so this single write must happen-before every
-	// concurrent read (no mutex needed).
-	convert.SetAudioModelPath(os.Getenv("AUDIO_MODEL_PATH"))
+	// concurrent read (no mutex needed). stripInlineComment (WR-06): non-
+	// shell env-file loaders (docker --env-file, compose env_file:, k8s
+	// configmaps) do NOT strip trailing "# comment" text, which would hand
+	// whisper-cli a garbage -m path — same defense firstField provides for
+	// the numeric/duration envs, but conservative enough to keep paths with
+	// spaces working.
+	convert.SetAudioModelPath(stripInlineComment(os.Getenv("AUDIO_MODEL_PATH")))
 
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(queue.TypeAudioConvert, h.HandleAudioConvert)
@@ -191,4 +197,21 @@ func firstField(s string) string {
 		}
 	}
 	return s
+}
+
+// stripInlineComment conservatively removes a trailing inline "# comment"
+// from a path-valued env var (WR-06). Unlike firstField (which cuts at the
+// FIRST space and would truncate a path that legitimately contains spaces),
+// it only cuts at a '#' immediately preceded by a space or tab — the only
+// shape a .env-style inline comment takes — then trims surrounding
+// whitespace. A '#' embedded directly in the path itself (no preceding
+// whitespace) is preserved.
+func stripInlineComment(s string) string {
+	for i := 1; i < len(s); i++ {
+		if s[i] == '#' && (s[i-1] == ' ' || s[i-1] == '\t') {
+			s = s[:i]
+			break
+		}
+	}
+	return strings.TrimSpace(s)
 }
