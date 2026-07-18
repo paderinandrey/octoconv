@@ -19,7 +19,8 @@ findings:
   warning: 4
   info: 2
   total: 7
-status: issues_found
+status: fixes_applied
+fixed: 5
 ---
 
 # Phase 30: Code Review Report
@@ -27,7 +28,7 @@ status: issues_found
 **Reviewed:** 2026-07-18T02:09:23Z
 **Depth:** standard
 **Files Reviewed:** 10
-**Status:** issues_found
+**Status:** fixes_applied (CR-01, WR-01..WR-04 fixed; IN-01/IN-02 deferred as noted)
 
 ## Summary
 
@@ -40,6 +41,9 @@ However, the duration guard — the phase's headline fail-closed control — is 
 ## Critical Issues
 
 ### CR-01: Duration ceiling guard bypassable via float→Duration overflow, NaN, and negative declared durations
+
+**Status:** fixed
+resolution: Extracted `parseProbedDuration` which validates in float space before any conversion — rejects NaN, ±Inf, negative, and values above a new `maxSaneDurationSeconds` (1<<31 s, safely below float64(MaxInt64)/1e9) fail-closed. Added platform-independent, ffprobe-free regression tests covering NaN/±Inf/negative/1e18/9.2e18 declared durations plus plausible-value acceptance. Commit 2a10d70.
 
 **File:** `internal/convert/audioduration.go:37` (conversion), `internal/convert/audioduration.go:61` (comparison)
 **Issue:** `ProbeDuration` converts the ffprobe-reported (attacker-influenced, container-declared) duration with `time.Duration(secs * float64(time.Second))` and `EnforceMaxDuration` only checks `d > max`. Three adversarial inputs defeat the guard:
@@ -68,11 +72,17 @@ where `maxSaneSeconds` is a server constant safely below `float64(math.MaxInt64)
 
 ### WR-01: m4a brand allowlist admits plain MP4 video, contradicting its own T-30-04 requirement
 
+**Status:** fixed
+resolution: Applied option (a)'s fail-closed core: removed `isom`/`mp42` from `m4aBrands`, keeping only the audio-specific `M4A `/`M4B ` majors (broader encoder compatibility deferred to Phase 31+ per review guidance). Corrected the doc comment to say MAJOR-brand-only (compatible brands are never scanned). Extended `TestMatchM4A_ForeignBrandNotDetected` with `isom`/`mp42` and added `TestMatchM4A_MP4VideoStyleFtypRejected` proving an isom-major MP4-video-style ftyp box (with typical `isomiso2avc1mp41` compatible brands) is rejected. Commit 2a02140.
+
 **File:** `internal/convert/audiosniff.go:20-25` (allowlist), `internal/convert/audiosniff.go:43-48` (matcher)
 **Issue:** The `m4aBrands` doc comment states "MP4, MOV, and other ISOBMFF containers … must NOT be misdetected as m4a (T-30-04)", but the allowlist includes `"isom"` and `"mp42"` — which are the *most common major brands of ordinary MP4 video files*. `matchM4A` only reads bytes 8–12 (the **major** brand), so any standard `.mp4` video (major brand `isom` or `mp42`) sniffs as `m4a` and would be routed to the audio engine once Phase 31 wires the flow. The comment also mis-describes the code: it calls this a "major/compatible-brand allowlist" and annotates `isom` as "seen as a compatible-brand entry", but the compatible-brands list (bytes 16+) is never scanned. Meanwhile the shipped fixture (`sample.m4a`) carries major brand `M4A ` (verified: `ftypM4A `), and `TestMatchM4A_ForeignBrandNotDetected` only tests `qt ` and `mp41` — the exact brands that make this a video-misdetection hole are the ones allowlisted.
 **Fix:** Either (a) remove `isom`/`mp42` from the major-brand allowlist and instead scan the compatible-brands entries (bytes 16..min(boxSize, len(b)) in 4-byte steps) for `M4A `/`M4B ` when the major brand is generic — matching what the comment already claims; or (b) if `isom`/`mp42` majors must be accepted for real-world m4a encoders, update the comment to explicitly accept the MP4-video-misdetection tradeoff and add a downstream note that the audio pipeline may receive video-bearing ISOBMFF files. Add a test with major brand `isom` + a video-style compatible-brand list asserting the intended behavior either way.
 
 ### WR-02: Convert runs the full expensive pipeline for unsupported targets before failing
+
+**Status:** fixed
+resolution: `Convert` now computes `targetFormat`/`outFlags` and returns `fmt.Errorf("audio: unsupported target format %q", targetFormat)` BEFORE stage 1; stage 2 appends the pre-resolved `outFlags`. Added ungated `TestAudioConverter_UnsupportedTargetFailsFast` proving no subprocess runs (nonexistent input + `out.xyz`/extension-less targets yield the unsupported-target error, not an ffmpeg error, and no `norm.wav` scratch file is created). Commit f898b1a.
 
 **File:** `internal/convert/whisper.go:140-143` (flag selection), `internal/convert/whisper.go:75-88` (nil default)
 **Issue:** `whisperOutputFlag` returns `nil` for any target outside {txt, srt, vtt, json}, and `Convert` never checks for that. For an `outPath` with an unrecognized or missing extension, `Convert` still runs stage 1 (full ffmpeg decode/normalize of the input) and stage 2 (a full whisper-cli transcription — the most expensive operation in the system) with *no output flag*, then fails only at `validateAudioOutput`'s `os.Stat` with a misleading "stat output" error. Registry routing makes this unreachable in the wired flow, but `Convert` is an exported method on an exported type and the class-sibling converters fail fast on their invalid-input paths; here a caller bug burns a full engine-timeout budget before surfacing.
@@ -89,6 +99,9 @@ if outFlags == nil {
 
 ### WR-03: Absent language silently defaults to whisper-cli's English default, not auto-detect
 
+**Status:** fixed
+resolution: Empty `opts.Language` now passes `-l auto` explicitly (already in `audioLanguageAllowlist`, identical path to the explicit client opt). Argv construction extracted into `whisperArgs` for testability; new `TestWhisperArgs` pins the exact argv for the no-opts (`-l auto`), explicit-language (`-l ru`), and translate (`-tr`) cases. Commit 47b5c9e.
+
 **File:** `internal/convert/whisper.go:149-151`
 **Issue:** When `o.Language == ""` (the default for absent/empty opts), no `-l` flag is passed and whisper-cli falls back to its built-in default, `-l en`. For a Russian-first internal client base (per project constraints), the *default* behavior of the audio engine mis-transcribes Russian audio into English-token garbage while exiting 0 with a structurally valid transcript — indistinguishable downstream from the documented hallucination risk, but entirely avoidable. The allowlist already contains `"auto"`, and nothing in the code or comments records "default = English" as a deliberate choice.
 **Fix:** Make the no-opts default explicit — either pass auto-detect by default:
@@ -104,6 +117,9 @@ args = append(args, "-l", lang)
 or, if English-default is intentional, document it at the flag-append site and in `AudioOpts.Language`'s doc comment so Phase 31's API docs can surface it to clients.
 
 ### WR-04: MIMEType lacks audio input formats while its doc comment claims full audio coverage
+
+**Status:** fixed
+resolution: Added `mp3`→`audio/mpeg`, `wav`→`audio/wav`, `m4a`→`audio/mp4`, `ogg`→`audio/ogg` cases to `MIMEType` and updated its doc comment to cover both audio inputs and outputs. Extended `TestAudioConverter_Contract` with assertions pinning all four input-format MIME types. Commit 8d1112d.
 
 **File:** `internal/convert/sniff.go:104-146`
 **Issue:** This phase extended `MIMEType`'s doc comment to claim it covers "the four audio transcription output targets (whisper, AUD-02) — so every job type is served with the same Content-Type correctness guarantee," and added `txt`/`srt`/`vtt`/`json`. But the four audio *input* formats (`mp3`, `wav`, `m4a`, `ogg`) are absent. `internal/api/handlers.go:426` stores `convert.MIMEType(detected)` as the uploaded input's Content-Type, so the moment Phase 31 wires audio uploads, every audio input is stored as `application/octet-stream` — silently breaking the "same Content-Type correctness guarantee" the comment asserts, in the file that was edited to assert it.
