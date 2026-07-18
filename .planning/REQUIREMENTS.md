@@ -26,7 +26,7 @@ Requirements for milestone v1.7 (Audio Engine & Hardening). Each maps to roadmap
 
 ### Audio Engine — Pipeline & Reliability
 
-- [ ] **AUD-05**: Стадийная классификация таймаутов (ffmpeg-стадия = terminal для битого входа, whisper-стадия на валидном аудио = transient), собственный `AudioUniqueTTL` (не переиспользовать image/document TTL — гонка T-03-10), `RECONCILER_ACTIVE_STALE_AFTER` для audio выше `AUDIO_ENGINE_TIMEOUT`
+- [x] **AUD-05**: Стадийная классификация таймаутов (ffmpeg-стадия = terminal для битого входа, whisper-стадия на валидном аудио = transient), собственный `AudioUniqueTTL` (не переиспользовать image/document TTL — гонка T-03-10), `RECONCILER_ACTIVE_STALE_AFTER` для audio выше `AUDIO_ENGINE_TIMEOUT`
 - [ ] **AUD-07**: RTF (realtime factor) измерен на реальном resource-limited контейнере (measured go/no-go по прецеденту veraPDF Phase 23) до финализации `AUDIO_ENGINE_TIMEOUT` и KEDA cooldown/stabilization
 
 ### Audio Engine — Packaging & Deployment
@@ -79,7 +79,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUD-02 | Phase 30 | Complete |
 | AUD-03 | Phase 30 | Complete |
 | AUD-04 | Phase 30 | Complete |
-| AUD-05 | Phase 31 | Pending |
+| AUD-05 | Phase 31 | Complete |
 | AUD-06 | Phase 32 | Pending |
 | AUD-07 | Phase 32 | Pending |
 | AUD-08 | Phase 33 | Pending |

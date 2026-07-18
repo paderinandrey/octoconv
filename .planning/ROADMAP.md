@@ -221,7 +221,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
-| 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete   | 2026-07-18 |
+| 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
 
