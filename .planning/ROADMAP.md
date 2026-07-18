@@ -176,8 +176,8 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
   4. whisper.cpp `--threads` is pinned to the container's cgroup CPU limit (not host core count) and `AUDIO_WORKER_CONCURRENCY` is set from measured per-job CPU/RSS footprint (likely 1), verified against the container `cpus`/`memory` ceiling.
 **Plans**: 5 plans
 - [x] 32-01-PLAN.md — Dockerfile.audio-worker (3-stage: Go + whisper.cpp v1.9.1 source `-DGGML_NATIVE=OFF` + slim runtime, SHA-256-baked model) + build/ldd/size + live cgroup cpu.max spot-check (AUD-06)
-- [ ] 32-02-PLAN.md — cgroup CPU-limit detection + whisper `-t` threads wiring (AUDIO_THREADS → cgroup → NumCPU) (AUD-06, AUD-07 SC4)
-- [ ] 32-03-PLAN.md — scripts/audio-rtf-measure.sh + measured RTF go/no-go: derive AUDIO_ENGINE_TIMEOUT (explicit formula + NO-GO lever) + AUDIO_WORKER_CONCURRENCY (AUD-07)
+- [x] 32-02-PLAN.md — cgroup CPU-limit detection + whisper `-t` threads wiring (AUDIO_THREADS → cgroup → NumCPU) (AUD-06, AUD-07 SC4)
+- [x] 32-03-PLAN.md — scripts/audio-rtf-measure.sh + measured RTF go/no-go: derive AUDIO_ENGINE_TIMEOUT (explicit formula + NO-GO lever) + AUDIO_WORKER_CONCURRENCY (AUD-07)
 - [ ] 32-04-PLAN.md — audio-worker compose service + IN-02 7-way AUDIO_ENGINE_TIMEOUT/AUDIO_MAX_RETRY propagation + CI bake matrix + .env.example final values (AUD-06, AUD-07)
 - [ ] 32-05-PLAN.md — TestAudioConversionE2E (non-empty transcript + signed webhook) through the containerized audio-worker + live run (AUD-06)
 
@@ -227,7 +227,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
-| 32. Containerization & Local E2E + RTF Gate | v1.7 | 1/5 | In Progress|  |
+| 32. Containerization & Local E2E + RTF Gate | v1.7 | 3/5 | In Progress|  |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
 
 ---
