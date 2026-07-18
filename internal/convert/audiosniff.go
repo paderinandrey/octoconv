@@ -13,15 +13,17 @@ import (
 // (AUD-01/T-30-01).
 const mp3PeekLen = 512 * 1024
 
-// m4aBrands is the closed ISOBMFF major/compatible-brand allowlist that
-// identifies m4a audio content. A bare "ftyp" box is not sufficient -- MP4,
-// MOV, and other ISOBMFF containers share the identical box structure and
-// must NOT be misdetected as m4a (T-30-04).
+// m4aBrands is the closed ISOBMFF MAJOR-brand allowlist (bytes 8-12 only;
+// the compatible-brands list at bytes 16+ is never scanned) that identifies
+// m4a audio content. A bare "ftyp" box is not sufficient -- MP4, MOV, and
+// other ISOBMFF containers share the identical box structure and must NOT be
+// misdetected as m4a (T-30-04). Only the audio-specific brands are accepted:
+// generic ISOBMFF majors like "isom"/"mp42" are the most common major brands
+// of ordinary MP4 *video* files and are deliberately EXCLUDED -- fail closed;
+// accepting broader real-world m4a encoder majors is a Phase 31+ decision.
 var m4aBrands = map[string]bool{
 	"M4A ": true, // primary brand, trailing space is part of the 4-byte code
 	"M4B ": true, // audiobook variant
-	"isom": true, // generic ISO base media, seen as a compatible-brand entry
-	"mp42": true, // MP4 v2 compatible brand, common in real-world m4a encoders
 }
 
 // matchWAV mirrors matchWebP's exact RIFF-container shape (sniff.go), just

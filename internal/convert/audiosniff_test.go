@@ -46,7 +46,7 @@ func TestMatchOGG_RejectsOther(t *testing.T) {
 // --- matchM4A ---
 
 func TestMatchM4A(t *testing.T) {
-	for _, brand := range []string{"M4A ", "M4B ", "isom", "mp42"} {
+	for _, brand := range []string{"M4A ", "M4B "} {
 		data := []byte{0x00, 0x00, 0x00, 0x1c}
 		data = append(data, []byte("ftyp")...)
 		data = append(data, []byte(brand)...)
@@ -56,14 +56,33 @@ func TestMatchM4A(t *testing.T) {
 	}
 }
 
+// TestMatchM4A_ForeignBrandNotDetected proves generic ISOBMFF major brands
+// are rejected -- including "isom"/"mp42", the most common major brands of
+// ordinary MP4 *video* files, which must NOT route to the audio engine
+// (T-30-04, fail closed).
 func TestMatchM4A_ForeignBrandNotDetected(t *testing.T) {
-	for _, brand := range []string{"qt  ", "mp41"} {
+	for _, brand := range []string{"qt  ", "mp41", "isom", "mp42"} {
 		data := []byte{0x00, 0x00, 0x00, 0x1c}
 		data = append(data, []byte("ftyp")...)
 		data = append(data, []byte(brand)...)
 		if matchM4A(data) {
 			t.Fatalf("matchM4A(brand=%q) = true, want false (not allowlisted)", brand)
 		}
+	}
+}
+
+// TestMatchM4A_MP4VideoStyleFtypRejected proves a realistic MP4 *video* ftyp
+// box -- major brand "isom" with a typical video compatible-brands list --
+// does not sniff as m4a (only the MAJOR brand at bytes 8-12 is consulted,
+// and generic ISOBMFF majors are excluded from the allowlist).
+func TestMatchM4A_MP4VideoStyleFtypRejected(t *testing.T) {
+	data := []byte{0x00, 0x00, 0x00, 0x20} // box size 32
+	data = append(data, []byte("ftyp")...)
+	data = append(data, []byte("isom")...)             // major brand: generic ISO base media
+	data = append(data, 0x00, 0x00, 0x02, 0x00)        // minor version
+	data = append(data, []byte("isomiso2avc1mp41")...) // compatible brands: typical MP4 video
+	if matchM4A(data) {
+		t.Fatal("matchM4A(isom-major MP4-video-style ftyp) = true, want false (T-30-04)")
 	}
 }
 
