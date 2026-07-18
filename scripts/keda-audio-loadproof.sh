@@ -403,7 +403,7 @@ echo "PASS: audio-worker scaled 0->${AUDIO_REPLICAS_AFTER} after trigger job $AU
 
 AUDIO_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=audio-worker" \
 	--field-selector=status.phase!=Failed \
-	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 assert_nonempty "$AUDIO_POD" "audio-worker pod identified for event-timeline capture"
 
 SC3_AUDIO_FILE="$EVIDENCE_DIR/sc3-audio-scale-from-zero-${RUN_TS}.txt"
