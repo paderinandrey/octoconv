@@ -87,10 +87,11 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ KEDA-автоскейл per engine-class: queue-depth экспозиция перенесена на always-on api (все 4 очереди; воркеры больше не регистрируют коллектор), per-class asynq ShutdownTimeout (8s-дефолт делал grace-периоды мёртвыми), in-chart Prometheus + 3 ScaledObject (minReplicaCount 0, pending+active PromQL, двойной флаг keda.enabled&&prometheus.enabled), webhook-worker жёстко 2 реплики без ScaledObject; live-гейт scripts/keda-gate.sh 18/18 на OrbStack (SC1 через external metrics API при 0 реплик, все 3 класса 0→1, image полный цикл →0) — Phase 27 (KEDA-01/02, verification 8/8; залповый 0→N→0 под нагрузкой — Phase 28)
 - ✓ Load-proof автоскейла с таймстамп-доказательством: залп 20 image-джобов при истинном нуле → 4 реплики за 11s (SC1 ≥2/60s), drain +76s, scale-to-zero +136s; 178s document-конверсия пережила настоящий KEDA/HPA-даунскейл 2→1 (SIGTERM за 142.8s до завершения, exit 0, ровно один queued→active, 188s запаса grace); evidence (CSV+PNG+транскрипт 27/27+таймстампы) закоммичен в phases/28/evidence/; попутно WR-02 закрыт (условный spec.replicas на scaled-классах) + values-gated HPA scaleDown stabilization override — Phase 28 (KEDA-03, verification 10/10; четвёртый OrbStack-клин задокументирован и восстановлен k8s hard-cycle) — milestone v1.6 phases complete
 - ✓ Hardening-хвост v1.6 закрыт: WR-01 (ignoreNullValues:false на всех 3 ScaledObject — падение api больше не читается как пустая очередь, fallback держит 1 реплику) + WR-05 checksum (prometheus config-hash через named-template, без рекурсии) + WR-06 (retry-в-PromQL-триггере); OPER-01 live-гейт `/v1/system/presets` против compose (61/61, OPERATOR_CLIENT_IDS проброшен); шесть гейт-тулинг warning'ов; K8S-02 presigned direct-dial с хоста без обхода (keda-gate.sh 21/21) — Phase 29 (HARD-01..04, verification 4/4; live-re-run keda-load-proof.sh отложен на Phase 33, watcher-kill упрочён pkill-fallback)
+- ✓ Standalone AudioConverter (четвёртый engine-класс, standalone — регистрация в Registry отложена на Phase 31 по scope fence): двухстадийный ffmpeg→whisper-cli v1.9.1 пайплайн (пиненный тег, -DGGML_NATIVE=OFF, SHA-256-пин модели ggml-base), txt/srt/vtt/json через Pair (16 пар), target=json с сегментными+пословными таймстампами (схема live-верифицирована против реального бинаря); ID3v2-aware fail-closed SniffAudio (synchsafe-скип, footer-flag, m4aBrands только M4A/M4B); ffprobe duration-гард с float-space валидацией (NaN/Inf/negative/overflow — CR-01 amd64-обход закрыт); AudioOpts через checkStrictObject c closed allowlist (auto/en/ru/es/fr/de) + injection-тест; hallucination-on-silence — accepted residual risk — Phase 30 (AUD-01..04, verification 5/5; code review 1 Critical + 4 Warning найдены и исправлены)
 
 ### Active
 
-<!-- Milestone v1.7 (Audio Engine & Hardening) — hardening tail done (Phase 29); audio class Phases 30-33. -->
+<!-- Milestone v1.7 (Audio Engine & Hardening) — hardening tail done (Phase 29); audio converter foundation done (Phase 30); integration Phases 31-33. -->
 
 - [ ] Клиент может отправить аудиофайл и получить транскрипт (whisper.cpp, офлайн) через тот же async-пайплайн, что и остальные классы
 - [ ] Audio-класс встроен в полный контур: валидация содержимого, retry-семантика, KEDA-скейлинг, chart
@@ -176,4 +177,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-18 after Phase 29 completion (v1.6 hardening tail)*
+*Last updated: 2026-07-18 after Phase 30 completion (audio engine foundation)*
