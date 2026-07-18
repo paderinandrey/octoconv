@@ -1,0 +1,76 @@
+{{/*
+audio-worker Deployment — audio-transcription engine class (whisper.cpp
+via ffmpeg->whisper-cli pipeline). Unlike document-worker/chromium-worker,
+this image is built -DGGML_NATIVE=OFF (source-built, portable) and needs no
+emulation or fixed-arch pin at all — it runs natively on any node arch.
+
+TIER LABEL: pod template carries octoconv.io/tier: app (see
+deployment-worker.yaml header for the full rationale — identical here).
+
+Grace 772s (AUDIO_ENGINE_TIMEOUT 742s, ConfigMap + 30s margin) is >=
+AUDIO_ENGINE_TIMEOUT — satisfies SC4 so a genuine downscale never
+premature-SIGTERMs a live transcription.
+
+startupProbe: the 682MB image plus baked whisper model is heavy (same
+reasoning as document-worker/chromium-worker) — a generous startup budget
+keeps this pod out of a CrashLoopBackOff before the metrics listener is up,
+while readiness/liveness stay tight once startup has succeeded.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audio-worker
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: audio-worker
+spec:
+  {{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+  # spec.replicas intentionally omitted when KEDA/HPA owns this Deployment
+  # (WR-02, Phase 28 D-10): rendering a fixed value here would make every
+  # `helm upgrade` reset a scaled-to-zero class back to this default,
+  # fighting the HPA. Once KEDA/HPA has taken ownership it manages
+  # spec.replicas directly via the scale subresource.
+  {{- else }}
+  replicas: {{ .Values.audioWorker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "audio-worker" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "audio-worker" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.audioWorker.terminationGracePeriodSeconds }}
+      containers:
+        - name: audio-worker
+          image: "{{ .Values.audioWorker.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: IfNotPresent
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: {{ .Values.audioWorker.resources.limits.cpu | quote }}
+              memory: {{ .Values.audioWorker.resources.limits.memory | quote }}
