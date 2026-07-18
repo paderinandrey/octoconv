@@ -353,6 +353,89 @@ func TestHTMLUniqueTTL(t *testing.T) {
 	}
 }
 
+// TestAudioConvertTaskRoundTrip asserts NewAudioConvertTask builds a task
+// routed to TypeAudioConvert whose payload round-trips through
+// ParseConvertPayload back to the same job id — mirrors
+// TestHTMLConvertTaskRoundTrip's shape for the audio engine class.
+func TestAudioConvertTaskRoundTrip(t *testing.T) {
+	id := uuid.New()
+	task, err := NewAudioConvertTask(id, 3, AudioUniqueTTL(3, 600*time.Second))
+	if err != nil {
+		t.Fatalf("NewAudioConvertTask: %v", err)
+	}
+	if task.Type() != TypeAudioConvert {
+		t.Errorf("task type = %q, want %q", task.Type(), TypeAudioConvert)
+	}
+	p, err := ParseConvertPayload(task.Payload())
+	if err != nil {
+		t.Fatalf("ParseConvertPayload: %v", err)
+	}
+	if p.JobID != id {
+		t.Errorf("job id = %s, want %s", p.JobID, id)
+	}
+}
+
+// TestAudioRetryDelaySchedule asserts AudioRetryDelay returns the exact
+// 5s/15s/30s schedule (no jitter, mirrors DocumentRetryDelay's/
+// HTMLRetryDelay's shape) and clamps on both ends.
+func TestAudioRetryDelaySchedule(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{n: -1, want: 5 * time.Second}, // clamps to first entry
+		{n: 0, want: 5 * time.Second},
+		{n: 1, want: 15 * time.Second},
+		{n: 2, want: 30 * time.Second},
+		{n: 99, want: 30 * time.Second}, // clamps past the end of the schedule
+	}
+	for _, tc := range cases {
+		got := AudioRetryDelay(tc.n, nil, nil)
+		if got != tc.want {
+			t.Errorf("AudioRetryDelay(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestAudioUniqueTTL asserts AudioUniqueTTL derives its result from the
+// corrected worst-case retry lifetime ((maxRetry+1) executions) exactly like
+// DocumentUniqueTTL/HTMLUniqueTTL, evaluates to exactly 2570s for (3, 600s),
+// is monotonic in both arguments, and — the SC3-specific proof — strictly
+// EXCEEDS the zero-margin worst-case retry lifetime, demonstrating
+// uniqueTTLSafetyMargin is a load-bearing term, not accidentally zero.
+func TestAudioUniqueTTL(t *testing.T) {
+	maxRetry := 3
+	engineTimeout := 600 * time.Second
+	backoffSum := 5*time.Second + 15*time.Second + 30*time.Second // i=0..2
+
+	want := time.Duration(maxRetry+1)*engineTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := AudioUniqueTTL(maxRetry, engineTimeout)
+	if got != want {
+		t.Errorf("AudioUniqueTTL(%d, %v) = %v, want %v", maxRetry, engineTimeout, got, want)
+	}
+	if want != 2570*time.Second {
+		t.Errorf("expected worked example want = 2570s, got %v", want)
+	}
+
+	// Monotonicity: raising either argument must never shrink the TTL.
+	if AudioUniqueTTL(maxRetry+1, engineTimeout) <= AudioUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("AudioUniqueTTL must grow monotonically with maxRetry")
+	}
+	if AudioUniqueTTL(maxRetry, engineTimeout+time.Second) <= AudioUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("AudioUniqueTTL must grow monotonically with engineTimeout")
+	}
+
+	// SC3: AudioUniqueTTL must strictly exceed the zero-margin worst-case
+	// retry lifetime -- (maxRetry+1)*engineTimeout + audioBackoffSum(maxRetry)
+	// -- proving the safety-margin term is load-bearing, not accidentally
+	// zero.
+	worstCaseNoMargin := time.Duration(maxRetry+1)*engineTimeout + audioBackoffSum(maxRetry)
+	if AudioUniqueTTL(maxRetry, engineTimeout) <= worstCaseNoMargin {
+		t.Errorf("AudioUniqueTTL(%d, %v) = %v must strictly exceed the zero-margin worst-case lifetime %v",
+			maxRetry, engineTimeout, AudioUniqueTTL(maxRetry, engineTimeout), worstCaseNoMargin)
+	}
+}
+
 // TestEnqueueImageConvert enqueues a task and confirms it lands in the image
 // queue. Requires a live Redis (REDIS_ADDR); skipped otherwise.
 func TestEnqueueImageConvert(t *testing.T) {
