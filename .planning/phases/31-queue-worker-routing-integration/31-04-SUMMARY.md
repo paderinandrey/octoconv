@@ -34,23 +34,25 @@ key-decisions:
   - "RECONCILER_ACTIVE_STALE_AFTER global-raise (5m -> 15m) documented as a deliberate global tradeoff affecting image/document/html staleness-detection latency too, per Pitfall 2 option 1 — real safety mechanism is asynq.Unique/ErrDuplicateTask, not this threshold"
   - "MAX_UPLOAD_BYTES kept at global 100 MiB default — long-audio per-format ceiling explicitly deferred to Phase 32, documented inline so it is not silently dropped (Pitfall 3)"
 
-requirements-completed: []  # AUD-05 NOT yet complete — Task 2 (live E2E) is the proof step and is blocked at an operator-safety checkpoint; see below.
+requirements-completed: [AUD-05]
 
 # Metrics
-duration: (partial — Task 1 only; Task 2 pending operator input)
+duration: ~85min (including operator checkpoint wait for k8s teardown)
 completed: 2026-07-18
 ---
 
 # Phase 31 Plan 04: cmd/audio-worker entry point + .env.example documentation Summary
 
-**cmd/audio-worker built and verified against the compiled codebase (go build/vet/gofmt clean, wired to queue.TypeAudioConvert/QueueAudio, SetAudioModelPath called before srv.Start); .env.example documents all 5 audio env levers plus both Phase-31-deferred tradeoffs. Live E2E proof (Task 2) is BLOCKED at an operator-safety checkpoint, not yet executed.**
+**cmd/audio-worker built, verified, and live-proven end-to-end: an uploaded jfk.wav job flowed queued → active → done in ~2.8s against real compose infra (Postgres/Redis/MinIO) with local ffmpeg + whisper-cli, producing the correct transcript ("...ask not what your country can do for you..."); .env.example documents all 5 audio env levers plus both Phase-31-deferred tradeoffs.**
 
 ## Performance
 
 - **Started:** 2026-07-18T~14:55Z (approx, first tool call this session)
 - **Task 1 completed:** 2026-07-18T15:00Z
-- **Tasks:** 1 of 2 completed (Task 2 is a `checkpoint:human-verify` gate, returned unexecuted per this plan's own explicit two-phase design)
-- **Files modified:** 2 (1 created, 1 modified)
+- **Checkpoint (operator k8s teardown + confirmation):** ~14:55-15:03Z (external wait, not agent compute time)
+- **Task 2 (live E2E) completed:** 2026-07-18T15:06:54Z (compose torn down, cleanup done)
+- **Tasks:** 2 of 2 completed
+- **Files modified:** 3 (2 created, 1 modified) — `cmd/audio-worker/main.go`, `.planning/phases/31-queue-worker-routing-integration/31-04-SUMMARY.md`, `.env.example`
 
 ## Accomplishments
 
@@ -59,13 +61,14 @@ completed: 2026-07-18
 - Verified: `gofmt -l cmd/audio-worker` clean, `go vet ./cmd/audio-worker/...` clean, `go build ./cmd/audio-worker/` succeeds, `go build ./...` and `go vet ./...` clean across the whole repo (no regressions to sibling packages).
 - Confirmed `cmd/api/main.go`'s `NewQueueDepthCollector` was NOT touched (scope fence respected — that wiring is AUD-08/Phase 33).
 - Confirmed all local E2E dependencies present and ready for Task 2: `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe`, `/opt/homebrew/bin/whisper-cli`, `~/.cache/whisper/ggml-base.bin` (147,951,465 bytes), and audio fixtures at `internal/convert/testdata/audio/` (jfk.wav, sample.wav, sample.m4a, sample-id3.mp3).
+- **Task 2 (live E2E) executed successfully after operator cleared the checkpoint** (orbstack k8s cluster verified empty and stopped via `orb stop k8s`). Full evidence in the "Live E2E Evidence" section below: migration 0006 confirmed live via `\d jobs`, job create returned `202` (not `500`), status transitioned `queued -> active -> done` in ~2.8s with Postgres `job_events` timestamps, and the downloaded transcript matched the well-known JFK inaugural-address fixture content exactly.
 
 ## Task Commits
 
 1. **Task 1: cmd/audio-worker/main.go + .env.example audio block** - `d61ca82` (feat)
-2. **Task 2: Live end-to-end audio conversion (queued → active → done)** - NOT EXECUTED (checkpoint, see below)
+2. **Task 2: Live end-to-end audio conversion (queued → active → done)** - verified live against real infra; no code changes (verification-only task per plan spec), evidence captured below and in this summary's commit
 
-**Plan metadata:** (this commit, docs)
+**Plan metadata:** (this SUMMARY.md update commit, docs)
 
 ## Files Created/Modified
 - `cmd/audio-worker/main.go` - audio-queue consumer process entry point (asynq server, metrics listener, graceful shutdown)
@@ -81,33 +84,82 @@ None - Task 1 executed exactly as written (verbatim template copy per 31-PATTERN
 
 One incidental cleanup during verification: `go build ./cmd/audio-worker/` (run from repo root, no `-o` flag) wrote a stray `audio-worker` binary to the worktree root as a side effect of the verify command syntax specified in the plan (`go build ./cmd/audio-worker/`, no output path). This is standard `go build` behavior for a `main` package built without `-o`, not a bug in the plan or the code — the binary was untracked and removed (`rm -f audio-worker`) before staging, so nothing generated was committed.
 
-## Issues Encountered
+## Live E2E Evidence (Task 2)
 
-**Task 2 is blocked at its own designed checkpoint, not an error.** Environment check at execution time:
+**Checkpoint resolution:** orchestrator verified the orbstack k8s cluster was empty (zero helm releases, only kube-system coredns/local-path-provisioner) and stopped it via `orb stop k8s` (the project's own documented command). Confirmed independently at execution time: `kubectl get nodes` refused the connection (`127.0.0.1:26443` connection refused — cluster down), `docker info` responded normally (daemon healthy, v29.4.0). The compose↔k8s mutual-exclusion discipline was satisfied before proceeding.
 
-- `docker compose ps` (repo root) — empty, compose infra is DOWN.
-- `kubectl get nodes` — `orbstack` cluster reachable, `Ready`, meaning the **k8s stack is currently UP**.
+**Compose infra brought up (octoconv-scoped only, non-conflicting ports):**
+- `cp /Users/apaderin/dev/octoconv/.env ./.env` (gitignored copy into the worktree)
+- `docker compose up -d postgres redis minio createbucket` — `octoconv-db` (5434), `octoconv-redis` (6379), `octoconv-minio` (9100/9101) all reported `healthy` on first poll
+- Confirmed no port/name collision with the unrelated `gsh-service-*` project's own compose stack running concurrently (`gsh-service-postgres-1` on 5432, `gsh-service-redis-1` on 16379 — disjoint from octoconv's 5434/6379) — that stack was left untouched throughout, per instruction.
 
-Per `STATE.md`'s own operational discipline ("never run compose and k8s stacks hot simultaneously — four confirmed daemon wedges on record") and this plan's Task 2 `<action>` text verbatim ("ask the operator to confirm the k8s stack is DOWN, then (only on approval, per the 'never run both hot' discipline...) `docker compose up -d postgres redis minio createbucket`"), bringing up compose right now without an explicit operator go-ahead to first tear down or accept the risk on the k8s stack would violate a documented safety precedent. `workflow.auto_advance` and `workflow._auto_chain_active` are both `false` in `.planning/config.json` (auto-mode is NOT active), so per the standard (non-auto) checkpoint protocol this plan must STOP and return the checkpoint for explicit operator input rather than auto-approving.
+**Migration verification:**
+```
+$ go run ./cmd/migrate
+2026/07/18 18:04:45 migrations applied
 
-All automatable prep that does not require the infra decision was completed and verified (see Accomplishments): code builds/vets/formats clean, all local ffmpeg/whisper-cli/model/fixture dependencies confirmed present, `.env` template copy step identified as needed (`cp /Users/apaderin/dev/octoconv/.env ./.env` — not yet run, held pending the compose-up decision since it's meaningless without live infra).
+$ docker exec octoconv-db psql -U octo -d octo_db -c "\d jobs"
+"jobs_engine_check" CHECK (engine = ANY (ARRAY['image'::text, 'document'::text, 'av'::text, 'cad'::text, 'archive'::text, 'probe'::text, 'html'::text, 'audio'::text]))
+```
+Migration 0006 confirmed live — `jobs_engine_check` accepts `'audio'`.
+
+**Processes started (background, `go run`, logs to `/tmp/octoconv-e2e/`):**
+- `go run ./cmd/api` — `2026/07/18 18:05:01 🚀 API listening on :8090`; `/healthz` returned `{"postgres":"ok","redis":"ok","s3":"ok","status":"ok"}`
+- `go run ./cmd/audio-worker` with `AUDIO_MODEL_PATH=$HOME/.cache/whisper/ggml-base.bin`, `AUDIO_MAX_DURATION_SECONDS=14400s`, `AUDIO_ENGINE_TIMEOUT=300s`, `METRICS_ADDR=127.0.0.1:9091` (distinct from the API's own `:9090` to avoid a port clash between the two locally co-located processes) — `2026/07/18 18:05:15 🐙 audio-worker starting (queue=audio)`, asynq `Starting processing`
+
+**Test client:** created via `go run ./cmd/manage-clients create audio-e2e-test-client` (no pre-existing clients in the fresh DB) — `client id: c7cc83bf-b82c-49cc-931c-16edb6902571`.
+
+**Job create (auth scheme is `Authorization: ApiKey <key>`, per `internal/auth/middleware.go`, not `Bearer`):**
+```
+$ curl -X POST http://localhost:8090/v1/jobs \
+    -H "Authorization: ApiKey ${API_KEY}" \
+    -F "file=@internal/convert/testdata/audio/jfk.wav" \
+    -F "target=txt"
+HTTP 202
+{"job_id":"993b5efe-f44e-4bce-a6fb-04f3a8c02746","status":"queued"}
+```
+**202 Accepted, not 500** — proves the 0006 constraint + engine routing accept an audio job end-to-end from the API's perspective.
+
+**Status transitions (Postgres `job_events`, authoritative timestamps):**
+| from_status | to_status | created_at (UTC) |
+|---|---|---|
+| — | queued | 2026-07-18 15:05:52.281066+00 |
+| queued | active | 2026-07-18 15:05:53.413200+00 |
+| active | done | 2026-07-18 15:05:55.103601+00 |
+
+Total wall-clock queued→done: **~2.8 seconds** (jfk.wav is an 11-second clip; whisper-cli `base` model transcribes well under real-time on this hardware).
+
+**Job row confirms audio engine routing:** `engine=audio, status=done, source_format=wav, target_format=txt`.
+
+**Transcript (downloaded via the presigned `download_url` returned by `GET /v1/jobs/{id}`):**
+```
+ And so my fellow Americans ask not what your country can do for you, ask what you can do for your country.
+```
+Plausible, correct, and exactly matches the well-known JFK inaugural-address excerpt the `jfk.wav` fixture is known to contain — not empty, not garbage, not a hallucination.
+
+**Cleanup performed:**
+- `kill` sent to both `go run` parent PIDs; audio-worker logged a clean graceful shutdown (`🛑 shutting down audio-worker...` → asynq `Starting graceful shutdown` → `Waiting for all workers to finish` → `All workers have finished` → `Exiting` → `bye 👋`); `pkill` used to also stop the underlying compiled `go-build` child binaries left running by `go run`'s exec wrapper
+- `docker compose down` removed `octoconv-db`, `octoconv-redis`, `octoconv-minio`, and the one-shot `createbucket` container plus the worktree-scoped compose network/volumes — `gsh-service-*` containers confirmed untouched (still running, unrelated project)
+- `.env` copy remains in the worktree but is git-ignored (`git check-ignore -v .env` confirms `.gitignore:1:/.env`); `git status --short` showed a clean tree before staging this SUMMARY update
 
 ## User Setup Required
 
-None - no external service configuration required. Operator action needed is purely the infra-safety decision described above (see CHECKPOINT REACHED at the end of this turn).
+None - no external service configuration required.
 
 ## Next Phase Readiness
 
-- Task 1 (the code + docs half of this plan) is fully complete, committed, and verified — `cmd/audio-worker` is a real, buildable, correctly-wired binary today.
-- Task 2 (the live-proof half, and AUD-05's actual completion criterion) requires a fresh continuation once the operator confirms the k8s-down/compose-up precondition. The continuation agent should: confirm precondition → `cp /Users/apaderin/dev/octoconv/.env ./.env` → `docker compose up -d postgres redis minio createbucket` → wait for healthchecks → `set -a && . ./.env && set +a` with `AUDIO_MODEL_PATH=$HOME/.cache/whisper/ggml-base.bin` and a generous `AUDIO_MAX_DURATION_SECONDS` exported → start `go run ./cmd/api` and `go run ./cmd/audio-worker` in the background → confirm migration 0006 applied via `\d jobs` → create a test client via `go run ./cmd/manage-clients` if none exists → POST `internal/convert/testdata/audio/jfk.wav` to `/v1/jobs` with `target=txt` → poll to `done` → download and report the transcript.
-- `requirements-completed` is deliberately left empty in this summary's frontmatter — AUD-05 should only be marked complete once Task 2's live proof lands (do not mark it complete from Task 1 alone).
+- Both tasks of this plan are complete: `cmd/audio-worker` is a real, buildable, correctly-wired binary, and its live E2E behavior against real infra is now proven with timestamped evidence.
+- AUD-05 is satisfied: an uploaded audio job flows `queued -> active -> done` via `go run ./cmd/audio-worker` against compose infra with local ffmpeg/whisper-cli, producing a valid transcript, with job create returning `202` (never `500`).
+- Phase 32 (RTF/timing measurement) can now build directly on a proven-working `cmd/audio-worker` — the `AUDIO_ENGINE_TIMEOUT=600s` and `AUDIO_MAX_DURATION_SECONDS=4h` defaults shipped here remain explicit placeholders pending that measurement.
+- No blockers carried forward from this plan.
 
 ---
 *Phase: 31-queue-worker-routing-integration*
-*Completed: 2026-07-18 (Task 1 only; Task 2 pending)*
+*Completed: 2026-07-18*
 
 ## Self-Check: PASSED
 
 - FOUND: cmd/audio-worker/main.go
 - FOUND: commit d61ca82 (git log --oneline --all)
 - FOUND: AUDIO_MODEL_PATH documented in .env.example
+- FOUND: live job 993b5efe-f44e-4bce-a6fb-04f3a8c02746 reached status=done in Postgres job_events (verified via docker exec psql during execution, infra since torn down)
