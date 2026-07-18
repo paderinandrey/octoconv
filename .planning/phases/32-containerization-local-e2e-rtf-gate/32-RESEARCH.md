@@ -442,22 +442,27 @@ PEAK_BYTES=$(docker exec "$CONTAINER" cat /sys/fs/cgroup/memory.peak 2>/dev/null
 
 **Note:** every claim above the Assumptions Log line not explicitly marked `[ASSUMED]`/`[CITED]` inline was `[VERIFIED]` via direct code/file read in this session (Dockerfiles, docker-compose.yml, ci.yml, e2e_test.go, whisper.go, client.go, cmd/audio-worker/main.go, verapdf-measure.sh, 31-REVIEW.md, 30/31-RESEARCH.md, STACK.md, PITFALLS.md all read directly).
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All three questions were resolved during Phase 32 planning; each carries an inline **RESOLVED:** marker citing the adopting plan/task.
 
 1. **Should a NO-GO RTF outcome lower `AUDIO_MAX_DURATION_SECONDS` (currently 14400s/4h) rather than accept a very large `AUDIO_ENGINE_TIMEOUT`?**
    - What we know: `AUDIO_ENGINE_TIMEOUT` is derived from RTF × worst-case-duration; if RTF measures poorly (e.g., close to or above 1.0 on the real container), the implied timeout for a 4-hour input becomes operationally absurd (many hours).
    - What's unclear: whether this phase's scope includes revisiting `AUDIO_MAX_DURATION_SECONDS` (an AUD-04/Phase 30 value) as part of the go/no-go response, or whether that's explicitly out of scope (the phase's stated success criteria only mention `AUDIO_ENGINE_TIMEOUT` and KEDA cooldown, not the duration ceiling).
    - Recommendation: surface this explicitly as a decision point in the phase's CONTEXT/discuss-phase step rather than resolving it silently either direction — the planner should treat "lower `AUDIO_MAX_DURATION_SECONDS` if RTF is bad" as an explicit, documented option, not a default.
+   - **RESOLVED:** Adopted as the explicit NO-GO lever in **32-03 Task 2** — if the derived timeout ≥ CAP, lower `AUDIO_MAX_DURATION_SECONDS` (preferred over inflating the timeout or raising the global `RECONCILER_ACTIVE_STALE_AFTER`) and record the new value. Not resolved silently; it is a documented decision branch in the derivation formula.
 
 2. **Does the RTF measurement container need to match OrbStack's arm64 or a genuinely amd64 target (mirroring Phase 23's emulation caveat)?**
    - What we know: unlike `document-worker` (hard-pinned `linux/amd64` because `verapdf/cli` publishes no arm64 manifest), `audio-worker` has NO such constraint — whisper.cpp builds natively on both architectures.
    - What's unclear: whether the eventual production/k8s deployment target is amd64 or arm64 (not stated in any read document this session), and whether an OrbStack arm64-native measurement is representative enough, or whether the measurement should also be cross-checked under `--platform linux/amd64` emulation (Rosetta-class, per 23-01-SUMMARY.md's own caveat) if the production target differs from the measurement host's native architecture.
    - Recommendation: measure natively on whatever the execution host is (fastest, most reliable), but explicitly record the measurement host's architecture in the SUMMARY (mirroring 23-01-SUMMARY.md's "Emulation caveat on the raw numbers" section) so a future re-measurement need is flagged, not silently assumed away.
+   - **RESOLVED:** Adopted in **32-03 Task 2** as the recorded arch caveat — measure natively on the execution host and record the measurement-host architecture (arm64 OrbStack vs amd64) in the SUMMARY with the Phase-23-style caveat that production amd64 RTF will differ; Phase 33 consumes the number WITH the caveat documented.
 
 3. **Is `internal/e2e/testdata/jfk.wav` (an 11-second, well-known public-domain historical recording) an acceptable committed fixture, or does the E2E suite's existing "no exact-transcript assertions" discipline (Pitfall 9) already fully cover the risk of relying on it?**
    - What we know: `jfk.wav` is already committed at `internal/convert/testdata/audio/jfk.wav` and already used in Phase 31's live E2E without incident; `TestAudioConversionE2E`'s design above deliberately asserts only non-emptiness, not transcript content, sidestepping Pitfall 9 entirely.
    - What's unclear: nothing substantive — this is a low-risk question included only because it's the one place this phase's E2E design touches audio *content* (as opposed to structural/timing concerns everywhere else in this document).
    - Recommendation: proceed with the copy-into-`internal/e2e/testdata/` plan as designed; no further research needed.
+   - **RESOLVED:** Adopted in **32-05 Task 1** fixture design — `internal/convert/testdata/audio/jfk.wav` is copied to `internal/e2e/testdata/jfk.wav` as a committed real file, and `assertDownloadIsNonEmptyTranscript` asserts non-emptiness only (Pitfall 9), so the fixture choice touches no transcript-content assertion.
 
 ## Environment Availability
 
