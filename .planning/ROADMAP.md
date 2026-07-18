@@ -145,7 +145,10 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
   3. `target=json` output carries segment- and word-level start/end/text timestamps, with the schema verified live against the pinned `whisper-cli` v1.9.1 binary (SEED-001 forward-compatibility hinge).
   4. `AudioOpts{language (closed allowlist), translate}` flows through the validated-opts pattern (OPTS-01 precedent) — an injection test proves client bytes never reach the engine argv.
   5. An input whose ffprobe-measured duration exceeds `AUDIO_MAX_DURATION_SECONDS` is rejected with a predictable terminal/422 (audio analog of the image decompression-bomb guard), and hallucination-on-silence is recorded as an accepted residual risk in the phase decision log.
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 30-01-PLAN.md — Dev setup (whisper-cli v1.9.1 + SHA-256 model) + audio content validation: ID3v2-aware magic bytes + ffprobe duration guard (AUD-01, AUD-04)
+- [ ] 30-02-PLAN.md — EngineAudio const + validated AudioOpts (closed language allowlist, injection test) (AUD-03)
+- [ ] 30-03-PLAN.md — AudioConverter two-stage ffmpeg→whisper-cli pipeline + live-verified JSON timestamp schema (AUD-02)
 
 ### Phase 31: Queue, Worker & Routing Integration
 **Goal**: Audio jobs flow end-to-end through the async pipeline with correct retry/dedup and engine-routing semantics.
@@ -213,7 +216,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 27. KEDA Autoscaling | v1.6 | 3/3 | Complete    | 2026-07-16 |
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
-| 30. Audio Engine Foundation | v1.7 | 0/? | Not started | - |
+| 30. Audio Engine Foundation | v1.7 | 0/3 | Planned | - |
 | 31. Queue, Worker & Routing Integration | v1.7 | 0/? | Not started | - |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
