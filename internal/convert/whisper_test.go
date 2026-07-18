@@ -223,6 +223,47 @@ func TestAudioConverter_Contract(t *testing.T) {
 	}
 }
 
+// TestWhisperArgs asserts the exact whisper-cli argv construction, in
+// particular that an absent language passes -l auto EXPLICITLY (WR-03) --
+// whisper-cli's own built-in default is -l en, which would silently
+// mis-transcribe non-English audio while exiting 0.
+func TestWhisperArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		o    AudioOpts
+		want []string
+	}{
+		{
+			name: "no opts defaults to -l auto",
+			o:    AudioOpts{},
+			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "auto"},
+		},
+		{
+			name: "explicit language passed through",
+			o:    AudioOpts{Language: "ru"},
+			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru"},
+		},
+		{
+			name: "translate appends -tr",
+			o:    AudioOpts{Language: "ru", Translate: true},
+			want: []string{"-m", "/m/ggml.bin", "-f", "/w/norm.wav", "-of", "/w/out", "-otxt", "-l", "ru", "-tr"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := whisperArgs("/m/ggml.bin", "/w/norm.wav", "/w/out", []string{"-otxt"}, tc.o)
+			if len(got) != len(tc.want) {
+				t.Fatalf("whisperArgs = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("whisperArgs = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestAudioConverter_UnsupportedTargetFailsFast asserts Convert rejects an
 // unsupported target extension BEFORE invoking any subprocess (WR-02): the
 // input path deliberately does not exist, so if ffmpeg were invoked the error

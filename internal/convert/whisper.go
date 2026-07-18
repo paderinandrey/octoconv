@@ -87,6 +87,31 @@ func whisperOutputFlag(target string) []string {
 	}
 }
 
+// whisperArgs builds whisper-cli's argv from already-validated inputs.
+// o.Language/o.Translate are allowlist-validated upstream (AudioOptsFromMap
+// -> ParseAudioOpts) and passed as discrete argv slice elements, never a
+// shell string; runCommand never invokes a shell (exec.go), so there is no
+// shell-metacharacter injection surface regardless (RESEARCH.md "Argv
+// construction"). When no language was requested, -l auto is passed
+// EXPLICITLY: whisper-cli's own built-in default is -l en, which would
+// silently mis-transcribe non-English audio for a Russian-first internal
+// client base while exiting 0 with a structurally valid transcript (WR-03)
+// -- "auto" is already in audioLanguageAllowlist, so the default and the
+// explicit client opt take the identical path.
+func whisperArgs(model, normPath, outBase string, outFlags []string, o AudioOpts) []string {
+	args := []string{"-m", model, "-f", normPath, "-of", outBase}
+	args = append(args, outFlags...)
+	lang := o.Language
+	if lang == "" {
+		lang = "auto"
+	}
+	args = append(args, "-l", lang)
+	if o.Translate {
+		args = append(args, "-tr")
+	}
+	return args
+}
+
 // Convert runs the two-stage ffmpeg-normalize -> whisper-cli-transcribe
 // pipeline (RESEARCH.md "Pattern 1: Two-stage hardened-exec pipeline"),
 // both stages sharing the single caller-supplied ctx (one
@@ -151,19 +176,7 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 	// deterministic output path (never rely on whisper-cli's default
 	// input-filename-based naming -- RESEARCH.md "Output file naming").
 	outBase := strings.TrimSuffix(outPath, filepath.Ext(outPath))
-	args := []string{"-m", c.model(), "-f", normPath, "-of", outBase}
-	args = append(args, outFlags...)
-	// o.Language/o.Translate are already allowlist-validated
-	// (AudioOptsFromMap -> ParseAudioOpts) -- passed as discrete argv
-	// slice elements, never a shell string; runCommand never invokes a
-	// shell (exec.go), so there is no shell-metacharacter injection
-	// surface regardless (RESEARCH.md "Argv construction").
-	if o.Language != "" {
-		args = append(args, "-l", o.Language)
-	}
-	if o.Translate {
-		args = append(args, "-tr")
-	}
+	args := whisperArgs(c.model(), normPath, outBase, outFlags, o)
 	if _, err := runCommand(ctx, "whisper-cli", args...); err != nil {
 		return fmt.Errorf("audio: whisper-cli: %w", err)
 	}
