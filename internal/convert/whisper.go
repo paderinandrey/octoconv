@@ -112,6 +112,22 @@ func whisperOutputFlag(target string) []string {
 	}
 }
 
+// ffmpegNormalizeArgs builds ffmpeg's stage-1 normalize argv, isolated as its
+// own function so IN-01's "file:" protocol prefix on the -i path argv
+// element is unit-testable without invoking a real ffmpeg subprocess
+// (mirrors whisperArgs' argv-pinning test style below).
+func ffmpegNormalizeArgs(inPath, normPath string) []string {
+	// IN-01 (30-REVIEW.md, defense-in-depth): the argv element handed to
+	// ffmpeg's -i flag is prefixed with the explicit "file:" protocol
+	// specifier so ffmpeg can never reinterpret it as a protocol/URL
+	// specifier (concat:/http:/pipe:) or a leading-dash option. inPath
+	// itself is left unchanged everywhere else -- today's caller (process(),
+	// internal/worker/worker.go) always passes a server-generated workdir
+	// path, so this is a no-op for current behavior; it only matters if a
+	// future caller ever threads a client-influenced filename through here.
+	return []string{"-y", "-i", "file:" + inPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", normPath}
+}
+
 // whisperArgs builds whisper-cli's argv from already-validated inputs.
 // o.Language/o.Translate are allowlist-validated upstream (AudioOptsFromMap
 // -> ParseAudioOpts) and passed as discrete argv slice elements, never a
@@ -187,12 +203,10 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 	normPath := filepath.Join(workDir, "norm.wav")
 
 	// Stage 1: ffmpeg normalize. A distinguishable "ffmpeg:" prefix on this
-	// stage's errors lets a FUTURE worker-layer classifier (Phase 31, out
-	// of scope here) split ffmpeg-stage failures (malformed input ->
-	// likely terminal) from whisper-stage failures (likely transient) --
-	// deliberately does not foreclose that classifier.
-	if _, err := runCommand(ctx, "ffmpeg", "-y", "-i", inPath,
-		"-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", normPath); err != nil {
+	// stage's errors lets the worker-layer classifier (Phase 31,
+	// isAudioTerminal) split ffmpeg-stage failures (malformed input ->
+	// terminal) from whisper-stage failures (likely transient).
+	if _, err := runCommand(ctx, "ffmpeg", ffmpegNormalizeArgs(inPath, normPath)...); err != nil {
 		return fmt.Errorf("audio: ffmpeg: %w", err)
 	}
 

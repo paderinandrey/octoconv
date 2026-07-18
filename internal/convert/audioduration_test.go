@@ -69,6 +69,25 @@ func TestParseProbedDuration_PlausibleValuesAccepted(t *testing.T) {
 	}
 }
 
+// TestFfprobeDurationArgs_FilePrefix asserts IN-01 (30-REVIEW.md,
+// defense-in-depth): the argv element handed to ffprobe carries the
+// explicit "file:" protocol prefix, so a future client-influenced filename
+// cannot be reinterpreted as a protocol/URL specifier
+// (concat:/http:/pipe:) or a leading-dash option. Runs ungated -- pure argv
+// construction, no subprocess invoked.
+func TestFfprobeDurationArgs_FilePrefix(t *testing.T) {
+	got := ffprobeDurationArgs("/work/in.wav")
+	want := []string{"-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", "file:/work/in.wav"}
+	if len(got) != len(want) {
+		t.Fatalf("ffprobeDurationArgs = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("ffprobeDurationArgs = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestEnforceMaxDuration_UnderCeilingPasses(t *testing.T) {
 	requireFFprobe(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

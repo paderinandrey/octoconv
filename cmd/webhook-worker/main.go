@@ -76,11 +76,23 @@ func main() {
 		qc,
 		signingSecret,
 		envDuration("WEBHOOK_PRESIGN_TTL", 6*time.Hour),
+		0, // audioMaxDuration — audio-only; HandleWebhookDeliver never reads it
 	)
 
 	sweeper := reconciler.NewSweeper(repo, qc, reconciler.Config{
 		QueuedStaleAfter: envDuration("RECONCILER_QUEUED_STALE_AFTER", 90*time.Second),
-		ActiveStaleAfter: envDuration("RECONCILER_ACTIVE_STALE_AFTER", 5*time.Minute),
+		// Raised from the pre-v1.7 5m default to 15m (SC4's env
+		// precondition, 31-RESEARCH.md Pitfall 2 option 1): the global
+		// ActiveStaleAfter threshold must comfortably exceed
+		// AUDIO_ENGINE_TIMEOUT (600s placeholder) or the reconciler would
+		// re-enqueue a still-legitimately-running audio job as "stale" well
+		// before it could finish. The actual double-processing safety
+		// property is held by AudioUniqueTTL + asynq.ErrDuplicateTask
+		// (Plan 01), not by this threshold -- this raise only accepts a
+		// longer image/document/html staleness-detection latency in
+		// exchange, a documented and accepted tradeoff (a .env.example note
+		// lands in Plan 04 alongside the real AUDIO_ENGINE_TIMEOUT value).
+		ActiveStaleAfter: envDuration("RECONCILER_ACTIVE_STALE_AFTER", 15*time.Minute),
 		SweepInterval:    envDuration("RECONCILER_SWEEP_INTERVAL", 1*time.Minute),
 		MaxRecoveries:    envInt("RECONCILER_MAX_RECOVERIES", 3),
 	})

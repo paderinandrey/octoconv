@@ -229,6 +229,48 @@ func isHTMLTerminal(err error) bool {
 	return timeoutIsTerminal(err)
 }
 
+// isAudioTerminal is the audio engine's engine-scoped terminal classifier —
+// Key Decision 1 (STATE.md, BINDING): a stage-aware split, deliberately NOT
+// a copy of timeoutIsTerminal's blanket "any wrapped context.DeadlineExceeded
+// is terminal" shape (the superseded interpretation FEATURES.md/
+// ARCHITECTURE.md recommended). A ffmpeg-stage failure OR timeout (the
+// "audio: ffmpeg:" prefix emitted by whisper.go's stage 1, normalize) is
+// classified terminal — a malformed/adversarial input signal, mirroring the
+// image engine's dimension-bomb terminal philosophy (T-31-08); a
+// whisper-stage timeout on audio that already passed the ffprobe
+// duration/format check (the "audio: whisper-cli:" prefix, stage 2) stays
+// transient, bounded by AUDIO_MAX_RETRY (T-31-07) — mirroring the image
+// engine's own timeout-stays-transient behavior, NOT
+// isDocumentTerminal's/isHTMLTerminal's timeoutIsTerminal delegation.
+// ErrAudioDurationExceeded (the EnforceMaxDuration guard spliced into
+// process(), T-30-08/IN-02) always classifies terminal — a declared-duration
+// rejection can never succeed on retry. Every other error (S3/Postgres
+// blips, no-converter, non-timeout whisper-cli failures) falls through to
+// the shared isTerminal classifier — per 31-RESEARCH.md A2 (Claude's
+// Discretion, adopted): the input to whisper-cli is a server-produced
+// normalized WAV, so a non-timeout whisper-cli failure is most plausibly
+// environment/config, not malformed client input; no dedicated
+// terminalWhisperSignatures list is introduced this phase.
+//
+// Deliberately does NOT call timeoutIsTerminal.
+func isAudioTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, convert.ErrAudioDurationExceeded) {
+		// T-30-08/IN-02: a rejected declared duration can never succeed on
+		// retry.
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "audio: ffmpeg:") {
+		// Key Decision 1: ffmpeg-stage failure OR timeout is a
+		// malformed/adversarial input signal — terminal, no retry.
+		return true
+	}
+	return isTerminal(err)
+}
+
 // Handler processes image conversion tasks end to end.
 type Handler struct {
 	repo          *jobs.Repo
@@ -240,10 +282,17 @@ type Handler struct {
 	enqueuer      *queue.Client
 	signingSecret []byte
 	presignTTL    time.Duration
+	// audioMaxDuration is the AUDIO_MAX_DURATION_SECONDS ceiling passed to
+	// convert.EnforceMaxDuration for EngineAudio jobs inside process()
+	// (T-30-08/IN-02). Zero (the value every non-audio worker cmd passes) is
+	// inert — process() only invokes the guard when job.Engine ==
+	// convert.EngineAudio, so image/document/html/webhook workers never read
+	// this field. The real value is wired by the audio worker cmd (Plan 04).
+	audioMaxDuration time.Duration
 }
 
 // NewHandler builds a worker handler.
-func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration, webhookRepo *webhook.Repo, deliverer *webhook.Deliverer, enqueuer *queue.Client, signingSecret []byte, presignTTL time.Duration) *Handler {
+func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration, webhookRepo *webhook.Repo, deliverer *webhook.Deliverer, enqueuer *queue.Client, signingSecret []byte, presignTTL time.Duration, audioMaxDuration time.Duration) *Handler {
 	if engineTimeout == 0 {
 		engineTimeout = 120 * time.Second
 	}
@@ -253,15 +302,16 @@ func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Regist
 		presignTTL = 6 * time.Hour
 	}
 	return &Handler{
-		repo:          repo,
-		store:         store,
-		registry:      registry,
-		engineTimout:  engineTimeout,
-		webhookRepo:   webhookRepo,
-		deliverer:     deliverer,
-		enqueuer:      enqueuer,
-		signingSecret: signingSecret,
-		presignTTL:    presignTTL,
+		repo:             repo,
+		store:            store,
+		registry:         registry,
+		engineTimout:     engineTimeout,
+		webhookRepo:      webhookRepo,
+		deliverer:        deliverer,
+		enqueuer:         enqueuer,
+		signingSecret:    signingSecret,
+		presignTTL:       presignTTL,
+		audioMaxDuration: audioMaxDuration,
 	}
 }
 
@@ -508,6 +558,113 @@ func (h *Handler) HandleHTMLConvert(ctx context.Context, t *asynq.Task) error {
 	return nil
 }
 
+// HandleAudioConvert runs one audio transcription: load job -> mark active ->
+// download input -> run the ffmpeg-normalize/whisper-cli-transcribe pipeline
+// (via the engine-agnostic process(), which reuses registry.Lookup — the
+// AudioConverter registered in convert.Default handles the actual
+// transcription; process() also enforces the EnforceMaxDuration guard for
+// EngineAudio jobs, T-30-08/IN-02) -> upload output -> record output -> mark
+// done. Structurally mirrors HandleDocumentConvert/HandleHTMLConvert with
+// three differences (AUD-05): (1) the terminal-classification branch calls
+// isAudioTerminal instead of isDocumentTerminal/isHTMLTerminal — Key
+// Decision 1's stage-aware classifier, NOT a blanket
+// timeout-is-terminal copy; (2) a duration-guard rejection
+// (errors.Is(err, convert.ErrAudioDurationExceeded)) gets its own distinct
+// client-facing error_code "duration_exceeded" rather than the generic
+// "engine_error" (31-RESEARCH.md A3) — a declared-duration rejection is a
+// distinguishable, actionable failure mode for the client, not a generic
+// engine failure; (3) both metrics.RecordJobOutcome calls are tagged
+// queue.QueueAudio.
+func (h *Handler) HandleAudioConvert(ctx context.Context, t *asynq.Task) error {
+	payload, err := queue.ParseConvertPayload(t.Payload())
+	if err != nil {
+		// Unparseable payload: nothing we can retry into success.
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	jobID := payload.JobID
+
+	job, err := h.repo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("load job %s: %w", jobID, err)
+	}
+
+	// Strict re-parse of the persisted opts (D-10): garbage in jobs.options
+	// is a terminal, not transient, failure -- a corrupt column value can
+	// never fix itself on retry. This is a strictness check only; the
+	// applicability/enum business rules already ran once, at the API layer
+	// (single source of validation truth), and are deliberately not
+	// duplicated here.
+	if _, err := convert.AudioOptsFromMap(job.Opts); err != nil {
+		// Mark failed BEFORE SkipRetry: without this the job would stay
+		// queued forever (no webhook, client polls a dead job) while the
+		// reconciler requeues it into the same failure until MaxRecoveries
+		// is exhausted (T-14-02b). Sanitized message only; the parse error
+		// is kept in job_events.detail for internal diagnostics.
+		ferr := h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
+		// Postgres-first: enqueue the webhook ONLY once the failed status is
+		// actually committed — if MarkFailed itself failed, a webhook now
+		// would report the non-terminal status "queued" (WR-04). A failed
+		// enqueue after a successful MarkFailed must not fail the job —
+		// best-effort only.
+		if ferr == nil && job.CallbackURL != "" {
+			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		}
+		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
+	}
+
+	if err := h.repo.MarkActive(ctx, jobID); err != nil {
+		// Already active/done/canceled — let asynq drop it rather than loop.
+		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
+	}
+
+	start := time.Now()
+	if err := h.process(ctx, job); err != nil {
+		if isAudioTerminal(err) {
+			// Sanitized message only in error_message (exposed via GET
+			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
+			// (which contains local temp paths) is kept in job_events.detail
+			// for internal diagnostics only.
+			//
+			// A duration-guard rejection gets a distinct client-facing code
+			// (31-RESEARCH.md A3) — it must NOT reuse the generic
+			// "engine_error" path: "declared duration exceeds the configured
+			// maximum" is a distinguishable, actionable failure the client
+			// can react to differently than a generic corrupted-input
+			// failure.
+			var ferr error
+			if errors.Is(err, convert.ErrAudioDurationExceeded) {
+				ferr = h.repo.MarkFailed(ctx, jobID, "duration_exceeded", "declared audio duration exceeds the configured maximum", map[string]any{"engine_stderr": err.Error()})
+			} else {
+				ferr = h.repo.MarkFailed(ctx, jobID, "engine_error", "unsupported or corrupted input format", map[string]any{"engine_stderr": err.Error()})
+			}
+			metrics.RecordJobOutcome(queue.QueueAudio, jobs.StatusFailed, time.Since(start))
+			// Postgres-first: enqueue the webhook ONLY once the failed status
+			// is actually committed. If MarkFailed itself failed (Postgres
+			// blip), the job is still active — a webhook now would re-read the
+			// row and deliver the non-terminal status "active", which the
+			// contract never defines (WR-04); the reconciler will requeue the
+			// still-active job instead. A failed enqueue after a successful
+			// MarkFailed must not fail the conversion — best-effort only.
+			if ferr == nil && job.CallbackURL != "" {
+				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+			}
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		}
+		// Transient: do NOT mark failed — the job stays active so asynq's own
+		// retry/backoff (AudioRetryDelay/AUDIO_MAX_RETRY, Plan 01) applies.
+		// Not a terminal outcome, so it is NOT recorded in the job-outcome
+		// metric (Pitfall 6 — one asynq retry must not double-count).
+		return err
+	}
+	metrics.RecordJobOutcome(queue.QueueAudio, jobs.StatusDone, time.Since(start))
+	// Postgres-first: MarkDone already committed inside process(), so a
+	// failed enqueue must not fail the conversion — best-effort only.
+	if job.CallbackURL != "" {
+		_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+	}
+	return nil
+}
+
 // HandleWebhookDeliver delivers one webhook attempt for a completed job:
 // re-read the job from Postgres, regenerate a fresh presigned download_url
 // per attempt (done only, D-09), sign, deliver, record the attempt, and
@@ -593,6 +750,27 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 	return nil
 }
 
+// enforceAudioGuardBeforeConvert splices the T-30-08/IN-02 declared-duration
+// guard in front of the engine's Convert call, gated on engine ==
+// convert.EngineAudio (image/document/html jobs never pay the ffprobe cost
+// and audioMaxDuration, 0 for every non-audio worker cmd, is never
+// consulted for them). Factored out of process() as its own package-level
+// function so the guard-runs-strictly-before-Convert ordering is
+// unit-testable (the IN-02 pinning test) without a live-Postgres/S3
+// Handler — process()'s h.repo/h.store are concrete types, not interfaces
+// (ARCHITECTURE.md's "Key Abstractions" note), so a full Handler cannot be
+// constructed in a pure unit test. A rejection here surfaces as
+// ErrAudioDurationExceeded, unwrapped, which isAudioTerminal classifies
+// terminal.
+func enforceAudioGuardBeforeConvert(ctx context.Context, engine, inPath string, audioMaxDuration time.Duration, convertFn func() error) error {
+	if engine == convert.EngineAudio {
+		if err := convert.EnforceMaxDuration(ctx, inPath, audioMaxDuration); err != nil {
+			return err
+		}
+	}
+	return convertFn()
+}
+
 func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 	// The ENTIRE attempt (input lookup, download, convert, upload, record) is
 	// bounded by a single whole-attempt deadline, not just conv.Convert(): the
@@ -632,8 +810,21 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 
-	if err := conv.Convert(attemptCtx, inPath, outPath, job.Opts); err != nil {
-		return fmt.Errorf("convert: %w", err)
+	// T-30-08/IN-02: the declared-duration guard MUST actually run, not just
+	// be documented — closes the gap where EnforceMaxDuration existed
+	// (Phase 30) but no caller ever invoked it. Runs AFTER download (there
+	// is nothing to probe before the file exists locally) and strictly
+	// BEFORE conv.Convert (the most expensive step) via
+	// enforceAudioGuardBeforeConvert, factored out as its own package-level
+	// function so the ordering is unit-testable without a live Postgres/S3
+	// Handler.
+	if err := enforceAudioGuardBeforeConvert(attemptCtx, job.Engine, inPath, h.audioMaxDuration, func() error {
+		if err := conv.Convert(attemptCtx, inPath, outPath, job.Opts); err != nil {
+			return fmt.Errorf("convert: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	outKey := storage.OutputKey(job.ID, 0, outName)

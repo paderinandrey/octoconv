@@ -53,9 +53,25 @@ func parseProbedDuration(raw string) (time.Duration, error) {
 // carry a SHORT bound distinct from the full engine timeout (ffprobe reading
 // container metadata is near-instant even for large files; it must never be
 // allowed to run for the full AUDIO_ENGINE_TIMEOUT budget) -- see T-30-03.
+// ffprobeDurationArgs builds ffprobe's argv for ProbeDuration, isolated as
+// its own function so IN-01's "file:" protocol prefix on the path argv
+// element is unit-testable without invoking a real ffprobe subprocess
+// (mirrors whisper.go's whisperArgs argv-pinning test style).
+func ffprobeDurationArgs(path string) []string {
+	// IN-01 (30-REVIEW.md, defense-in-depth): the argv element handed to
+	// ffprobe is prefixed with the explicit "file:" protocol specifier so
+	// ffprobe can never reinterpret it as a protocol/URL specifier
+	// (concat:/http:/pipe:) or a leading-dash option. path itself (used for
+	// os.Stat/output-existence checks elsewhere) is left unprefixed --
+	// today's callers always pass a server-generated workdir path, so this
+	// is a no-op for current behavior; it only matters if a future caller
+	// ever threads a client-influenced filename through here.
+	return []string{"-v", "error", "-show_entries",
+		"format=duration", "-of", "default=noprint_wrappers=1:nokey=1", "file:" + path}
+}
+
 func ProbeDuration(ctx context.Context, path string) (time.Duration, error) {
-	out, err := runCommand(ctx, "ffprobe", "-v", "error", "-show_entries",
-		"format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path)
+	out, err := runCommand(ctx, "ffprobe", ffprobeDurationArgs(path)...)
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe: %w", err)
 	}

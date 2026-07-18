@@ -280,6 +280,25 @@ func TestWhisperArgs(t *testing.T) {
 	}
 }
 
+// TestFfmpegNormalizeArgs_FilePrefix asserts IN-01 (30-REVIEW.md,
+// defense-in-depth): the argv element handed to ffmpeg's -i flag carries the
+// explicit "file:" protocol prefix, so a future client-influenced filename
+// cannot be reinterpreted as a protocol/URL specifier
+// (concat:/http:/pipe:) or a leading-dash option. Runs ungated -- pure argv
+// construction, no subprocess invoked.
+func TestFfmpegNormalizeArgs_FilePrefix(t *testing.T) {
+	got := ffmpegNormalizeArgs("/work/in.mp3", "/work/norm.wav")
+	want := []string{"-y", "-i", "file:/work/in.mp3", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "/work/norm.wav"}
+	if len(got) != len(want) {
+		t.Fatalf("ffmpegNormalizeArgs = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("ffmpegNormalizeArgs = %v, want %v", got, want)
+		}
+	}
+}
+
 // TestAudioConverter_UnsupportedTargetFailsFast asserts Convert rejects an
 // unsupported target extension BEFORE invoking any subprocess (WR-02): the
 // input path deliberately does not exist, so if ffmpeg were invoked the error
