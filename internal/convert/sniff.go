@@ -8,6 +8,10 @@ import (
 // sniffLen is the number of leading bytes Sniff peeks at. 12 covers every
 // signature in the table below, including WebP's "RIFF"+size+"WEBP" (offset
 // 8-11) and HEIC's "ftyp"+brand (offset 4-11).
+//
+// Audio formats (mp3/wav/m4a/ogg) are NOT registered here -- mp3's ID3v2 tag
+// has a variable, declared length that can run well past this fixed window,
+// so audio content is detected via the separate SniffAudio (audiosniff.go).
 const sniffLen = 12
 
 // heicBrands are the ISOBMFF major/compatible brands that identify HEIF/HEIC
