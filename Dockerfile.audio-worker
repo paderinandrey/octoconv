@@ -33,7 +33,8 @@ RUN cmake -B build -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release \
 # already used elsewhere in this repo). Hash re-verified live against the
 # HuggingFace LFS metadata API during 32-01 execution (2026-07-18) -- matches
 # the value pinned in 32-RESEARCH.md/STACK.md exactly.
-RUN curl -L --fail --retry 5 --retry-delay 5 \
+RUN mkdir -p /models \
+ && curl -L --fail --retry 5 --retry-delay 5 \
       -o /models/ggml-base.bin \
       https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
  && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe  /models/ggml-base.bin" | sha256sum -c -
@@ -46,6 +47,14 @@ RUN apt-get update \
       ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=whisper-build /whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli
+# whisper-cli is dynamically linked against whisper.cpp's own shared libs
+# (libwhisper.so.1, libggml*.so) -- cmake places these alongside the binary
+# in build/bin/ with no RPATH set (confirmed via readelf -d during 32-01
+# execution), so they must be copied into ld's default search path and
+# registered via ldconfig, or the runtime `ldd` check fails with
+# "=> not found" (discovered live, not anticipated by the drafted skeleton).
+COPY --from=whisper-build /whisper/build/bin/*.so* /usr/local/lib/
+RUN ldconfig
 COPY --from=whisper-build /models/ggml-base.bin /models/ggml-base.bin
 COPY --from=build /out/audio-worker /usr/local/bin/audio-worker
 # Run unprivileged: the worker shells out to untrusted-input engines.
