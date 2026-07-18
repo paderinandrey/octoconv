@@ -116,6 +116,16 @@ None currently blocking. Sequencing carried into the roadmap:
 
 ## Deferred Items
 
+Acknowledged at v1.7 close (2026-07-19):
+
+| Category | Item | Status |
+|----------|------|--------|
+| seed | SEED-001: Lesson-recording analysis (tutors/language schools) | Deferred — planned subject of the NEXT milestone; v1.7 built its foundation (transcription + JSON timestamp contract) |
+| seed | SEED-004: Local k8s + KEDA full-stack validation | Deferred — superseded in practice by per-phase live gates (keda-gate 21/21, load-proofs Phases 28/33); revisit as CI k8s validation (K8SV2-01) |
+| tech_debt | WR-05 keda-load-proof.sh BUSY_POD jsonpath defect (kubectl v1.36.2, `deletionTimestamp==""` vs absent key) | Accepted residual (29-REVIEW), empirically confirmed live in Phase 33; forward-fix of the frozen script recommended in a future phase |
+| tech_debt | Registry cold-pull time for 682MB audio image | Unmeasurable on OrbStack shared store (Pulling→Pulled ≈0 recorded); measure in a real-registry environment before production KEDA tuning is trusted |
+| tooling_noise | audit-open flags 29-HUMAN-UAT.md (status resolved) and quick task 260712-cqg (complete, SUMMARY present) | Both artifacts closed; audit parser counts them regardless |
+
 Items acknowledged and carried forward at milestone closes (see `.planning/milestones/*-MILESTONE-AUDIT.md` for full detail):
 
 | Category | Item | Status | Deferred At |
