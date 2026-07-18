@@ -234,6 +234,43 @@
 - Sessions: 1 длинная оркестрация (фазы 27-28 + закрытие); 2 восстановления субагентов через SendMessage-resume вместо пере-спавна
 - Notable: live-гейты — доминирующая стоимость по времени (4 полных итерации гейта в 28-03), но evidence-первый подход исключил повторную верификацию
 
+## Milestone: v1.7 — Audio Engine & Hardening
+
+**Shipped:** 2026-07-18
+**Phases:** 5 | **Plans:** 18
+
+### What Was Built
+Четвёртый engine-класс — офлайн whisper.cpp-транскрипция (mp3/wav/m4a/ogg → txt/srt/vtt/json с сегментными и пословными таймстампами) — проведён от standalone-конвертера до автоскейлящегося в k8s класса: fail-closed валидация (ID3v2-aware MP3-детектор, ffprobe duration-гард), stage-aware retry-классификатор, RTF-измеренный AUDIO_ENGINE_TIMEOUT=742s (p95=0.206, NO-GO-рычаг снизил max duration 4h→30min), KEDA scale-from-zero live-proven 10/10 с запечённой моделью. Плюс закрыт hardening-хвост v1.6 (WR-01 триада, operator live gate, гейт-тулинг).
+
+### What Worked
+- Measured-not-copied дисциплина: RTF-гейт по прецеденту veraPDF выдал таймаут с формулой и запасом; NO-GO-рычаг сработал по назначению (снизил ceiling вместо раздувания таймаута)
+- Каждая фаза ловила реальные баги до продакшена: CR-01 amd64-обход duration-гарда (float→int64), 12-байтовое усечение аудио-загрузок (reader-offset), stale 5m CAP-дрейф из Phase 16 (реоткрывал гонку T-03-10), Inf→MaxInt64 в cgroup-парсере, недостижимый ShutdownTimeout без stop_grace_period
+- Plan-checker дважды остановил блокеры до исполнения (stale CAP + echo-заглушка вместо verify); ревизии планов дешевле пере-планирования — все 3 плановых цикла закрылись за 1 ревизию
+- Исполнитель, оборванный API-ошибкой перед записью SUMMARY, восстановлен SendMessage-resume из транскрипта без потери работы
+- Замороженные gate-скрипты byte-unchanged: новая функциональность только новыми скриптами — WR-05 дефект замороженного скрипта эмпирически подтверждён и честно задокументирован вместо тихого фикса
+
+### What Was Inefficient
+- Разовый live E2E Phase 31 пришлось повторно институционализировать в Phase 32 как TestAudioConversionE2E — можно было заложить повторяемый тест сразу (поймано вопросом оператора, не процессом)
+- Компose↔k8s взаимоисключение потребовало двух ручных переключений стеков (orb stop/start k8s) с операторским чекпойнтом посередине
+- audit-open парсер спотыкается об усечённые имена каталогов и resolved-UAT — две единицы tooling-noise в финальном аудите
+
+### Patterns Established
+- RTF-гейт как переиспользуемая форма: замер на resource-limited контейнере → формула → GO/NO-GO с документированным рычагом → значения растекаются по compose/chart из одного SUMMARY
+- Stage-aware terminal/transient классификатор по префиксам ошибок двухстадийного пайплайна (первый в кодовой базе; сигнатуры собственные, независимые от чужих списков)
+- cgroup v2 cpu.max → явный -t для CPU-bound движков (env → cgroup → NumCPU fallback-цепочка)
+- 7-way env-инвариант для queue.NewClient()-производных TTL с grep-гейтом как acceptance criterion
+
+### Key Lessons
+- Кросс-платформенные конверсии float→int64 в гардах — платформозависимые: dev-arm64 маскирует amd64-обход; валидация в float-пространстве до конверсии обязательна
+- «Задокументированный порядок» ≠ «форсированный порядок»: T-30-08 закрылся только когда гард реально врезан в пайплайн с pinning-тестом
+- Разовые live-доказательства обязаны превращаться в повторяемые тесты в том же милстоуне, иначе регрессия невидима
+- Whisper-специфика: -DGGML_NATIVE=OFF load-bearing; -l auto обязан быть явным (тихий -l en портит неанглийское аудио); m4a-бренды isom/mp42 — MP4-видео, не аудио
+
+### Cost Observations
+- Model mix: opus для планирования/ревизий, sonnet для research/pattern-map/execute/review/verify/security
+- Sessions: 1 длинная оркестрация (фазы 30-33 + закрытие милстоуна); 2 agent-recovery (API-обрыв + операторский k8s-чекпойнт) через SendMessage-resume
+- Notable: RTF-замер и live load-proof — доминирующая стоимость по времени (~22 и ~45 мин прогоны); статические волны шли параллельно в worktree без конфликтов (11 executor-спавнов, 0 merge-конфликтов)
+
 ## Cross-Milestone Trends
 
 ### Process Evolution
@@ -246,6 +283,8 @@
 | v1.3 | ~4 | 5 | Third engine class; review-fixes-before-verifier discipline adopted; first parallel-session reconciliation (quick-task vs gap-plan) |
 | v1.4 | ~1 | 3 | First live CI on GitHub; unconditional live hard gates institutionalized; plan self-checks empirically validated pre-execution |
 | v1.5 | ~1 | 4 | First measured go/no-go gate; first new dep since v1.0; agent-resume-from-transcript recovery; masked-exit-code merge bug found and fixed |
+| v1.6 | ~1 | 5 | First infrastructure milestone; values-gated overrides; live gates with committed timestamped evidence became the proof standard |
+| v1.7 | ~1 | 5 | Fourth engine class fully autonomous session (plan→execute→review→verify→secure per phase); RTF measurement gate reused; frozen-scripts discipline; one-off live proofs institutionalized as repeatable E2E |
 
 ### Cumulative Quality
 
@@ -257,6 +296,8 @@
 | v1.3 | 14/14 satisfied | 0 | 3 advisory (dead webhook wiring in document/chromium workers, fakeEnqueuer -race, no image E2E), documented in v1.3-MILESTONE-AUDIT.md |
 | v1.4 | 11/11 satisfied | 0 | 4 advisory (CACHED-residual, branch-protection manual step, D-04 invariant, manual acceptance script), documented in v1.4-MILESTONE-AUDIT.md |
 | v1.5 | 12/12 satisfied | 0 | 3 advisory (no MCP-specific CFB live path, amd64 pin, JRE path B size), documented in v1.5-MILESTONE-AUDIT.md |
+| v1.6 | 9/9 satisfied | 0 | advisory tail (OPER-01 live-script gap, WR-01 semantics, gate-tooling warnings) — closed by v1.7 Phase 29 |
+| v1.7 | 12/12 satisfied | 0 | 4 advisory (WR-05 frozen-script jsonpath forward-fix, registry cold-pull measurement, arm64 RTF caveat, review Info nits), documented in v1.7-MILESTONE-AUDIT.md |
 
 ### Top Lessons (Verified Across Milestones)
 
