@@ -306,19 +306,22 @@ RECONCILER_ACTIVE_STALE_AFTER: "5m"   # STALE — compose already fixed this to 
 | A5 | No `extraEnv` block is needed on `audioWorker` in `values.yaml` (unlike `documentWorker`) because `AUDIO_WORKER_CONCURRENCY` is already hardcoded to the production-safe value of 1 | Pattern 3 | Low — confirmed by Phase 32's measurement that concurrency=2 fails both memory and CPU fit checks; no known future scenario needs a per-overlay override |
 | A6 | OrbStack's shared local Docker image store means there is no separable, meaningful "image pull" phase to measure for a `dev`-tagged locally-built image under `IfNotPresent` | Pitfall 5 | Medium-High — this is the crux of Key Decision 3's live-measurement requirement; if wrong (i.e., OrbStack DOES do a real pull step with non-trivial latency for large images even from its own store), the whole "measure pull vs scale-from-zero" plan needs a different mechanism (e.g. explicit `docker rmi` + `orb` cache eviction before the test) that this research did not investigate |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does `scripts/keda-gate.sh` need an audio SC2-style entry (0→1 scale-up smoke check), or is the new audio load-proof script sufficient coverage?**
+   - **RESOLVED (Q1):** Claude discretion — `keda-gate.sh` left byte-untouched; the audio 0→1 smoke plus SC3 image-pull/cold-start proof are carried by the dedicated new audio script introduced in 33-02 (see the 33-02 decisions block).
    - What we know: `keda-gate.sh`'s own header frames SC2 as "all three scaled classes (image/document/html) scale 0→1 ... catches doc/html-specific cold-start issues now, not in Phase 28" — audio is now a 4th scaled class with its own cold-start risk profile (682MB image).
    - What's unclear: Whether extending `keda-gate.sh` (an already-passing, "frozen" smoke gate per the established "leave `keda-load-proof.sh` byte-unchanged" precedent) is in scope, or whether the new dedicated audio script fully substitutes for that coverage.
    - Recommendation: Treat as Claude's Discretion / a discuss-phase question — leaning toward a minimal addition to `keda-gate.sh` (postJob + waitForReplicasAtLeast for audio, mirroring the existing 3-class pattern exactly) SEPARATELY from the new dedicated `keda-audio-loadproof.sh` script that carries the heavier SC3 image-pull/cold-start timestamped-evidence work — the two scripts serve different purposes (fast regression smoke vs. flagship timestamped proof) exactly as `keda-gate.sh` and `keda-load-proof.sh` already do for the other 3 classes.
 
 2. **What exact mechanism forces a genuine image-pull (not a local-store cache hit) for the SC3 measurement, given OrbStack's shared Docker store?**
+   - **RESOLVED (Q2):** adopted option (a) — 33-03 measures scale-from-zero with the local `:dev` image as the honest OrbStack number, with the artificial cold-pull scenario documented as an out-of-scope residual-risk caveat (see the 33-03 decisions block).
    - What we know: `imagePullPolicy: IfNotPresent` + a pre-built local `:dev` tag is the established convention for all 4 worker classes; this makes `Pulling→Pulled` near-instant in the current dev workflow.
    - What's unclear: Whether Phase 33 should (a) accept and document the near-zero pull time as the honest local-environment answer (Pitfall 5's recommendation), or (b) engineer an artificial cold-pull scenario (e.g. tag with a fresh unique tag + `imagePullPolicy: Always` + a local registry push/pull round-trip) to produce a more production-representative number.
    - Recommendation: Default to (a) for this phase (matches the "measure, don't assume" spirit of Key Decision 3 while staying within the phase's OrbStack-only scope), explicitly flag (b) as a documented residual-risk / out-of-scope item for a future real-cluster validation, rather than building new registry-push tooling this phase.
 
 3. **Exact final values for `keda.audio.{threshold,maxReplicaCount,pollingInterval,cooldownPeriod}` (A2 above)** — no formula precedent exists for these (unlike `scaleDownStabilizationSeconds`/grace-period, which have derivable formulas); recommend surfacing as explicit discuss-phase decision points rather than silently choosing values in the plan.
+   - **RESOLVED (Q3):** locked in the 33-01 decisions block — threshold 1, maxReplicaCount 2, pollingInterval 15, cooldownPeriod 180.
 
 ## Environment Availability
 
