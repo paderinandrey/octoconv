@@ -282,10 +282,17 @@ type Handler struct {
 	enqueuer      *queue.Client
 	signingSecret []byte
 	presignTTL    time.Duration
+	// audioMaxDuration is the AUDIO_MAX_DURATION_SECONDS ceiling passed to
+	// convert.EnforceMaxDuration for EngineAudio jobs inside process()
+	// (T-30-08/IN-02). Zero (the value every non-audio worker cmd passes) is
+	// inert — process() only invokes the guard when job.Engine ==
+	// convert.EngineAudio, so image/document/html/webhook workers never read
+	// this field. The real value is wired by the audio worker cmd (Plan 04).
+	audioMaxDuration time.Duration
 }
 
 // NewHandler builds a worker handler.
-func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration, webhookRepo *webhook.Repo, deliverer *webhook.Deliverer, enqueuer *queue.Client, signingSecret []byte, presignTTL time.Duration) *Handler {
+func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Registry, engineTimeout time.Duration, webhookRepo *webhook.Repo, deliverer *webhook.Deliverer, enqueuer *queue.Client, signingSecret []byte, presignTTL time.Duration, audioMaxDuration time.Duration) *Handler {
 	if engineTimeout == 0 {
 		engineTimeout = 120 * time.Second
 	}
@@ -295,15 +302,16 @@ func NewHandler(repo *jobs.Repo, store *storage.Client, registry *convert.Regist
 		presignTTL = 6 * time.Hour
 	}
 	return &Handler{
-		repo:          repo,
-		store:         store,
-		registry:      registry,
-		engineTimout:  engineTimeout,
-		webhookRepo:   webhookRepo,
-		deliverer:     deliverer,
-		enqueuer:      enqueuer,
-		signingSecret: signingSecret,
-		presignTTL:    presignTTL,
+		repo:             repo,
+		store:            store,
+		registry:         registry,
+		engineTimout:     engineTimeout,
+		webhookRepo:      webhookRepo,
+		deliverer:        deliverer,
+		enqueuer:         enqueuer,
+		signingSecret:    signingSecret,
+		presignTTL:       presignTTL,
+		audioMaxDuration: audioMaxDuration,
 	}
 }
 
@@ -742,6 +750,27 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 	return nil
 }
 
+// enforceAudioGuardBeforeConvert splices the T-30-08/IN-02 declared-duration
+// guard in front of the engine's Convert call, gated on engine ==
+// convert.EngineAudio (image/document/html jobs never pay the ffprobe cost
+// and audioMaxDuration, 0 for every non-audio worker cmd, is never
+// consulted for them). Factored out of process() as its own package-level
+// function so the guard-runs-strictly-before-Convert ordering is
+// unit-testable (the IN-02 pinning test) without a live-Postgres/S3
+// Handler — process()'s h.repo/h.store are concrete types, not interfaces
+// (ARCHITECTURE.md's "Key Abstractions" note), so a full Handler cannot be
+// constructed in a pure unit test. A rejection here surfaces as
+// ErrAudioDurationExceeded, unwrapped, which isAudioTerminal classifies
+// terminal.
+func enforceAudioGuardBeforeConvert(ctx context.Context, engine, inPath string, audioMaxDuration time.Duration, convertFn func() error) error {
+	if engine == convert.EngineAudio {
+		if err := convert.EnforceMaxDuration(ctx, inPath, audioMaxDuration); err != nil {
+			return err
+		}
+	}
+	return convertFn()
+}
+
 func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 	// The ENTIRE attempt (input lookup, download, convert, upload, record) is
 	// bounded by a single whole-attempt deadline, not just conv.Convert(): the
@@ -781,8 +810,21 @@ func (h *Handler) process(ctx context.Context, job *jobs.Job) error {
 		return err
 	}
 
-	if err := conv.Convert(attemptCtx, inPath, outPath, job.Opts); err != nil {
-		return fmt.Errorf("convert: %w", err)
+	// T-30-08/IN-02: the declared-duration guard MUST actually run, not just
+	// be documented — closes the gap where EnforceMaxDuration existed
+	// (Phase 30) but no caller ever invoked it. Runs AFTER download (there
+	// is nothing to probe before the file exists locally) and strictly
+	// BEFORE conv.Convert (the most expensive step) via
+	// enforceAudioGuardBeforeConvert, factored out as its own package-level
+	// function so the ordering is unit-testable without a live Postgres/S3
+	// Handler.
+	if err := enforceAudioGuardBeforeConvert(attemptCtx, job.Engine, inPath, h.audioMaxDuration, func() error {
+		if err := conv.Convert(attemptCtx, inPath, outPath, job.Opts); err != nil {
+			return fmt.Errorf("convert: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	outKey := storage.OutputKey(job.ID, 0, outName)

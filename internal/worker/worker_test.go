@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 
@@ -266,5 +269,58 @@ func TestIsAudioTerminal(t *testing.T) {
 
 	if isAudioTerminal(errors.New("dial tcp: connection refused")) {
 		t.Fatal("expected isAudioTerminal(transient network error) = false")
+	}
+}
+
+// TestEnforceAudioGuardBeforeConvert_IN02 pins T-30-08/IN-02: an audio job
+// whose downloaded file exceeds the configured ceiling is rejected BEFORE
+// Convert runs (the guard runs strictly before conv.Convert, not merely
+// documented as running before it), and the resulting error classifies
+// terminal via isAudioTerminal. process()'s h.repo/h.store are concrete
+// types (not interfaces, per ARCHITECTURE.md's "Key Abstractions" note), so
+// a full Handler cannot be constructed without live Postgres/S3 — this test
+// drives enforceAudioGuardBeforeConvert directly, the smallest testable
+// seam process() delegates to. Gated on a real ffprobe binary (mirrors
+// internal/convert's requireLiveAudioBinaries skip-gate convention) since
+// EnforceMaxDuration shells out to ffprobe — there is no fake seam for it.
+func TestEnforceAudioGuardBeforeConvert_IN02(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not on PATH; see Plan 01's \"Local Development Setup\"")
+	}
+
+	fixture := filepath.Join("..", "convert", "testdata", "audio", "jfk.wav") // ~11s WAV
+	convertCalled := false
+	convertFn := func() error {
+		convertCalled = true
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Ceiling of 1s is well below jfk.wav's ~11s declared duration.
+	err := enforceAudioGuardBeforeConvert(ctx, convert.EngineAudio, fixture, 1*time.Second, convertFn)
+	if err == nil {
+		t.Fatal("enforceAudioGuardBeforeConvert(over-ceiling audio) = nil, want ErrAudioDurationExceeded")
+	}
+	if !errors.Is(err, convert.ErrAudioDurationExceeded) {
+		t.Fatalf("enforceAudioGuardBeforeConvert error = %v, want errors.Is ErrAudioDurationExceeded", err)
+	}
+	if convertCalled {
+		t.Fatal("convertFn was called despite the duration guard rejecting the input — guard did not run before Convert (IN-02)")
+	}
+	if !isAudioTerminal(err) {
+		t.Fatalf("isAudioTerminal(%v) = false, want true (duration-guard rejection always classifies terminal)", err)
+	}
+
+	// Non-audio engines never invoke the guard: a generously-small ceiling
+	// (0, the zero value every non-audio worker cmd passes) must NOT reject
+	// an image/document/html job — convertFn always runs.
+	convertCalled = false
+	if err := enforceAudioGuardBeforeConvert(ctx, convert.EngineImage, fixture, 0, convertFn); err != nil {
+		t.Fatalf("enforceAudioGuardBeforeConvert(non-audio engine) = %v, want nil (guard must not run)", err)
+	}
+	if !convertCalled {
+		t.Fatal("convertFn was not called for a non-audio engine — gate must be job.Engine == convert.EngineAudio only")
 	}
 }

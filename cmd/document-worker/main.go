@@ -62,6 +62,7 @@ func main() {
 		qc,
 		nil, // signingSecret — webhook-only; HandleDocumentConvert never reads it
 		0,   // presignTTL — webhook-only; HandleDocumentConvert never reads it
+		0,   // audioMaxDuration — audio-only; HandleDocumentConvert never reads it
 	)
 
 	// D-04/D-05: the stale-job sweep loop runs solely in cmd/webhook-worker

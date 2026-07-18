@@ -62,6 +62,7 @@ func main() {
 		qc,
 		nil, // signingSecret — webhook-only; HandleHTMLConvert never reads it
 		0,   // presignTTL — webhook-only; HandleHTMLConvert never reads it
+		0,   // audioMaxDuration — audio-only; HandleHTMLConvert never reads it
 	)
 
 	// chromium-worker must NOT run the reconciler sweeper: the stale-job
