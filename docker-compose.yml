@@ -363,6 +363,14 @@ services:
       dockerfile: Dockerfile.audio-worker
     container_name: octoconv-audio-worker
     restart: always
+    # cmd/audio-worker sets asynq ShutdownTimeout = AUDIO_ENGINE_TIMEOUT
+    # (742s, below) + 10s = 752s so an in-flight whisper-cli transcription
+    # survives SIGTERM instead of being aborted+requeued. Docker's default
+    # SIGKILL window is 10s, which would make that graceful window dead
+    # configuration -- grant 752s + 10s margin so the code's window is
+    # actually reachable under compose (WR-05). Keep in lockstep with
+    # AUDIO_ENGINE_TIMEOUT.
+    stop_grace_period: 762s
     depends_on:
       postgres:
         condition: service_healthy
