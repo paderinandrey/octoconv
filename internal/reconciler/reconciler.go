@@ -61,6 +61,7 @@ type enqueuer interface {
 	EnqueueWebhookDeliver(ctx context.Context, id uuid.UUID) error
 	EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error
 	EnqueueHTMLConvert(ctx context.Context, id uuid.UUID) error
+	EnqueueAudioConvert(ctx context.Context, id uuid.UUID) error
 }
 
 // Sweeper periodically scans for stale jobs and recovers or exhausts them.
@@ -287,6 +288,8 @@ func (s *Sweeper) sweep(ctx context.Context) {
 			enqueueErr = s.enq.EnqueueDocumentConvert(ctx, j.ID)
 		case convert.EngineHTML:
 			enqueueErr = s.enq.EnqueueHTMLConvert(ctx, j.ID)
+		case convert.EngineAudio:
+			enqueueErr = s.enq.EnqueueAudioConvert(ctx, j.ID)
 		default:
 			// Fail closed (T-10-03): av/cad/archive/probe are out of scope
 			// this milestone and a corrupted/unrecognized engine value must
