@@ -108,7 +108,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 - [x] **Phase 29: v1.6 Hardening Tail** - Close WR-01 empty-PromQL semantics, OPER-01 compose passthrough + live gate, gate-tooling warnings, K8S-02 direct-dial recheck (completed 2026-07-17)
 - [x] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts (completed 2026-07-18)
 - [x] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing (completed 2026-07-18)
-- [ ] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go
+- [x] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go (completed 2026-07-18)
 - [ ] **Phase 33: KEDA/Helm Chart Integration** - audio-worker Deployment + ScaledObject, QueueAudio collector, scale-from-zero load-proof with baked model
 
 ## Phase Details
@@ -179,7 +179,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 - [x] 32-02-PLAN.md — cgroup CPU-limit detection + whisper `-t` threads wiring (AUDIO_THREADS → cgroup → NumCPU) (AUD-06, AUD-07 SC4)
 - [x] 32-03-PLAN.md — scripts/audio-rtf-measure.sh + measured RTF go/no-go: derive AUDIO_ENGINE_TIMEOUT (explicit formula + NO-GO lever) + AUDIO_WORKER_CONCURRENCY (AUD-07)
 - [x] 32-04-PLAN.md — audio-worker compose service + IN-02 7-way AUDIO_ENGINE_TIMEOUT/AUDIO_MAX_RETRY propagation + CI bake matrix + .env.example final values (AUD-06, AUD-07)
-- [ ] 32-05-PLAN.md — TestAudioConversionE2E (non-empty transcript + signed webhook) through the containerized audio-worker + live run (AUD-06)
+- [x] 32-05-PLAN.md — TestAudioConversionE2E (non-empty transcript + signed webhook) through the containerized audio-worker + live run (AUD-06)
 
 ### Phase 33: KEDA/Helm Chart Integration
 **Goal**: The audio class autoscales in the cluster with production parity to the other three classes, and scale-from-zero is live-proven with the baked model.
@@ -227,7 +227,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
-| 32. Containerization & Local E2E + RTF Gate | v1.7 | 4/5 | In Progress|  |
+| 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete   | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
 
 ---
