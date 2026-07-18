@@ -109,7 +109,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 - [x] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts (completed 2026-07-18)
 - [x] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing (completed 2026-07-18)
 - [x] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go (completed 2026-07-18)
-- [ ] **Phase 33: KEDA/Helm Chart Integration** - audio-worker Deployment + ScaledObject, QueueAudio collector, scale-from-zero load-proof with baked model
+- [x] **Phase 33: KEDA/Helm Chart Integration** - audio-worker Deployment + ScaledObject, QueueAudio collector, scale-from-zero load-proof with baked model (completed 2026-07-18)
 
 ## Phase Details
 
@@ -193,7 +193,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 **Plans**: 3 plans
 - [x] 33-01-PLAN.md — Chart authoring: audio-worker Deployment + KEDA ScaledObject (WR-01 triad, grace 772s, non-null stabilization 900s), 5 AUDIO_* ConfigMap keys + reconciler 5m→15m fix, values.yaml tuning blocks, QueueAudio collector splice (AUD-08 SC1/SC2/SC4)
 - [x] 33-02-PLAN.md — scripts/keda-audio-loadproof.sh: structural clone of keda-load-proof.sh (no CALIBRATE), event-timeline capture, byte-unchanged frozen scripts (AUD-08 SC3 instrument)
-- [ ] 33-03-PLAN.md — Live scale-from-zero proof (SC3 timestamped evidence) + Phase-29 deferred keda-load-proof.sh re-run + human-verify; both stacks end down (AUD-08 SC3)
+- [x] 33-03-PLAN.md — Live scale-from-zero proof (SC3 timestamped evidence) + Phase-29 deferred keda-load-proof.sh re-run + human-verify; both stacks end down (AUD-08 SC3)
 
 ## Progress
 
@@ -231,7 +231,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
-| 33. KEDA/Helm Chart Integration | v1.7 | 2/3 | In Progress|  |
+| 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete   | 2026-07-18 |
 
 ---
 
