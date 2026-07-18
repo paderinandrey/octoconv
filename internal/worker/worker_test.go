@@ -306,6 +306,41 @@ func TestIsAudioTerminal(t *testing.T) {
 	}
 }
 
+// TestIsAudioTerminalOutputSignatures pins WR-03: validateAudioOutput's
+// exit-0-but-no-output shapes ("audio: output is empty", "audio: stat
+// output", whisper.go) classify terminal via audio's OWN
+// terminalAudioSignatures list — NOT by accidentally substring-matching the
+// LibreOffice/Chromium lists' "output is empty"/"stat output" entries inside
+// the shared isTerminal loop, which is how they classified before WR-03. The
+// second half proves the independence directly: with the foreign lists
+// emptied, the audio messages must STILL classify terminal, so rewording a
+// LibreOffice/Chromium signature can never silently flip audio retry
+// behavior.
+func TestIsAudioTerminalOutputSignatures(t *testing.T) {
+	cases := []error{
+		errors.New("convert: audio: output is empty"),
+		errors.New("convert: audio: stat output: stat /work/out.txt: no such file or directory"),
+	}
+	for _, err := range cases {
+		if !isAudioTerminal(err) {
+			t.Fatalf("expected isAudioTerminal(%v) = true (validateAudioOutput no-output shape, WR-03)", err)
+		}
+	}
+
+	// Independence proof: the classification must not depend on another
+	// engine's signature list. Empty the foreign lists and re-check.
+	savedLO, savedCh := terminalLibreOfficeSignatures, terminalChromiumSignatures
+	terminalLibreOfficeSignatures, terminalChromiumSignatures = nil, nil
+	defer func() {
+		terminalLibreOfficeSignatures, terminalChromiumSignatures = savedLO, savedCh
+	}()
+	for _, err := range cases {
+		if !isAudioTerminal(err) {
+			t.Fatalf("expected isAudioTerminal(%v) = true even with the LibreOffice/Chromium signature lists emptied — audio must classify via terminalAudioSignatures, not a foreign list (WR-03)", err)
+		}
+	}
+}
+
 // TestEnforceAudioGuardBeforeConvert_IN02 pins T-30-08/IN-02: an audio job
 // whose downloaded file exceeds the configured ceiling is rejected BEFORE
 // Convert runs (the guard runs strictly before conv.Convert, not merely

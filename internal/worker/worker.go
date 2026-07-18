@@ -91,6 +91,29 @@ var terminalChromiumSignatures = []string{
 	"stat output",
 }
 
+// terminalAudioSignatures are lowercased error-message substrings that
+// classify validateAudioOutput's "exit 0 but empty/missing output" failure
+// mode (internal/convert/whisper.go) as deterministically unrecoverable:
+// whisper-cli can exit 0 while writing an empty file ("audio: output is
+// empty") or no file at all ("audio: stat output", validateAudioOutput's
+// os.Stat failure branch) — a deterministic no-output render produces no
+// output again on retry, so retrying only burns AUDIO_MAX_RETRY budget.
+// Before WR-03 these two errors classified terminal only by ACCIDENT —
+// substring-matching the foreign "output is empty"/"stat output" entries in
+// terminalLibreOfficeSignatures/terminalChromiumSignatures inside the shared
+// isTerminal loop — so rewording another engine's signature (or
+// validateAudioOutput's message) would have silently flipped audio retry
+// behavior with no failing test. This dedicated list, checked explicitly in
+// isAudioTerminal BEFORE the shared-isTerminal fallthrough, makes the audio
+// outcome self-contained; coupling validateAudioOutput's exact error strings
+// into this slice follows the same commit-coupling discipline the
+// LibreOffice/veraPDF lists document (D-04/D-06 precedent). The "audio: "
+// prefix keeps these entries from ever matching another engine's stderr.
+var terminalAudioSignatures = []string{
+	"audio: output is empty",
+	"audio: stat output",
+}
+
 // terminalVeraPDFSignatures are lowercased error-message substrings that
 // classify a real ISO 19005-2b PDF/A validation failure as deterministically
 // unrecoverable (D-06, phase 23): "pdf/a non-compliant" is emitted by
@@ -257,8 +280,13 @@ func isHTMLTerminal(err error) bool {
 // the shared isTerminal classifier — per 31-RESEARCH.md A2 (Claude's
 // Discretion, adopted): the input to whisper-cli is a server-produced
 // normalized WAV, so a non-timeout whisper-cli failure is most plausibly
-// environment/config, not malformed client input; no dedicated
-// terminalWhisperSignatures list is introduced this phase.
+// environment/config, not malformed client input. One deliberate exception
+// to that transient default (WR-03): validateAudioOutput's exit-0-but-no-
+// output shapes ("audio: output is empty", "audio: stat output") ARE
+// terminal, via the dedicated terminalAudioSignatures list checked here —
+// previously they classified terminal only by accidentally matching the
+// LibreOffice/Chromium signature lists inside isTerminal; the explicit list
+// makes that outcome self-contained and pinned.
 //
 // Deliberately does NOT call timeoutIsTerminal.
 func isAudioTerminal(err error) bool {
@@ -294,6 +322,16 @@ func isAudioTerminal(err error) bool {
 		// enforceAudioGuardBeforeConvert's short probe bound — a hung probe
 		// on a loaded host may succeed on retry).
 		return true
+	}
+	for _, sig := range terminalAudioSignatures {
+		if strings.Contains(msg, sig) {
+			// WR-03: whisper-cli's exit-0-but-empty/missing-output failure
+			// mode (validateAudioOutput) is deterministic — terminal via
+			// audio's OWN signature list, independent of the
+			// LibreOffice/Chromium lists these strings previously (and
+			// accidentally) matched inside the shared isTerminal loop.
+			return true
+		}
 	}
 	return isTerminal(err)
 }
