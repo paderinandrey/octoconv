@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +27,36 @@ var audioModelPath string
 // SetVeraPDFTimeout's contract in verapdf.go).
 func SetAudioModelPath(path string) {
 	audioModelPath = path
+}
+
+// audioThreads stores the resolved --threads count for every subsequent
+// whisper-cli invocation, set once at process startup via SetAudioThreads
+// -- same single-write-before-concurrent-reads contract as audioModelPath
+// above (no mutex needed). Zero value (0) means "never set", in which case
+// audioThreadCount() falls through to runtime.NumCPU().
+var audioThreads int
+
+// SetAudioThreads stores the resolved thread count for every subsequent
+// whisper-cli invocation's -t flag. Call exactly once at process startup
+// (cmd/audio-worker/main.go, AUDIO_THREADS env -> CgroupCPULimit() ->
+// runtime.NumCPU() precedence), BEFORE the asynq server starts consuming
+// tasks -- mirrors SetAudioModelPath's contract above.
+func SetAudioThreads(n int) {
+	audioThreads = n
+}
+
+// audioThreadCount resolves the thread count to pass to whisper-cli's -t
+// flag: the process-wide audioThreads set via SetAudioThreads when > 0,
+// else runtime.NumCPU() as a last-resort fallback (e.g. a test process that
+// never called SetAudioThreads). This is a 2-tier resolver, unlike model()'s
+// 3-tier shape, because whisper-cli's -t argument has no equivalent to a
+// per-Converter test-injection field -- TestWhisperArgs exercises the argv
+// construction directly instead.
+func audioThreadCount() int {
+	if audioThreads > 0 {
+		return audioThreads
+	}
+	return runtime.NumCPU()
 }
 
 // audioSourceFormats and audioTargetFormats are the two disjoint sets whose
@@ -150,8 +182,15 @@ func ffmpegNormalizeArgs(inPath, normPath string) []string {
 // silently mis-transcribe non-English audio for a Russian-first internal
 // client base while exiting 0 with a structurally valid transcript (WR-03)
 // -- "auto" is already in audioLanguageAllowlist, so the default and the
-// explicit client opt take the identical path.
-func whisperArgs(model, normPath, outBase string, outFlags []string, o AudioOpts) []string {
+// explicit client opt take the identical path. An explicit -t <threads> is
+// ALWAYS passed too, for the same class of reason: whisper-cli's own
+// default is host core count, which under a container cgroup CPU quota
+// causes CFS throttling / unpredictable wall time rather than the
+// container's real budget (PITFALLS.md Pitfall 5, T-32-04) -- threads is
+// resolved by the caller (audioThreadCount(), AUDIO_THREADS env -> cgroup
+// -> runtime.NumCPU() precedence at cmd/audio-worker startup), never left
+// to whisper-cli's own default.
+func whisperArgs(model, normPath, outBase string, outFlags []string, o AudioOpts, threads int) []string {
 	args := []string{"-m", model, "-f", normPath, "-of", outBase}
 	args = append(args, outFlags...)
 	lang := o.Language
@@ -162,6 +201,7 @@ func whisperArgs(model, normPath, outBase string, outFlags []string, o AudioOpts
 	if o.Translate {
 		args = append(args, "-tr")
 	}
+	args = append(args, "-t", strconv.Itoa(threads))
 	return args
 }
 
@@ -246,7 +286,7 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 	// deterministic output path (never rely on whisper-cli's default
 	// input-filename-based naming -- RESEARCH.md "Output file naming").
 	outBase := strings.TrimSuffix(outPath, filepath.Ext(outPath))
-	args := whisperArgs(c.model(), normPath, outBase, outFlags, o)
+	args := whisperArgs(c.model(), normPath, outBase, outFlags, o, audioThreadCount())
 	if _, err := runCommand(ctx, "whisper-cli", args...); err != nil {
 		return fmt.Errorf("audio: whisper-cli: %w", err)
 	}
