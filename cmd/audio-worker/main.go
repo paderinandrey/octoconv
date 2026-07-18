@@ -211,7 +211,13 @@ func envDurationSeconds(key string, def time.Duration) time.Duration {
 		return def
 	}
 	f := firstField(v)
-	if d, err := time.ParseDuration(f); err == nil {
+	// WR-02 (review): both parse branches reject negatives -- a negative
+	// ceiling makes EnforceMaxDuration (d > max) terminally reject EVERY
+	// job, so "-5s"/"-30m" must fall through to the logged-warning default
+	// below, never be returned silently. Zero stays valid: it is an
+	// explicit reject-everything ceiling, consistent with the bare-integer
+	// branch's sec >= 0.
+	if d, err := time.ParseDuration(f); err == nil && d >= 0 {
 		return d
 	}
 	if sec, err := strconv.Atoi(f); err == nil && sec >= 0 {

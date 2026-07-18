@@ -31,6 +31,12 @@ func TestEnvDurationSeconds(t *testing.T) {
 		{"duration with inline comment", "90m   # ninety minutes", true, 90 * time.Minute},
 		{"zero is a valid explicit ceiling", "0", true, 0},
 		{"negative bare seconds falls back", "-5", true, def},
+		// WR-02 (review): a negative Go-duration ("-5s") previously
+		// returned silently from the ParseDuration branch, becoming a
+		// ceiling that terminally rejects every audio job downstream
+		// (EnforceMaxDuration: d > max). Must fall back like "-5" does.
+		{"negative duration falls back", "-5s", true, def},
+		{"negative duration minutes falls back", "-30m", true, def},
 		{"garbage falls back", "four-hours", true, def},
 		{"empty value uses default", "", true, def},
 	}
