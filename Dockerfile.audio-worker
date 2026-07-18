@@ -1,0 +1,67 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/audio-worker ./cmd/audio-worker
+
+# whisper.cpp build stage: mirrors document-worker's veraPDF stage in SHAPE --
+# a separate, throwaway build stage whose only job is producing an artifact
+# the runtime stage COPYs, never rebuilding the toolchain there.
+FROM debian:bookworm-slim AS whisper-build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      ca-certificates \
+      curl \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch v1.9.1 \
+      https://github.com/ggml-org/whisper.cpp.git /whisper
+WORKDIR /whisper
+# -DGGML_NATIVE=OFF is LOAD-BEARING (STATE.md Key Decision, 32-RESEARCH.md
+# "What NOT to Use"): the default (native ON) compiles -march=native for the
+# BUILD host's exact CPU (CI runner / Apple Silicon OrbStack host
+# cross-building linux/amd64), and whisper-cli SIGILLs on any runtime host
+# lacking those exact instruction extensions. Do not flip this to chase perf.
+RUN cmake -B build -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build build -j --target whisper-cli --config Release
+# Pin the model by content hash, never trust HuggingFace's mutable `main`
+# pointer at build time (mirrors verapdf/chromium/MinIO pinned-tag discipline
+# already used elsewhere in this repo). Hash re-verified live against the
+# HuggingFace LFS metadata API during 32-01 execution (2026-07-18) -- matches
+# the value pinned in 32-RESEARCH.md/STACK.md exactly.
+RUN mkdir -p /models \
+ && curl -L --fail --retry 5 --retry-delay 5 \
+      -o /models/ggml-base.bin \
+      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
+ && echo "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe  /models/ggml-base.bin" | sha256sum -c -
+
+# Runtime stage: audio engine needs whisper-cli + ffmpeg + the baked model.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=whisper-build /whisper/build/bin/whisper-cli /usr/local/bin/whisper-cli
+# whisper-cli is dynamically linked against whisper.cpp's own shared libs
+# (libwhisper.so.1, libggml*.so) -- cmake places these alongside the binary
+# in build/bin/ with no RPATH set (confirmed via readelf -d during 32-01
+# execution), so they must be copied into ld's default search path and
+# registered via ldconfig, or the runtime `ldd` check fails with
+# "=> not found" (discovered live, not anticipated by the drafted skeleton).
+COPY --from=whisper-build /whisper/build/bin/*.so* /usr/local/lib/
+RUN ldconfig
+COPY --from=whisper-build /models/ggml-base.bin /models/ggml-base.bin
+COPY --from=build /out/audio-worker /usr/local/bin/audio-worker
+# Run unprivileged: the worker shells out to untrusted-input engines.
+USER nobody
+# The audio engine is a single synchronous two-stage CLI invocation per job
+# (ffmpeg, then whisper-cli) -- no forking daemon like LibreOffice's
+# oosplash->soffice.bin, so (matching Dockerfile.worker's own documented
+# rationale for the image engine) there is no orphaned-grandchild risk here
+# and no init/reaper is needed as PID 1.
+ENTRYPOINT ["/usr/local/bin/audio-worker"]
