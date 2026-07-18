@@ -191,8 +191,8 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
   3. Scale-from-zero is live-proven for the audio class with the model baked into the image, capturing timestamped Phase-28-style evidence that measures image-pull vs scale-from-zero cold-start (bake-vs-volume treated as a reversible, measured decision).
   4. `terminationGracePeriodSeconds` for the audio class exceeds `AUDIO_ENGINE_TIMEOUT` so a long transcription survives a genuine N→N-1 HPA downscale without a premature SIGTERM.
 **Plans**: 3 plans
-- [ ] 33-01-PLAN.md — Chart authoring: audio-worker Deployment + KEDA ScaledObject (WR-01 triad, grace 772s, non-null stabilization 900s), 5 AUDIO_* ConfigMap keys + reconciler 5m→15m fix, values.yaml tuning blocks, QueueAudio collector splice (AUD-08 SC1/SC2/SC4)
-- [ ] 33-02-PLAN.md — scripts/keda-audio-loadproof.sh: structural clone of keda-load-proof.sh (no CALIBRATE), event-timeline capture, byte-unchanged frozen scripts (AUD-08 SC3 instrument)
+- [x] 33-01-PLAN.md — Chart authoring: audio-worker Deployment + KEDA ScaledObject (WR-01 triad, grace 772s, non-null stabilization 900s), 5 AUDIO_* ConfigMap keys + reconciler 5m→15m fix, values.yaml tuning blocks, QueueAudio collector splice (AUD-08 SC1/SC2/SC4)
+- [x] 33-02-PLAN.md — scripts/keda-audio-loadproof.sh: structural clone of keda-load-proof.sh (no CALIBRATE), event-timeline capture, byte-unchanged frozen scripts (AUD-08 SC3 instrument)
 - [ ] 33-03-PLAN.md — Live scale-from-zero proof (SC3 timestamped evidence) + Phase-29 deferred keda-load-proof.sh re-run + human-verify; both stacks end down (AUD-08 SC3)
 
 ## Progress
@@ -231,7 +231,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
-| 33. KEDA/Helm Chart Integration | v1.7 | 0/3 | Planned | - |
+| 33. KEDA/Helm Chart Integration | v1.7 | 2/3 | In Progress|  |
 
 ---
 
