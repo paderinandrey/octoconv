@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-07-17 after v1.7 milestone start)
 Phase: Milestone v1.7 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-07-18 — Milestone v1.7 completed and archived
+Last activity: 2026-07-19 — Completed quick task 260719-2f5: OpenAPI 3.1 spec for Yaak
 
 ## Performance Metrics
 
@@ -99,6 +99,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.7-specific decisions 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260712-cqg | Fix Phase 16 verification gaps CR-01/WR-01: advisory-lock connection lifecycle (Release pool slot on TryAcquire error; add PGAdvisoryLock.Close and call at webhook-worker shutdown) | 2026-07-12 | 1f8b22b | [260712-cqg-fix-phase-16-verification-gaps-cr-01-wr-](./quick/260712-cqg-fix-phase-16-verification-gaps-cr-01-wr-/) |
+| 260719-2f5 | OpenAPI 3.1 спека API (docs/openapi.yaml, 14 операций, ApiKey auth, multipart POST /v1/jobs с аудио-примерами) для импорта в Yaak + docs/README.md; redocly lint 0 errors | 2026-07-19 | 43799af | [260719-2f5-openapi-3-1-api-octoconv-docs-yaak](./quick/260719-2f5-openapi-3-1-api-octoconv-docs-yaak/) |
 
 ### Pending Todos
 
