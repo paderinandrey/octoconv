@@ -99,10 +99,11 @@ func Sniff(r io.Reader) (detected string, rest io.Reader, err error) {
 // MIMEType returns the canonical MIME type for a registered format, or
 // "application/octet-stream" for anything unrecognized. This is the single
 // home for format->MIME mapping shared by internal/api (stored Content-Type,
-// D-06) and internal/worker (output Content-Type). Covers both image formats
-// (libvips) and document formats + their pdf conversion target (LibreOffice),
-// so a document job's presigned download is served with the same Content-Type
-// correctness guarantee as an image job's.
+// D-06) and internal/worker (output Content-Type). Covers image formats
+// (libvips), document formats + their pdf conversion target (LibreOffice),
+// html + its pdf conversion target (chromium), and the four audio
+// transcription output targets (whisper, AUD-02) -- so every job type is
+// served with the same Content-Type correctness guarantee.
 func MIMEType(format string) string {
 	switch NormalizeFormat(format) {
 	case "png":
@@ -131,6 +132,14 @@ func MIMEType(format string) string {
 		return "application/vnd.oasis.opendocument.presentation"
 	case "html":
 		return "text/html"
+	case "txt":
+		return "text/plain"
+	case "srt":
+		return "application/x-subrip"
+	case "vtt":
+		return "text/vtt"
+	case "json":
+		return "application/json"
 	default:
 		return "application/octet-stream"
 	}
