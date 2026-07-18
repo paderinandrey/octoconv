@@ -331,7 +331,7 @@ postJob() {
 	HTTP_STATUS=$(curl -s -o "$out_file" -w '%{http_code}' -X POST "$API_BASE/v1/jobs" \
 		-H "Authorization: ApiKey $CLIENT_KEY" \
 		-F "target=$target" \
-		-F "file=@internal/e2e/testdata/${filename};type=${content_type}")
+		-F "file=@internal/e2e/testdata/${filename};type=${content_type}" || true)
 	if [ "$HTTP_STATUS" != "202" ]; then
 		echo "FAIL: POST /v1/jobs for $filename -> $target returned $HTTP_STATUS, body: $(cat "$out_file")" >&2
 		exit 1
@@ -546,7 +546,7 @@ log "STEP 8: confirm trigger job $AUDIO_JOB_ID reaches a terminal status"
 
 audio_job_status=""
 for i in $(seq 1 200); do
-	code=$(curl -s -o /tmp/keda-audio-loadproof-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$AUDIO_JOB_ID")
+	code=$(curl -s -o /tmp/keda-audio-loadproof-job.json -w '%{http_code}' -H "Authorization: ApiKey $CLIENT_KEY" "$API_BASE/v1/jobs/$AUDIO_JOB_ID" || true)
 	audio_job_status=$(grep -o '"status":"[^"]*"' /tmp/keda-audio-loadproof-job.json | head -1 | cut -d'"' -f4 || true)
 	if [ "$audio_job_status" = "done" ] || [ "$audio_job_status" = "failed" ]; then
 		break
