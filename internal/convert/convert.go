@@ -11,14 +11,16 @@ import (
 // Engine-class identifiers (D-01/DEBT-02). This is the SINGLE compile-time
 // source of truth for engine-class string values -- referenced by
 // Converter.Engine implementations (LibvipsConverter, LibreOfficeConverter,
-// ChromiumConverter), the API routing switch (internal/api/handlers.go), the
-// reconciler recovery-routing switch (internal/reconciler/reconciler.go),
-// and the queue-name constants (internal/queue/queue.go). No other file may
-// hold a raw "image"/"document"/"html" engine-class literal.
+// ChromiumConverter, and the future AudioConverter), the API routing switch
+// (internal/api/handlers.go), the reconciler recovery-routing switch
+// (internal/reconciler/reconciler.go), and the queue-name constants
+// (internal/queue/queue.go). No other file may hold a raw
+// "image"/"document"/"html"/"audio" engine-class literal.
 const (
 	EngineImage    = "image"
 	EngineDocument = "document"
 	EngineHTML     = "html"
+	EngineAudio    = "audio"
 )
 
 // Pair is an ordered (source, target) format pair, e.g. {"png", "webp"}.
