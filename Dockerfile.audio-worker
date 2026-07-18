@@ -18,8 +18,19 @@ RUN apt-get update \
       ca-certificates \
       curl \
  && rm -rf /var/lib/apt/lists/*
+# Pin whisper.cpp by COMMIT hash, not the mutable v1.9.1 tag (WR-03): git
+# tags can be force-pushed, silently changing every byte of the compiled
+# whisper-cli binary and shared libs -- the same reason the model download
+# below is SHA-256-pinned instead of trusting HuggingFace's mutable `main`
+# pointer. WHISPER_COMMIT is the commit the v1.9.1 tag pointed at when
+# resolved via `git ls-remote` on 2026-07-18 (lightweight tag, hash IS the
+# commit). The shallow tag clone is kept for size; the checkout + rev-parse
+# guard makes the build FAIL if the tag ever moves off this commit.
+ARG WHISPER_COMMIT=f049fff95a089aa9969deb009cdd4892b3e74916
 RUN git clone --depth 1 --branch v1.9.1 \
-      https://github.com/ggml-org/whisper.cpp.git /whisper
+      https://github.com/ggml-org/whisper.cpp.git /whisper \
+ && git -C /whisper checkout --detach "${WHISPER_COMMIT}" \
+ && [ "$(git -C /whisper rev-parse HEAD)" = "${WHISPER_COMMIT}" ]
 WORKDIR /whisper
 # -DGGML_NATIVE=OFF is LOAD-BEARING (STATE.md Key Decision, 32-RESEARCH.md
 # "What NOT to Use"): the default (native ON) compiles -march=native for the
