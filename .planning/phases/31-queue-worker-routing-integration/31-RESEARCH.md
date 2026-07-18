@@ -447,17 +447,19 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_engine_check
 | A3 | Error code `"duration_exceeded"` (distinct from generic `"engine_error"`) is the right client-facing signal for a duration-guard rejection | Pattern 5 | Low risk — purely an API-contract naming choice; either code correctly marks the job terminal/failed, this only affects how precisely a polling client can distinguish failure reasons |
 | A4 | `EnqueueAudioConvert`/`TypeAudioConvert`/`QueueAudio` naming (not `*Transcribe*`, contra `ARCHITECTURE.md`) is the correct convention to follow | Pattern 6 | Low risk — a naming-only divergence from one research doc; the DEBT-02 single-source-of-truth precedent in `convert.go`'s own doc comment supports this reading, but the planner/CONTEXT.md should confirm if not already locked |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How should `AudioConverter`'s model path resolve locally vs. in-container?**
    - What we know: `defaultAudioModelPath` is a container-bake-time constant; Phase 30 injected a test-only `modelPath` struct field; `SetVeraPDFTimeout` is the existing precedent for an env-only setter pattern for `internal/convert`-internal config.
    - What's unclear: whether the planner wants a new `convert.SetAudioModelPath` setter (consistent with the VeraPDF precedent) or a different mechanism (e.g. registering `AudioConverter{modelPath: ...}` directly with a value read in `converters.go`'s `init()` — harder, since `init()` runs before flags/env parsing in `main()` in the general case, though `os.Getenv` inside `init()` would technically work since env vars are process-inherited before `main` runs).
    - Recommendation: mirror `SetVeraPDFTimeout` exactly (setter called explicitly in `cmd/audio-worker/main.go` before `srv.Start`, not read inside `converters.go`'s `init()`) — matches the codebase's stated convention that `internal/convert` never calls `os.Getenv` directly.
+   - **RESOLVED (adopted, 31-01 Task 1):** the `convert.SetAudioModelPath` setter + `AUDIO_MODEL_PATH` env var, called explicitly in `cmd/audio-worker/main.go` before `srv.Start` (mirrors `SetVeraPDFTimeout`).
 
 2. **Does the reconciler's global `ActiveStaleAfter` need a per-engine override in THIS phase, or is the global-raise (Pitfall 2, option 1) sufficient?**
    - What we know: SC4's wording is satisfiable either way; the enqueue-first + `ErrDuplicateTask` guard is the actual safety mechanism regardless.
    - What's unclear: whether the discuss-phase/CONTEXT.md has an opinion on the document-class staleness-detection-latency tradeoff a global raise introduces.
    - Recommendation: option 1 (global raise) unless CONTEXT.md says otherwise — matches `PITFALLS.md`'s own explicit recommendation and avoids an unscoped `Config` shape refactor.
+   - **RESOLVED (adopted, 31-02 Task 2):** option 1 (global raise) — `RECONCILER_ACTIVE_STALE_AFTER` default raised to 15m in `cmd/webhook-worker/main.go`, documented in `.env.example` (Plan 04); the per-engine override refactor is deferred.
 
 ## Environment Availability
 
