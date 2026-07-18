@@ -32,7 +32,7 @@ Requirements for milestone v1.7 (Audio Engine & Hardening). Each maps to roadmap
 ### Audio Engine — Packaging & Deployment
 
 - [x] **AUD-06**: Отдельный `cmd/audio-worker` + `Dockerfile.audio-worker` (whisper.cpp v1.9.1 из исходников multi-stage, `-DGGML_NATIVE=OFF`, модель `base` запечена с пиненным SHA-256, ffmpeg из apt) + `AUDIO_ENGINE_TIMEOUT`/`AUDIO_WORKER_CONCURRENCY`/ShutdownTimeout env + compose-сервис + CI bake matrix
-- [ ] **AUD-08**: Chart: audio-worker Deployment (class-appropriate grace period) + KEDA ScaledObject (со scaleDownStabilizationSeconds-уроком v1.6), QueueAudio зарегистрирована в api queue-depth коллекторе; scale-from-zero живо доказан с моделью, запечённой в образ (image-pull vs scale-from-zero измерен)
+- [x] **AUD-08**: Chart: audio-worker Deployment (class-appropriate grace period) + KEDA ScaledObject (со scaleDownStabilizationSeconds-уроком v1.6), QueueAudio зарегистрирована в api queue-depth коллекторе; scale-from-zero живо доказан с моделью, запечённой в образ (image-pull vs scale-from-zero измерен)
 
 ## v2 Requirements
 
@@ -82,7 +82,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUD-05 | Phase 31 | Complete |
 | AUD-06 | Phase 32 | Complete |
 | AUD-07 | Phase 32 | Complete |
-| AUD-08 | Phase 33 | Pending |
+| AUD-08 | Phase 33 | Complete |
 
 **Coverage:**
 - v1 requirements: 12 total

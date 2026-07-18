@@ -231,7 +231,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
-| 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete   | 2026-07-18 |
+| 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
 
 ---
 
