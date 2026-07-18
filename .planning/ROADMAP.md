@@ -106,7 +106,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 ### v1.7 Audio Engine & Hardening (Phases 29-33) — IN PROGRESS
 
 - [x] **Phase 29: v1.6 Hardening Tail** - Close WR-01 empty-PromQL semantics, OPER-01 compose passthrough + live gate, gate-tooling warnings, K8S-02 direct-dial recheck (completed 2026-07-17)
-- [ ] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts
+- [x] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts (completed 2026-07-18)
 - [ ] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing
 - [ ] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go
 - [ ] **Phase 33: KEDA/Helm Chart Integration** - audio-worker Deployment + ScaledObject, QueueAudio collector, scale-from-zero load-proof with baked model
@@ -148,7 +148,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 **Plans**: 3 plans
 - [x] 30-01-PLAN.md — Dev setup (whisper-cli v1.9.1 + SHA-256 model) + audio content validation: ID3v2-aware magic bytes + ffprobe duration guard (AUD-01, AUD-04)
 - [x] 30-02-PLAN.md — EngineAudio const + validated AudioOpts (closed language allowlist, injection test) (AUD-03)
-- [ ] 30-03-PLAN.md — AudioConverter two-stage ffmpeg→whisper-cli pipeline + live-verified JSON timestamp schema (AUD-02)
+- [x] 30-03-PLAN.md — AudioConverter two-stage ffmpeg→whisper-cli pipeline + live-verified JSON timestamp schema (AUD-02)
 
 ### Phase 31: Queue, Worker & Routing Integration
 **Goal**: Audio jobs flow end-to-end through the async pipeline with correct retry/dedup and engine-routing semantics.
@@ -216,7 +216,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 27. KEDA Autoscaling | v1.6 | 3/3 | Complete    | 2026-07-16 |
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
-| 30. Audio Engine Foundation | v1.7 | 2/3 | In Progress|  |
+| 30. Audio Engine Foundation | v1.7 | 3/3 | Complete   | 2026-07-18 |
 | 31. Queue, Worker & Routing Integration | v1.7 | 0/? | Not started | - |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
