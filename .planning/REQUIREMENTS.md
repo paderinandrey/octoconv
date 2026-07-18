@@ -16,13 +16,13 @@ Requirements for milestone v1.7 (Audio Engine & Hardening). Each maps to roadmap
 
 ### Audio Engine — Input & Validation
 
-- [ ] **AUD-01**: Клиент может отправить аудиофайл (mp3/wav/m4a/ogg) через `POST /v1/jobs` и получить транскрипт через тот же async-пайплайн; magic-bytes валидация fail-closed до записи в S3, включая ID3v2-aware MP3-детектор (переменный офсет, не fixed-window)
-- [ ] **AUD-04**: Гард длительности аудио (`AUDIO_MAX_DURATION_SECONDS` через ffprobe до/на входе конверсии) — превышение отклоняется предсказуемым terminal/422; аудио-аналог decompression-bomb защиты
+- [x] **AUD-01**: Клиент может отправить аудиофайл (mp3/wav/m4a/ogg) через `POST /v1/jobs` и получить транскрипт через тот же async-пайплайн; magic-bytes валидация fail-closed до записи в S3, включая ID3v2-aware MP3-детектор (переменный офсет, не fixed-window)
+- [x] **AUD-04**: Гард длительности аудио (`AUDIO_MAX_DURATION_SECONDS` через ffprobe до/на входе конверсии) — превышение отклоняется предсказуемым terminal/422; аудио-аналог decompression-bomb защиты
 
 ### Audio Engine — Transcription & Output
 
-- [ ] **AUD-02**: Выходные форматы txt/srt/vtt/json через существующий Pair-механизм; `target=json` содержит сегментные и пословные таймстампы, схема верифицирована против пиненного `whisper-cli` v1.9.1 (forward-совместимость с SEED-001 mistake-analysis)
-- [ ] **AUD-03**: `AudioOpts{language (closed allowlist), translate}` через validated-opts паттерн (OPTS-01 прецедент) — клиентские байты никогда не попадают в argv движка
+- [x] **AUD-02**: Выходные форматы txt/srt/vtt/json через существующий Pair-механизм; `target=json` содержит сегментные и пословные таймстампы, схема верифицирована против пиненного `whisper-cli` v1.9.1 (forward-совместимость с SEED-001 mistake-analysis)
+- [x] **AUD-03**: `AudioOpts{language (closed allowlist), translate}` через validated-opts паттерн (OPTS-01 прецедент) — клиентские байты никогда не попадают в argv движка
 
 ### Audio Engine — Pipeline & Reliability
 
@@ -75,10 +75,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | HARD-02 | Phase 29 | Complete |
 | HARD-03 | Phase 29 | Complete |
 | HARD-04 | Phase 29 | Complete |
-| AUD-01 | Phase 30 | Pending |
-| AUD-02 | Phase 30 | Pending |
-| AUD-03 | Phase 30 | Pending |
-| AUD-04 | Phase 30 | Pending |
+| AUD-01 | Phase 30 | Complete |
+| AUD-02 | Phase 30 | Complete |
+| AUD-03 | Phase 30 | Complete |
+| AUD-04 | Phase 30 | Complete |
 | AUD-05 | Phase 31 | Pending |
 | AUD-06 | Phase 32 | Pending |
 | AUD-07 | Phase 32 | Pending |
