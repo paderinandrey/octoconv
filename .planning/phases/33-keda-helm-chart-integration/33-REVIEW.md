@@ -15,7 +15,8 @@ findings:
   warning: 2
   info: 3
   total: 5
-status: issues_found
+status: fixes_applied
+fixed: 2
 ---
 
 # Phase 33: Code Review Report
@@ -23,7 +24,7 @@ status: issues_found
 **Reviewed:** 2026-07-18T21:51:58Z
 **Depth:** standard
 **Files Reviewed:** 6
-**Status:** issues_found
+**Status:** fixes_applied (both Warnings fixed; Info findings tracked, out of fix scope)
 
 ## Summary
 
@@ -90,6 +91,8 @@ convention, and both turn a transient infrastructure hiccup into a silent
 
 ### WR-01: AUDIO_POD discovery drops the `|| true` guard, so a kubectl failure aborts the gate with no diagnostic
 
+**Status:** fixed
+**Resolution:** Added `|| true` to the AUDIO_POD command substitution (same guard shape as the REDIS_POD discovery at line 281), so a transient kubectl failure or empty `.items` list falls through to `assert_nonempty`'s labeled FAIL diagnostic instead of a silent `set -e` abort. Commit `2170595`.
 **File:** `scripts/keda-audio-loadproof.sh:404-406`
 **Issue:** The trigger-pod discovery runs under `set -euo pipefail` with stderr
 suppressed but no failure guard:
@@ -118,6 +121,8 @@ AUDIO_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=audi
 
 ### WR-02: Unguarded curl in the STEP 8 status-poll loop (and postJob) — a port-forward drop kills the gate mid-poll
 
+**Status:** fixed
+**Resolution:** Added `|| true` to both curls (STEP 8 status poll at :549 and the postJob `HTTP_STATUS` capture at :331-334), matching the healthz loop's guard convention at :301. A dropped port-forward now yields an empty/failed result handled by the loop's own retry/timeout logic (and postJob's existing `!= "202"` check) instead of aborting the whole gate under `set -e`. Commit `ab2e332`.
 **File:** `scripts/keda-audio-loadproof.sh:549` (also `:331`)
 **Issue:** The terminal-status poll runs for up to ~1000s (200 × 5s) against the
 `kubectl port-forward` at `127.0.0.1:18092`:
