@@ -1,5 +1,32 @@
 # Milestones
 
+## v1.7 Audio Engine & Hardening (Shipped: 2026-07-18)
+
+**Phases completed:** 5 phases, 18 plans, 44 tasks
+
+**Key accomplishments:**
+
+- Flipped all three KEDA ScaledObjects to fail-safe null handling and retry-inclusive PromQL, replaced a would-be recursive Prometheus checksum with a shared named-template, and closed the falsy-0 stabilization bug with a paired hasKey/not-nil guard — all verified offline via helm lint/template, no cluster involved.
+- Wired the missing `OPERATOR_CLIENT_IDS` compose passthrough and proved the operator system-presets path end-to-end against the live compose stack: operator CRUD on `/v1/system/presets`, a byte-identical non-operator no-leak 404, and cross-client system-preset job usability (61/61 acceptance assertions passing).
+- Closed keda-load-proof.sh's five remaining gate-tooling warnings (stale-pod race, false-PASS download check, orphaned watcher, unpinned interpreter, CWD-relative fixture), added keda-gate.sh's presigned direct-dial step (HARD-04/D-07), and live-verified the whole gate end-to-end (21/21 PASS) after fixing a Rule-1 bug the WR-01 fallback change exposed in a fresh-install run.
+- Local whisper-cli v1.9.1 toolchain provisioned and live-verified, plus a bespoke ID3v2-aware MP3 magic-bytes detector and an ffprobe-based declared-duration guard, both fail-closed and unit-tested in `internal/convert`.
+- EngineAudio const + AudioOpts{Language, Translate} validated-opts layer with a closed 6-entry language allowlist and an injection test proving client bytes never reach whisper-cli argv
+- AudioConverter's two-stage ffmpeg-normalize -> whisper-cli-transcribe pipeline, live-verified against the pinned whisper-cli v1.9.1 binary to emit segment- and token-level JSON timestamps, deliberately left unregistered pending Phase 31's API/queue wiring
+- Postgres CHECK-constraint migration, AudioConverter registration, and full asynq queue/task-type/UniqueTTL/client layer that unblocks every downstream audio-engine plan in Wave 2
+- Stage-aware terminal/transient classifier (Key Decision 1) wired into a new HandleAudioConvert handler, with the previously-dormant duration guard actually spliced into the pipeline and ffprobe/ffmpeg path args hardened with the `file:` protocol prefix.
+- Audio content-detection, opts validation, and enqueue routing wired live into both the API request path and the reconciler's stranded-job recovery path, closing two confirmed integration bugs (12-byte upload truncation and opts mis-routing) before they could ship.
+- cmd/audio-worker built, verified, and live-proven end-to-end: an uploaded jfk.wav job flowed queued → active → done in ~2.8s against real compose infra (Postgres/Redis/MinIO) with local ffmpeg + whisper-cli, producing the correct transcript ("...ask not what your country can do for you..."); .env.example documents all 5 audio env levers plus both Phase-31-deferred tradeoffs.
+- Three-stage `Dockerfile.audio-worker` (Go build, whisper.cpp v1.9.1 source-built with `-DGGML_NATIVE=OFF`, slim ffmpeg runtime) built and verified locally on arm64 (682MB), with the mandatory live cgroup v2 `cpu.max` spot-check confirming `200000 100000` under `--cpus=2.0` (Assumption A2 resolved).
+- whisper-cli's `--threads` is now sized to the container's real cgroup v2 CPU quota (floor of quota/period, never host core count), resolved once at `cmd/audio-worker` startup via an `AUDIO_THREADS` env override → `CgroupCPULimit()` → `runtime.NumCPU()` precedence chain, and always injected as an explicit `-t <n>` argv pair on every whisper-cli invocation.
+- `scripts/audio-rtf-measure.sh` measured p95 RTF=0.2059 (N=10, arm64, base model, 2-cpu container) and the NO-GO lever fired: AUDIO_MAX_DURATION_SECONDS is lowered from the placeholder 14400s (4h) to 1800s (30min), yielding a derived AUDIO_ENGINE_TIMEOUT=742s (12.4min, 17.6% margin under the asserted 900s/15m CAP) and a measured AUDIO_WORKER_CONCURRENCY=1.
+- Added the audio-worker compose service with RTF-measured values (742s timeout, concurrency=1, cpus=2.0/memory=1g), propagated AUDIO_ENGINE_TIMEOUT/AUDIO_MAX_RETRY identically across all 7 queue.NewClient()-constructing services (IN-02), corrected the stale Phase-16 5m reconciler-CAP override on both webhook-workers to 15m (IN-16), added audio-worker to the CI bake matrix, and replaced .env.example's [ASSUMED] placeholder with the measured values.
+- TestAudioConversionE2E passes live against the containerized audio-worker (docker compose), closing AUD-06's live-acceptance gate with an 8.10s observed job wall-clock — far inside the 5-minute cold-start bound and negligible against the CI e2e suite's 30-minute timeout.
+- 1. [Rule 1 - Bug] Reworded two inline comments to avoid literal grep-gate string collisions
+- New self-contained scripts/keda-audio-loadproof.sh: structural clone of scripts/keda-load-proof.sh, narrower (no trial-run mode) and with new scope (timestamped kubectl pod-event-timeline capture for the audio class's scale-from-zero proof), statically verified — the two frozen sibling scripts remain byte-unchanged.
+- Live-ran both KEDA load-proof gates on OrbStack: keda-audio-loadproof.sh cleanly proved audio 0->1 scale-from-zero with the whisper model baked in (SC3, AUD-08 complete); the unmodified keda-load-proof.sh re-run newly confirmed SC1/SC2 pass under the WR-01-hardened chart but also empirically surfaced a real, previously-only-theoretical WR-05 jsonpath defect in SC3's BUSY_POD selection (fails loud, as 29-REVIEW.md predicted) -- Phase 29's deferred item is re-verified, not cleanly closed.
+
+---
+
 ## v1.6 Kubernetes & KEDA (Shipped: 2026-07-17)
 
 **Known deferred items at close:** 3 (stale v1.3-era quick-task record + 2 dormant seeds, SEED-004 substantively delivered — see STATE.md Deferred Items)

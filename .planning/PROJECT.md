@@ -8,16 +8,25 @@ OctoConv — внутренний асинхронный сервис конве
 
 Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML) и получить результат — без риска для стабильности или безопасности продакшена.
 
-## Current Milestone: v1.7 Audio Engine & Hardening
+## Current State
+
+**v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18.** Четвёртый engine-класс (офлайн whisper.cpp-транскрипция) в полном контуре: fail-closed валидация → async-пайплайн со stage-aware retry → контейнер с RTF-измеренным таймаутом → KEDA scale-from-zero (live-proven). Плюс закрыт hardening-хвост v1.6. Аудит 12/12 требований, интеграция 22/22, E2E 2/2.
+
+**Next milestone:** не определён — кандидат SEED-001 (разбор урока: анализ ошибок + spaced-repetition колода) поверх готового JSON-таймстамп контракта. Запуск: `/gsd:new-milestone`.
+
+<details>
+<summary>v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18</summary>
 
 **Goal:** Четвёртый engine-класс — офлайн-транскрипция аудио через whisper.cpp по проверенному паттерну (отдельная очередь/воркер/бинарник, hardened exec, KEDA) — плюс закрытие hardening-хвоста v1.6.
 
 **Target features:**
 - Hardening-хвост v1.6: WR-01 (семантика пустого PromQL при падении api), live-скрипт OPER-01 + проброс OPERATOR_CLIENT_IDS в compose, гейт-тулинг warnings из 28-REVIEW, K8S-02 direct-dial перепроверка
 - Audio engine-класс: audio-форматы → транскрипт через whisper.cpp CLI в отдельном контейнере; magic-bytes валидация, transient/terminal retry, отдельная asynq-очередь + KEDA ScaledObject, chart-интеграция
-- SEED-001 фундамент: контракт результата транскрипции (формат, таймстампы) проектируется с прицелом на будущий разбор урока (ошибки + spaced-repetition колода — следующий милстоун)
+- SEED-001 фундамент: контракт результата транскрипции (формат, таймстампы) спроектирован с прицелом на будущий разбор урока
 
-**Key context:** движок локальный (без внешних API — воркеры остаются офлайн); анализ ошибок отложен; k8s-в-CI отложен (K8SV2-01); SEED-001 — рамка вертикали. Прошлое состояние: v1.6 shipped 2026-07-17 (см. Context).
+**Key context:** движок локальный (без внешних API — воркеры остаются офлайн); анализ ошибок отложен; k8s-в-CI отложен (K8SV2-01). Прошлое состояние: v1.6 shipped 2026-07-17 (см. Context).
+
+</details>
 
 <details>
 <summary>v1.6 Kubernetes & KEDA — SHIPPED 2026-07-17</summary>
@@ -92,12 +101,14 @@ OctoConv — внутренний асинхронный сервис конве
 - ✓ Audio-worker контейнеризован с measured RTF-гейтом: Dockerfile.audio-worker (3-stage, whisper.cpp v1.9.1 по commit-hash пину с rev-parse guard, -DGGML_NATIVE=OFF, модель запечена с SHA-256 fail-closed, образ 682MB arm64); cgroup v2 детекция CPU-лимита → whisper -t (AUDIO_THREADS → cpu.max → NumCPU, ParseInt+positivity против Inf/NaN); scripts/audio-rtf-measure.sh: p95 RTF=0.206 (N=10, --cpus=2/-t 2/1g, arm64-каверза записана) → AUDIO_ENGINE_TIMEOUT=742s GO (17.6% под 900s CAP), NO-GO-рычаг применён: AUDIO_MAX_DURATION_SECONDS 14400→1800, AUDIO_WORKER_CONCURRENCY=1 (RSS ~728MiB); compose-сервис + IN-02 7-way пропагация (742s ×7) + stale 5m CAP-оверрайды webhook-worker'ов исправлены на 15m + stop_grace_period 762s; CI bake matrix; повторяемый TestAudioConversionE2E в internal/e2e (PASSED live 8.10s через контейнер, signed webhook, DB-proof) — Phase 32 (AUD-06/07, verification 6/6; plan-checker поймал 2 блокера до исполнения — stale CAP-дрейф и echo-верify; code review 5 Warning исправлены)
 - ✓ Audio-класс автоскейлится в k8s с production-паритетом: audio-worker Deployment (terminationGracePeriodSeconds 772 > 752 ShutdownTimeout > 742 ENGINE_TIMEOUT) + KEDA ScaledObject с WR-01 триадой verbatim (ignoreNullValues:"false", fallback.replicas:1, retry-inclusive PromQL) и первым non-null production scaleDownStabilizationSeconds 900 (742s-задачи не влезают в 300s HPA-дефолт); configmap: 5 AUDIO_* ключей + chart-сторона stale 5m→15m фикса; QueueAudio в api-коллекторе (5 очередей); scripts/keda-audio-loadproof.sh (клон, frozen-скрипты byte-unchanged); live proof: 0→1 scale-from-zero 10/10 с запечённой моделью, Pulling→Pulled ≈0 на OrbStack shared store (bake-in подтверждён, реверсивен, registry cold-pull отложен до реального registry); отложенный Phase-29 re-run keda-load-proof.sh: SC1/SC2 live PASS, его SC3 BUSY_POD упал громко на уже принятом WR-05 jsonpath-резидуале (эмпирически подтверждён, скрипт не тронут) — Phase 33 (AUD-08, verification 4/4; code review 2 Warning исправлены) — **milestone v1.7 phases complete (29-33)**
 
+- ✓ Клиент может отправить аудиофайл (mp3/wav/m4a/ogg) и получить транскрипт (whisper.cpp v1.9.1, офлайн) через тот же async-пайплайн, что и остальные классы — v1.7 (live E2E compose 8.10s + k8s scale-from-zero 10/10)
+- ✓ Audio-класс встроен в полный контур: fail-closed валидация содержимого, stage-aware retry-семантика, KEDA-скейлинг, chart с production-паритетом — v1.7 (audit 12/12, integration 22/22)
+
 ### Active
 
-<!-- Milestone v1.7 (Audio Engine & Hardening) — ALL PHASES COMPLETE (29-33). Pending: /gsd:complete-milestone audit. -->
+<!-- Milestone v1.7 shipped 2026-07-18. Next milestone: define via /gsd:new-milestone (candidate: SEED-001 lesson-recording analysis, consumes v1.7's JSON timestamp contract). -->
 
-- [ ] Клиент может отправить аудиофайл и получить транскрипт (whisper.cpp, офлайн) через тот же async-пайплайн, что и остальные классы
-- [ ] Audio-класс встроен в полный контур: валидация содержимого, retry-семантика, KEDA-скейлинг, chart
+- [ ] (следующий милстоун не определён — кандидат: SEED-001 разбор урока: анализ ошибок + spaced-repetition колода поверх JSON-таймстамп контракта v1.7)
 
 ### Out of Scope
 
@@ -120,6 +131,7 @@ OctoConv — внутренний асинхронный сервис конве
 - v1.1-аудит (`v1.1-MILESTONE-AUDIT.md`) прошёл без блокеров и без tech debt (4/4 требования, 5/5 точек интеграции, живые smoke-тесты всех новых механизмов по отдельности и в комбинации против пересобранного docker-стека) — впервые за проект milestone закрылся с нулевым переносом.
 - Code review при исполнении Phase 2 (v1.0) нашёл и сразу исправил 2 критических дефекта: webhook-доставка следовала HTTP-редиректам (SSRF-обход валидации `callback_url`) и off-by-one в расписании retry-backoff (сокращал заявленное ~30-минутное окно до ~16 минут). Оба исправления покрыты тестами.
 - **Milestone v1.2 (Document Engine Class) shipped 2026-07-10.** 4 фазы (8–11), 13 планов (вкл. gap-closure 11-04), 71 коммит, +2754 строк Go (без .planning), ~2 дня. Второй класс движков: docx/xlsx/pptx/odt/ods/odp → PDF через LibreOffice headless в отдельном контейнере, live E2E по всем 6 парам. Аудит: 10/10 требований, 10/10 интеграционных связей. Полный отчёт: `.planning/milestones/v1.2-ROADMAP.md`, `-REQUIREMENTS.md`, `-MILESTONE-AUDIT.md`.
+- **Milestone v1.7 (Audio Engine & Hardening) shipped 2026-07-18.** 5 фаз (29-33), 18 планов, 44 задачи, ~170 коммитов, +4495/−38 строк (без .planning, фазы 30-33), ~2 дня. Четвёртый engine-класс: аудио-транскрипция whisper.cpp v1.9.1 офлайн (mp3/wav/m4a/ogg → txt/srt/vtt/json с пословными таймстампами), RTF-измеренный AUDIO_ENGINE_TIMEOUT=742s, KEDA scale-from-zero live-proven 10/10. Аудит: 12/12 требований, 22/22 интеграции, 2/2 E2E. Полный отчёт: `.planning/milestones/v1.7-*`.
 - **Milestone v1.6 (Kubernetes & KEDA) shipped 2026-07-17.** 5 фаз (24-28), 14 планов, 33 задачи, 129 коммитов, +5978/−56 строк (без .planning), ~3.5 дня. Первый инфраструктурный милстоун: Helm-чарт на OrbStack k8s, KEDA scale-from-zero per engine-class, таймстампированный load-proof 0→4→0 (evidence в phases/28/evidence/), MCP streamable-HTTP, operator system-presets REST. Аудит: passed 9/9, advisory tech debt (OPER-01 live-script gap, WR-01 trigger semantics, gate-tooling warnings). Четвёртый задокументированный OrbStack-клин случился и восстановлен в ходе load-proof. Полный отчёт: `.planning/milestones/v1.6-*`.
 - **Milestone v1.5 (MCP Access & Document Fidelity) shipped 2026-07-13.** 4 фазы (20–23), 10 планов, 71 коммит, +5537/−84 строк (без .planning). Аудит: 12/12, 6/6 интеграции. Первый measured go/no-go гейт (veraPDF JVM). Полный отчёт: `.planning/milestones/v1.5-*`.
 - **Milestone v1.4 (CI, Presets & Debt Cleanup) shipped 2026-07-13.** 3 фазы (17–19), 8 планов, 54 коммита, +2261/−60 строк (без .planning), ~2 дня. Аудит: 11/11 требований, 6/6 интеграции. Репозиторий публичный; CI живой (badge passing). Полный отчёт: `.planning/milestones/v1.4-*`.
@@ -161,6 +173,11 @@ OctoConv — внутренний асинхронный сервис конве
 | Resource-exhaustion через сложный документ (DOC-V2-05) — accepted residual risk v1.2 | Митигируется только `DOCUMENT_ENGINE_TIMEOUT` + потолком конкуренции document-воркера; активный анализ сложности отложен | — Pending (принятый риск, пересмотреть при росте нагрузки) |
 | `file://` residual read внутри chromium-worker — accepted residual risk v1.3 (Phase 15) | Live-tested (Plan 04, item 6): `<img src="file:///usr/share/pixmaps/debian-logo.png">` (world-readable, non-input file) успешно загрузился внутри рендера под USER nobody — passive subresource loads (img/link/script src) читают ЛЮБОЙ файл, доступный uid nobody, включая потенциально workDir других одновременно выполняющихся job'ов (0700 не изолирует общий UID). Активный `fetch()`/XHR к `file://` при этом блокируется самим Chromium — подтверждено отдельно. Матчит DOC-V2-05 precedent (internal-only clients trust model) | — Pending (принятый риск; митигация — bind-mount только собственного workDir job'а — отложена как будущая опция, не блокирует Phase 15) |
 | tini как PID 1 в `Dockerfile.chromium-worker` — сохранён, несмотря на неподтверждённую живым тестом необходимость именно для этой invocation-формы | Live-tested (Plan 04, item 7): `runCommand`-точное поведение (SIGKILL всей process-группы через `-PGID`) НЕ оставило зомби-процессов ни с tini, ни без него (3 повтора без tini, 1 с tini) — вероятно потому что весь одномоментный SIGKILL убивает parent+children синхронно, а не оставляет осиротевших детей. Tini оставлен как defence-in-depth (совпадает с собственным биасом D-09 "keep it" + сигнал-форвардинг для graceful shutdown), изменений в Dockerfile не внесено | ✓ Good — поведение задокументировано честно, а не предположено; изменений нет |
+| Stage-aware классификация таймаутов аудио (Key Decision 1, v1.7): ffmpeg-стадия/детерминированный ffprobe — terminal, whisper-timeout на валидированном аудио — transient | Малформленный вход не ретраится впустую; честный timeout дорогой транскрипции получает свежий CPU; blanket-terminal отвергнут как строго менее корректный | ✓ Good — Phase 31: TestIsAudioTerminal pinning; code review добавил недостающую ffprobe-ветку и budget-floor против S3-столов до продакшена |
+| Модель `base` по умолчанию, реверсивно через build-arg (Key Decision 2, v1.7) | `small` утяжеляет образ к ~1GB и бьёт по scale-from-zero; выбор не запечатан навсегда | ✓ Good — Phase 32: образ 682MB, RTF p95=0.206 на base достаточен (742s timeout с запасом) |
+| Model bake-in (не volume) с обязательным measured load-proof (Key Decision 3, v1.7) | Простейший вариант при офлайн-ограничении, но обязан быть доказан измерением, не предположением | ✓ Good — Phase 33: 0→1 scale-from-zero 10/10 live; Pulling→Pulled ≈0 на OrbStack shared store; registry cold-pull задокументирован как неизмеримый локально — решение реверсивно |
+| AUDIO_ENGINE_TIMEOUT измеряется RTF-гейтом, не копируется от соседних классов | Копированная константа для самого дорогого класса — прямой путь к гонке T-03-10 или мёртвым таймаутам | ✓ Good — Phase 32: 742s из p95×2.0 формулы; NO-GO-рычаг сработал по назначению (max duration 4h→30min вместо раздувания таймаута) |
+| Замороженные gate-скрипты (keda-load-proof.sh, keda-gate.sh) byte-unchanged; новая функциональность — только новыми скриптами | Стабильность доказательной базы: прошедшие live-гейты не мутируют задним числом | ✓ Good — Phase 33: WR-05 дефект замороженного скрипта эмпирически подтверждён и честно задокументирован вместо тихого фикса; forward-fix отложен осознанно |
 
 ## Evolution
 
@@ -180,4 +197,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-19 after Phase 33 completion (KEDA/Helm chart integration — v1.7 phases complete)*
+*Last updated: 2026-07-19 after v1.7 milestone (Audio Engine & Hardening — shipped 2026-07-18)*
