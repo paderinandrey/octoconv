@@ -44,6 +44,9 @@ MEMORY="${AUDIO_RTF_MEMORY:-1g}"
 # "RTF Measurement Methodology" caveat on jfk.wav's raw 11s being too short).
 FIXTURE_DURATION_S="${AUDIO_RTF_FIXTURE_DURATION_S:-300}"
 CONTAINER="octoconv-audio-rtf-measure-$$"
+# Host-side scratch dir for logs captured from docker exec redirections
+# (currently the floor run's whisper output) -- everything written here dies
+# with the EXIT trap below, never leaking into host /tmp (WR-04).
 WORKDIR=$(mktemp -d)
 trap 'docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"' EXIT
 
@@ -85,7 +88,7 @@ echo
 echo "=== 4b. Sanity cross-check: sine-tone floor fixture (deterministic silence-adjacent signal; lower-bound RTF signal only, not the primary number) ==="
 docker exec "$CONTAINER" ffmpeg -y -f lavfi -i "sine=frequency=440:duration=$FIXTURE_DURATION_S" -ar 16000 -ac 1 -c:a pcm_s16le /tmp/work/floor.wav
 FLOOR_START=$(docker exec "$CONTAINER" date +%s%N)
-docker exec "$CONTAINER" whisper-cli -m /models/ggml-base.bin -f /tmp/work/floor.wav -of /tmp/work/floor_out -otxt -l auto -t "$THREADS" >/tmp/floor_whisper.log 2>&1 || true
+docker exec "$CONTAINER" whisper-cli -m /models/ggml-base.bin -f /tmp/work/floor.wav -of /tmp/work/floor_out -otxt -l auto -t "$THREADS" >"$WORKDIR/floor_whisper.log" 2>&1 || true
 FLOOR_END=$(docker exec "$CONTAINER" date +%s%N)
 FLOOR_MS=$(( (FLOOR_END - FLOOR_START) / 1000000 ))
 FLOOR_RTF=$(awk -v ms="$FLOOR_MS" -v dur="$FIXTURE_ACTUAL_DURATION_S" 'BEGIN { printf "%.6f", (ms/1000)/dur }')
