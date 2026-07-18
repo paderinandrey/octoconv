@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/apaderin/octoconv/internal/convert"
 )
 
 func TestIsTerminalStorageNoSuchKey(t *testing.T) {
@@ -200,5 +202,69 @@ func TestIsHTMLTerminal(t *testing.T) {
 		if isHTMLTerminal(err) {
 			t.Fatalf("expected isHTMLTerminal(%v) = false", err)
 		}
+	}
+}
+
+// TestIsAudioTerminal proves Key Decision 1's stage-aware split (SC2,
+// BINDING per STATE.md — the superseded blanket-timeoutIsTerminal shape must
+// NOT be re-litigated): a ffmpeg-stage failure/timeout is terminal (a
+// malformed/adversarial input signal); a whisper-stage timeout on audio that
+// already passed the ffprobe duration/format check is transient, bounded by
+// AUDIO_MAX_RETRY; a duration-guard rejection (ErrAudioDurationExceeded) is
+// always terminal; every other error falls through to the shared isTerminal
+// classifier (minio.NoSuchKey / "no converter for" / nil).
+func TestIsAudioTerminal(t *testing.T) {
+	if isAudioTerminal(nil) {
+		t.Fatal("expected isAudioTerminal(nil) = false")
+	}
+
+	// ffmpeg-stage timeout -> terminal (malformed/adversarial input signal).
+	ffmpegTimeout := fmt.Errorf("convert: %w", fmt.Errorf("audio: ffmpeg: %w", fmt.Errorf("ffmpeg killed: %w", context.DeadlineExceeded)))
+	if !isAudioTerminal(ffmpegTimeout) {
+		t.Fatal("expected isAudioTerminal(ffmpeg-stage timeout) = true (Key Decision 1)")
+	}
+
+	// ffmpeg-stage non-timeout failure -> terminal.
+	ffmpegFailure := fmt.Errorf("convert: %w", fmt.Errorf("audio: ffmpeg: %w", errors.New("exit status 1: Invalid data found when processing input")))
+	if !isAudioTerminal(ffmpegFailure) {
+		t.Fatal("expected isAudioTerminal(ffmpeg-stage failure) = true (Key Decision 1)")
+	}
+
+	// whisper-stage timeout on already-duration-validated audio -> transient
+	// (the distinguishing SC2 case: this must NOT match the ffmpeg-stage
+	// terminal signature, and must NOT delegate to timeoutIsTerminal's
+	// blanket DeadlineExceeded-is-terminal shape).
+	whisperTimeout := fmt.Errorf("convert: %w", fmt.Errorf("audio: whisper-cli: %w", fmt.Errorf("whisper-cli killed: %w", context.DeadlineExceeded)))
+	if isAudioTerminal(whisperTimeout) {
+		t.Fatal("expected isAudioTerminal(whisper-stage timeout) = false (Key Decision 1 — bounded by AUDIO_MAX_RETRY)")
+	}
+
+	// ErrAudioDurationExceeded -> always terminal.
+	durationErr := fmt.Errorf("convert: %w", convert.ErrAudioDurationExceeded)
+	if !isAudioTerminal(durationErr) {
+		t.Fatal("expected isAudioTerminal(ErrAudioDurationExceeded) = true")
+	}
+
+	// Shared base classifier fallthrough.
+	sharedCases := []error{
+		fmt.Errorf("no converter for %s -> %s", "mp3", "txt"),
+		fmt.Errorf("download %q: %w", "uploads/x/0-in.mp3", minio.ErrorResponse{Code: minio.NoSuchKey}),
+	}
+	for _, err := range sharedCases {
+		if !isAudioTerminal(err) {
+			t.Fatalf("expected isAudioTerminal(%v) = true (shared isTerminal fallthrough)", err)
+		}
+	}
+
+	// Non-timeout whisper-cli failure -> transient by default (31-RESEARCH.md
+	// A2, adopted: input to whisper-cli is a server-produced normalized WAV,
+	// so a non-timeout failure is most plausibly environment/config).
+	whisperFailure := fmt.Errorf("convert: %w", fmt.Errorf("audio: whisper-cli: %w", errors.New("exit status 1: failed to load model")))
+	if isAudioTerminal(whisperFailure) {
+		t.Fatal("expected isAudioTerminal(non-timeout whisper-cli failure) = false (transient default)")
+	}
+
+	if isAudioTerminal(errors.New("dial tcp: connection refused")) {
+		t.Fatal("expected isAudioTerminal(transient network error) = false")
 	}
 }
