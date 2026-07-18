@@ -104,6 +104,11 @@ services:
       DOCUMENT_ENGINE_TIMEOUT: "300s"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these unconditionally
+      # in EVERY process -- must be identical across all 7 queue.NewClient()-
+      # constructing services (RTF-measured, 32-03-SUMMARY.md).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       STORAGE_TTL: "168h"
       METRICS_ADDR: "127.0.0.1:9090"
       # WEBHOOK_ALLOW_PRIVATE_IPS / WEBHOOK_ALLOW_INSECURE_HTTP: deliberately
@@ -145,6 +150,11 @@ services:
       DOCUMENT_ENGINE_TIMEOUT: "300s"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these unconditionally
+      # in EVERY process -- must be identical across all 7 queue.NewClient()-
+      # constructing services (RTF-measured, 32-03-SUMMARY.md).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -182,9 +192,22 @@ services:
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
       WEBHOOK_PRESIGN_TTL: "6h"
       RECONCILER_QUEUED_STALE_AFTER: "90s"
-      RECONCILER_ACTIVE_STALE_AFTER: "5m"
+      # Restored to the Phase-31 code default (was a stale Phase-16 "5m"
+      # override) -- MUST stay strictly above every AUDIO_ENGINE_TIMEOUT
+      # below, or the reconciler recovers still-running audio jobs,
+      # reopening the T-03-10 double-processing race (32-03-SUMMARY.md).
+      RECONCILER_ACTIVE_STALE_AFTER: "15m"
       RECONCILER_SWEEP_INTERVAL: "1m"
       RECONCILER_MAX_RECOVERIES: "3"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these
+      # unconditionally in EVERY process -- must be identical across all 7
+      # queue.NewClient()-constructing services (RTF-measured,
+      # 32-03-SUMMARY.md). webhook-worker previously omitted ALL
+      # engine-class MAX_RETRY/TIMEOUT vars; this phase closes the gap for
+      # AUDIO_* only (DOCUMENT_*/HTML_* omission here is pre-existing and
+      # out of scope).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   webhook-worker-2:
@@ -212,9 +235,22 @@ services:
       WEBHOOK_SIGNING_SECRET: "dev-only-change-me-in-real-deploys"
       WEBHOOK_PRESIGN_TTL: "6h"
       RECONCILER_QUEUED_STALE_AFTER: "90s"
-      RECONCILER_ACTIVE_STALE_AFTER: "5m"
+      # Restored to the Phase-31 code default (was a stale Phase-16 "5m"
+      # override) -- MUST stay strictly above every AUDIO_ENGINE_TIMEOUT
+      # below, or the reconciler recovers still-running audio jobs,
+      # reopening the T-03-10 double-processing race (32-03-SUMMARY.md).
+      RECONCILER_ACTIVE_STALE_AFTER: "15m"
       RECONCILER_SWEEP_INTERVAL: "1m"
       RECONCILER_MAX_RECOVERIES: "3"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these
+      # unconditionally in EVERY process -- must be identical across all 7
+      # queue.NewClient()-constructing services (RTF-measured,
+      # 32-03-SUMMARY.md). webhook-worker previously omitted ALL
+      # engine-class MAX_RETRY/TIMEOUT vars; this phase closes the gap for
+      # AUDIO_* only (DOCUMENT_*/HTML_* omission here is pre-existing and
+      # out of scope).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   document-worker:
@@ -256,6 +292,11 @@ services:
       DOCUMENT_MAX_RETRY: "3"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these unconditionally
+      # in EVERY process -- must be identical across all 7 queue.NewClient()-
+      # constructing services (RTF-measured, 32-03-SUMMARY.md).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       VERAPDF_TIMEOUT: "60s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
@@ -296,6 +337,11 @@ services:
       ENGINE_TIMEOUT: "120s"
       DOCUMENT_MAX_RETRY: "3"
       DOCUMENT_ENGINE_TIMEOUT: "300s"
+      # IN-02: queue.NewClient() derives audioUniqueTTL from these unconditionally
+      # in EVERY process -- must be identical across all 7 queue.NewClient()-
+      # constructing services (RTF-measured, 32-03-SUMMARY.md).
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
       METRICS_ADDR: "127.0.0.1:9090"
     # /dev/shm sizing as a belt-and-suspenders compensating control
     # alongside the --disable-dev-shm-usage argv flag (D-09/Pitfall C) --
