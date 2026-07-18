@@ -1149,6 +1149,70 @@ func assertDownloadIsImage(t *testing.T, downloadURL, wantFormat string) {
 	}
 }
 
+// TestAudioConversionE2E drives the audio engine (whisper.cpp) happy path
+// through the LIVE pipeline: multipart upload -> poll to done -> presigned
+// download -> non-empty transcript check -> a signed webhook arrives
+// (AUD-06/AUD-07 SC2, Phase 32), mirroring TestImageConversionE2E's shape
+// for the fourth (and final v1.7) engine class. Uses jfk.wav (already
+// committed at internal/convert/testdata/audio/jfk.wav, reused here via a
+// copy into internal/e2e/testdata/ per the existing per-suite
+// fixture-duplication convention -- e2e's testdata/ is its own directory,
+// distinct from internal/convert/testdata/).
+func TestAudioConversionE2E(t *testing.T) {
+	cfg := e2eSetup(t)
+	apiKey := provisionClient(t)
+
+	data, err := os.ReadFile(filepath.Join("testdata", "jfk.wav"))
+	if err != nil {
+		t.Fatalf("read fixture jfk.wav: %v", err)
+	}
+
+	callbackURL, received := startWebhookReceiver(t, cfg.webhookHost)
+
+	jobID := postJob(t, cfg.baseURL, apiKey, "jfk.wav", data, "txt", callbackURL, "")
+
+	// Generous bound: whisper.cpp cold start (model load) in a fresh
+	// container plus real transcription time -- mirrors the document/html
+	// engines' 5-minute cold-start allowance, NOT the image engine's tighter
+	// 2-minute bound (audio's per-job cost is closer to document/html's than
+	// to libvips' near-instant resize).
+	body := pollUntilDone(t, cfg.baseURL, apiKey, jobID, 5*time.Minute)
+
+	downloadURL, _ := body["download_url"].(string)
+	if downloadURL == "" {
+		t.Fatalf("job %s done but download_url missing/empty: %v", jobID, body)
+	}
+	assertDownloadIsNonEmptyTranscript(t, downloadURL)
+
+	assertSignedWebhook(t, received, jobID)
+}
+
+// assertDownloadIsNonEmptyTranscript fetches the presigned transcript URL
+// and asserts non-empty content -- NOT an exact-string match (Pitfall 9,
+// .planning/research/PITFALLS.md: ASR output is this project's first
+// genuinely non-deterministic engine output; ONLY structural/non-empty
+// assertions belong in this test, content/substring checks are the unit
+// test suite's job per 30-RESEARCH.md's "Anti-Patterns to Avoid").
+func assertDownloadIsNonEmptyTranscript(t *testing.T, downloadURL string) {
+	t.Helper()
+	resp, err := downloadClient().Get(downloadURL)
+	if err != nil {
+		t.Fatalf("GET download_url: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		t.Fatalf("GET download_url status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read download body: %v", err)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		t.Fatalf("downloaded transcript is empty")
+	}
+}
+
 // TestQueueDepthMetricRelocationE2E is the live half of D-03 (KEDA-01, Phase
 // 27 Plan 01): it proves the octoconv_queue_depth collector relocation
 // (Task 1) against a live compose stack, BEFORE any k8s work. The runtime
