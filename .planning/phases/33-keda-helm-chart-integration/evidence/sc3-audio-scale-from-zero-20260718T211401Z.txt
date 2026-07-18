@@ -1,0 +1,96 @@
+# Phase 33 audio scale-from-zero event-timeline evidence -- run 20260718T211401Z
+# audio_job_id=535cce58-04f4-4013-a728-088b789b08b4 audio_pod=audio-worker-5d966cc5d7-l9tcr
+#
+# CAVEAT (Open Question 2, RESOLVED): image-pull is expected to be ~= 0
+# on OrbStack's shared Docker store, since the audio-worker image is
+# already present locally (imagePullPolicy IfNotPresent, a pre-built
+# :dev/:local tag) before this gate runs. A genuine registry-backed
+# 650MB cold pull is unmeasurable locally and is deferred to a
+# real-registry environment. If Pulling->Pulled below is near-zero,
+# THAT is the measured evidence answering SC3 for THIS environment.
+read_ts=2026-07-18T21:15:19Z pod=audio-worker-5d966cc5d7-l9tcr ADDED phase=Running ready=false
+read_ts=2026-07-18T21:15:22Z pod=audio-worker-5d966cc5d7-l9tcr MODIFIED phase=Running ready=false
+read_ts=2026-07-18T21:15:22Z pod=audio-worker-5d966cc5d7-l9tcr MODIFIED phase=Running ready=true
+
+# Full kubectl describe pod (human-readable narrative)
+Name:             audio-worker-5d966cc5d7-l9tcr
+Namespace:        octoconv
+Priority:         0
+Service Account:  default
+Node:             orbstack/192.168.139.2
+Start Time:       Sun, 19 Jul 2026 00:15:16 +0300
+Labels:           app.kubernetes.io/component=audio-worker
+                  app.kubernetes.io/instance=octoconv
+                  app.kubernetes.io/managed-by=Helm
+                  app.kubernetes.io/name=octoconv
+                  app.kubernetes.io/part-of=octoconv
+                  octoconv.io/tier=app
+                  pod-template-hash=5d966cc5d7
+Annotations:      <none>
+Status:           Running
+IP:               192.168.194.4
+IPs:
+  IP:           192.168.194.4
+Controlled By:  ReplicaSet/audio-worker-5d966cc5d7
+Containers:
+  audio-worker:
+    Container ID:   docker://ca1071185919e7768fc59d34017f8130079619a67390119129d3983ee7c48ff6
+    Image:          octoconv-audio-worker:dev
+    Image ID:       docker://sha256:d57f4b64fd7ce2d24fe093275cce5c2f7c4829352d6cf5db81ed484d114c0385
+    Port:           9090/TCP (metrics)
+    Host Port:      0/TCP (metrics)
+    State:          Running
+      Started:      Sun, 19 Jul 2026 00:15:17 +0300
+    Ready:          True
+    Restart Count:  0
+    Limits:
+      cpu:     2
+      memory:  1Gi
+    Requests:
+      cpu:      2
+      memory:   1Gi
+    Liveness:   http-get http://:9090/metrics delay=0s timeout=1s period=10s #success=1 #failure=6
+    Readiness:  http-get http://:9090/metrics delay=0s timeout=1s period=5s #success=1 #failure=3
+    Startup:    http-get http://:9090/metrics delay=0s timeout=1s period=5s #success=1 #failure=24
+    Environment Variables from:
+      octoconv-config  ConfigMap  Optional: false
+      octoconv-secret  Secret     Optional: false
+    Environment:       <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-fllrc (ro)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True 
+  Initialized                 True 
+  Ready                       True 
+  ContainersReady             True 
+  PodScheduled                True 
+Volumes:
+  kube-api-access-fllrc:
+    Type:                    Projected (a volume that contains injected data from multiple sources)
+    TokenExpirationSeconds:  3607
+    ConfigMapName:           kube-root-ca.crt
+    Optional:                false
+    DownwardAPI:             true
+QoS Class:                   Guaranteed
+Node-Selectors:              <none>
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                             node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type    Reason     Age   From               Message
+  ----    ------     ----  ----               -------
+  Normal  Scheduled  8s    default-scheduler  Successfully assigned octoconv/audio-worker-5d966cc5d7-l9tcr to orbstack
+  Normal  Pulled     8s    kubelet            spec.containers{audio-worker}: Container image "octoconv-audio-worker:dev" already present on machine
+  Normal  Created    8s    kubelet            spec.containers{audio-worker}: Created container: audio-worker
+  Normal  Started    8s    kubelet            spec.containers{audio-worker}: Started container audio-worker
+
+# Extracted event timestamps (real .firstTimestamp, not relative 'age')
+event_Scheduled_ts=null
+event_Pulling_ts=
+event_Pulled_ts=2026-07-18T21:15:17Z
+event_Created_ts=2026-07-18T21:15:17Z
+event_Started_ts=2026-07-18T21:15:17Z
+
+# Deltas (seconds) -- orchestration time vs image-pull time separation
+pull_duration_s=unavailable (no Pulling/Pulled event -- image already present locally, imagePullPolicy IfNotPresent)
+created_to_started_s=0
