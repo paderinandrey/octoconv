@@ -18,6 +18,16 @@ func TestCgroupCPULimit(t *testing.T) {
 		{"unlimited quota falls back", "max 100000", 0, false},
 		{"garbage falls back", "garbage", 0, false},
 		{"empty falls back", "", 0, false},
+		// WR-01: cpu.max fields are kernel-written integers; float-ish
+		// shapes ParseFloat would have accepted must fall back, never
+		// reaching whisper-cli's -t ("Inf" previously => MaxInt64).
+		{"Inf quota falls back", "Inf 100000", 0, false},
+		{"NaN quota falls back", "NaN 100000", 0, false},
+		{"scientific quota falls back", "1e300 100000", 0, false},
+		{"negative quota falls back", "-200000 100000", 0, false},
+		{"zero quota falls back", "0 100000", 0, false},
+		{"zero period falls back", "200000 0", 0, false},
+		{"negative period falls back", "200000 -100000", 0, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

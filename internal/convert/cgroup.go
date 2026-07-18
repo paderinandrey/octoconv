@@ -23,7 +23,11 @@ import (
 // still run whisper-cli with at least one thread. "max" in the first field
 // means the cgroup has no CPU quota (unlimited); the caller must fall back
 // (e.g. to runtime.NumCPU()) rather than trying to size --threads to an
-// unbounded budget. Any other unparseable shape also falls back.
+// unbounded budget. Any other unparseable shape also falls back. Both
+// fields are parsed as base-10 integers (the only shape the kernel writes)
+// and must be positive -- float-ish shapes ("Inf", "NaN", negatives,
+// scientific notation) that strconv.ParseFloat would accept are rejected,
+// so no such value can ever reach whisper-cli's -t flag (WR-01).
 func parseCPUMax(s string) (int, bool) {
 	fields := strings.Fields(s)
 	if len(fields) != 2 {
@@ -32,12 +36,12 @@ func parseCPUMax(s string) (int, bool) {
 	if fields[0] == "max" {
 		return 0, false
 	}
-	quota, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
+	quota, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || quota <= 0 {
 		return 0, false
 	}
-	period, err := strconv.ParseFloat(fields[1], 64)
-	if err != nil || period == 0 {
+	period, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || period <= 0 {
 		return 0, false
 	}
 	n := int(quota / period) // floor, not ceil -- see doc comment above
