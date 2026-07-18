@@ -59,10 +59,15 @@ type fakeStorage struct {
 	uploaded    bool
 	contentType string
 	presigned   string
+	// uploadedBytes captures the full stream s.storage.Upload received, so
+	// tests can assert byte-for-byte integrity (T-31-02: the SniffAudio
+	// truncation trap must never drop the leading bytes of an audio upload).
+	uploadedBytes []byte
 }
 
 func (f *fakeStorage) Upload(_ context.Context, _ string, r io.Reader, _ int64, contentType string) error {
-	_, _ = io.Copy(io.Discard, r)
+	b, _ := io.ReadAll(r)
+	f.uploadedBytes = b
 	f.uploaded = true
 	f.contentType = contentType
 	return nil
@@ -75,6 +80,7 @@ type fakeQueue struct {
 	enqueuedImage    uuid.UUID
 	enqueuedDocument uuid.UUID
 	enqueuedHTML     uuid.UUID
+	enqueuedAudio    uuid.UUID
 }
 
 func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
@@ -89,6 +95,11 @@ func (f *fakeQueue) EnqueueDocumentConvert(_ context.Context, id uuid.UUID) erro
 
 func (f *fakeQueue) EnqueueHTMLConvert(_ context.Context, id uuid.UUID) error {
 	f.enqueuedHTML = id
+	return nil
+}
+
+func (f *fakeQueue) EnqueueAudioConvert(_ context.Context, id uuid.UUID) error {
+	f.enqueuedAudio = id
 	return nil
 }
 
@@ -1872,5 +1883,129 @@ func TestCreateJob_PresetHTMLOptsResolved(t *testing.T) {
 	}
 	if q.enqueuedHTML != repo.createdID {
 		t.Errorf("enqueuedHTML = %s, want %s", q.enqueuedHTML, repo.createdID)
+	}
+}
+
+// --- audio engine tests (Plan 03: AUD-05) ---
+
+// audioMP3Fixture reads the real fixture with a large ID3v2 tag, shared with
+// internal/convert's own SniffAudio tests. Its whole size sits comfortably
+// under mp3PeekLen (512 KiB) AND the 1 MiB newTestServer MaxUploadBytes
+// default, so the entire file is read by SniffAudio's io.ReadFull peek in
+// one shot.
+func audioMP3Fixture(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("../convert/testdata/audio/sample-id3.mp3")
+	if err != nil {
+		t.Fatalf("read audio fixture: %v", err)
+	}
+	return data
+}
+
+// TestCreateJob_AudioDetectedAndAccepted proves an mp3 upload with a large
+// ID3v2 tag is detected by SniffAudio, routed to engine "audio", enqueued via
+// EnqueueAudioConvert (and NONE of the other three queues), and -- the
+// regression a naive "content validation passed" assertion would NOT catch
+// (T-31-02) -- the object handed to storage.Upload is byte-identical to the
+// uploaded file, proving SniffAudio was chained off `rest` and not `file`
+// (which would have silently dropped the first sniffLen=12 bytes).
+func TestCreateJob_AudioDetectedAndAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	data := audioMP3Fixture(t)
+	body, ct := multipartBody(t, "in.mp3", "txt", data)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if !store.uploaded {
+		t.Fatal("must upload a valid mp3 upload")
+	}
+	if store.contentType != "audio/mpeg" {
+		t.Errorf("contentType = %q, want audio/mpeg", store.contentType)
+	}
+	if !bytes.Equal(store.uploadedBytes, data) {
+		t.Fatalf("stored object (%d bytes) != uploaded bytes (%d bytes) -- SniffAudio must chain off `rest`, not `file` (T-31-02 truncation trap)", len(store.uploadedBytes), len(data))
+	}
+	if repo.created == nil {
+		t.Fatal("must create job for a valid mp3 -> txt conversion")
+	}
+	if repo.created.SourceFormat != "mp3" || repo.created.TargetFormat != "txt" {
+		t.Errorf("job format = %s -> %s, want mp3 -> txt", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if repo.created.Engine != "audio" {
+		t.Errorf("job Engine = %q, want audio", repo.created.Engine)
+	}
+	if queue.enqueuedAudio != repo.createdID {
+		t.Errorf("enqueuedAudio = %s, want %s", queue.enqueuedAudio, repo.createdID)
+	}
+	if queue.enqueuedHTML != uuid.Nil {
+		t.Errorf("enqueuedHTML = %s, want uuid.Nil (mp3 upload must never touch the html queue)", queue.enqueuedHTML)
+	}
+	if queue.enqueuedDocument != uuid.Nil {
+		t.Errorf("enqueuedDocument = %s, want uuid.Nil (mp3 upload must never touch the document queue)", queue.enqueuedDocument)
+	}
+	if queue.enqueuedImage != uuid.Nil {
+		t.Errorf("enqueuedImage = %s, want uuid.Nil (mp3 upload must never touch the image queue)", queue.enqueuedImage)
+	}
+}
+
+// TestCreateJob_AudioOptsAccepted proves an audio job carrying
+// {"language":"ru"} opts is accepted via the dedicated EngineAudio opts case
+// (ParseAudioOpts) rather than being rejected as an invalid DocOpts (T-31-04)
+// -- the confirmed opts mis-routing bug this plan closes.
+func TestCreateJob_AudioOptsAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBodyWithOpts(t, "in.mp3", "txt", audioMP3Fixture(t), `{"language":"ru"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (audio opts must be validated via ParseAudioOpts, not rejected as DocOpts); body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.Opts["language"] != "ru" {
+		t.Errorf("CreateParams.Opts = %+v, want language=ru", repo.created)
+	}
+	if queue.enqueuedAudio != repo.createdID {
+		t.Errorf("enqueuedAudio = %s, want %s", queue.enqueuedAudio, repo.createdID)
+	}
+}
+
+// TestCreateJob_AudioOptsRejectedForWrongLanguage proves ParseAudioOpts's
+// closed language allowlist is actually enforced through the API path (not
+// silently bypassed), mirroring the HTML/Doc opts-applicability tests'
+// discipline.
+func TestCreateJob_AudioOptsRejectedForWrongLanguage(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.mp3", "txt", audioMP3Fixture(t), `{"language":"zz"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must never run for an unsupported language")
 	}
 }

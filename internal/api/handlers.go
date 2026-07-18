@@ -265,6 +265,24 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if detected == "" {
+		// AUD-05: mp3/wav/m4a/ogg content detection, placed LAST (after the
+		// OLE-CFB check, before the final fail-closed 422 below) because
+		// mp3PeekLen=512KiB is the most expensive buffer of the whole chain --
+		// ordering it last means a non-audio upload never pays for it.
+		// CRITICAL: chained off `rest` (Sniff's re-stitched full-file-from-
+		// byte-0 reader), NOT `file` -- file's sequential cursor has already
+		// advanced past Sniff's first sniffLen=12 bytes, and SniffAudio
+		// re-stitches its OWN rest from whatever reader it's given. Passing
+		// `file` here instead would silently drop the first 12 bytes of every
+		// audio upload at s.storage.Upload below (T-31-02). No source gate --
+		// SniffAudio self-identifies from magic bytes, matching the
+		// unconditional ZIP/OLE-CFB detection shape above.
+		if audioDetected, audioRest, aerr := convert.SniffAudio(rest); aerr == nil && audioDetected != "" {
+			detected = audioDetected
+			rest = audioRest
+		}
+	}
+	if detected == "" {
 		// D-02: no known signature matches — reject rather than let the
 		// (untrustworthy) extension win. D-08: scoped internal/* logging
 		// exception for this rejection, tagged with the resolved client.
@@ -372,6 +390,26 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 		var normalizedRaw []byte
 		switch engine {
+		case convert.EngineAudio:
+			audioOpts, err := convert.ParseAudioOpts([]byte(rawOpts))
+			if err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+				return
+			}
+			if err := convert.ValidateAudioApplicability(engine, detected, target, audioOpts); err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+				return
+			}
+			// D-08: persist the normalized struct, never the raw client
+			// bytes -- round-trip through json.Marshal so only the
+			// validated enum value ever reaches storage.
+			normalizedRaw, err = json.Marshal(audioOpts)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
 		case convert.EngineHTML:
 			htmlOpts, err := convert.ParseHTMLOpts([]byte(rawOpts))
 			if err != nil {
@@ -492,6 +530,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		enqueueErr = s.queue.EnqueueDocumentConvert(ctx, createdID)
 	case convert.EngineHTML:
 		enqueueErr = s.queue.EnqueueHTMLConvert(ctx, createdID)
+	case convert.EngineAudio:
+		enqueueErr = s.queue.EnqueueAudioConvert(ctx, createdID)
 	default:
 		// Fail closed: an engine class with no known queue must never be
 		// silently dropped (T-11-02). EngineFor above only ever returns a

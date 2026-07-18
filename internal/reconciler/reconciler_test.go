@@ -97,6 +97,8 @@ type fakeEnqueuer struct {
 	documentCalls      []uuid.UUID
 	enqueueHTMLErr     error
 	htmlCalls          []uuid.UUID
+	enqueueAudioErr    error
+	audioCalls         []uuid.UUID
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
@@ -125,6 +127,13 @@ func (f *fakeEnqueuer) EnqueueHTMLConvert(ctx context.Context, id uuid.UUID) err
 	defer f.mu.Unlock()
 	f.htmlCalls = append(f.htmlCalls, id)
 	return f.enqueueHTMLErr
+}
+
+func (f *fakeEnqueuer) EnqueueAudioConvert(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.audioCalls = append(f.audioCalls, id)
+	return f.enqueueAudioErr
 }
 
 // imageCallIDs returns a locked snapshot copy of imageCalls — used by the
@@ -162,6 +171,15 @@ func (f *fakeEnqueuer) htmlCallIDs() []uuid.UUID {
 	defer f.mu.Unlock()
 	out := make([]uuid.UUID, len(f.htmlCalls))
 	copy(out, f.htmlCalls)
+	return out
+}
+
+// audioCallIDs returns a locked snapshot copy of audioCalls.
+func (f *fakeEnqueuer) audioCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.audioCalls))
+	copy(out, f.audioCalls)
 	return out
 }
 
@@ -249,6 +267,75 @@ func TestSweepRoutesHTMLJobsToHTMLQueue(t *testing.T) {
 	}
 	if len(store.markFailedCalls) != 0 {
 		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+// TestSweepRoutesAudioJobsToAudioQueue proves a stranded engine="audio" job
+// routes to EnqueueAudioConvert and NONE of the other three Enqueue* methods
+// (AUD-05 T-31-09: sweep() must no longer fail-closed-default an audio job).
+func TestSweepRoutesAudioJobsToAudioQueue(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "audio"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.audioCalls) != 1 || enq.audioCalls[0] != id {
+		t.Fatalf("EnqueueAudioConvert calls = %+v, want [%s]", enq.audioCalls, id)
+	}
+	if len(enq.imageCalls) != 0 {
+		t.Fatalf("EnqueueImageConvert should not be called for an audio job, got %d calls", len(enq.imageCalls))
+	}
+	if len(enq.documentCalls) != 0 {
+		t.Fatalf("EnqueueDocumentConvert should not be called for an audio job, got %d calls", len(enq.documentCalls))
+	}
+	if len(enq.htmlCalls) != 0 {
+		t.Fatalf("EnqueueHTMLConvert should not be called for an audio job, got %d calls", len(enq.htmlCalls))
+	}
+	if store.requeueStaleCalls != 1 {
+		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
+	}
+	if len(store.markFailedCalls) != 0 {
+		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+// TestSweepAudioZeroSpuriousRecoveryUnderRepeatedTicks is the SC4 proof: with
+// enqueueAudioErr = asynq.ErrDuplicateTask (the AudioUniqueTTL lock still
+// live for a long in-flight audio job), repeated sweep ticks against the SAME
+// stranded-looking job must fire ZERO reconciler_recovery events --
+// RequeueStale is never called and recoveryCount never increments across any
+// tick. This proves AudioUniqueTTL + asynq.ErrDuplicateTask (Plan 01), not
+// the staleness threshold, is the actual safety property preventing
+// double-processing of a slow whisper-cli transcription.
+func TestSweepAudioZeroSpuriousRecoveryUnderRepeatedTicks(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "audio"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{enqueueAudioErr: asynq.ErrDuplicateTask}
+	s := NewSweeper(store, enq, testConfig())
+
+	for tick := 0; tick < 5; tick++ {
+		s.sweep(context.Background())
+
+		if store.requeueStaleCalls != 0 {
+			t.Fatalf("tick %d: RequeueStale should NEVER be called while AudioUniqueTTL's lock is live, got %d calls", tick, store.requeueStaleCalls)
+		}
+		if store.recoveryCount[id] != 0 {
+			t.Fatalf("tick %d: recovery count = %d, want 0 (zero spurious reconciler_recovery events, SC4)", tick, store.recoveryCount[id])
+		}
+		if len(store.markFailedCalls) != 0 {
+			t.Fatalf("tick %d: MarkFailed should not be called, got %d calls", tick, len(store.markFailedCalls))
+		}
+	}
+	if len(enq.audioCalls) != 5 {
+		t.Fatalf("EnqueueAudioConvert calls = %d, want 5 (one attempted enqueue per tick)", len(enq.audioCalls))
 	}
 }
 
