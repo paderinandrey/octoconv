@@ -159,7 +159,11 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
   2. A whisper-stage timeout on already-duration-validated audio is classified transient (asynq retries with fresh CPU), while an ffmpeg-stage failure on malformed input is terminal — verified by a stage-aware classifier unit test (Key Decision: stage-aware split, not blanket-terminal).
   3. `AudioUniqueTTL` is derived fresh from the audio timeout/retry budget (never reused from image/document) and a dedicated test asserts it strictly exceeds the worst-case audio attempt lifetime, closing the T-03-10 double-processing race.
   4. `RECONCILER_ACTIVE_STALE_AFTER` for audio is set above `AUDIO_ENGINE_TIMEOUT` and a test confirms repeated sweep ticks against a long in-flight audio job fire zero spurious `reconciler_recovery` events.
-**Plans**: TBD
+**Plans**: 4 plans
+- [ ] 31-01-PLAN.md — Foundation: 0006 migration, AudioConverter registration, AUDIO_MODEL_PATH setter, audio queue/task/AudioUniqueTTL + client + TestAudioUniqueTTL (SC3)
+- [ ] 31-02-PLAN.md — Worker: stage-aware isAudioTerminal (Key Decision 1) + HandleAudioConvert, duration-guard splice (T-30-08/IN-02), IN-01 file: hardening, NewHandler threading, stale-after default raise
+- [ ] 31-03-PLAN.md — API + reconciler routing: SniffAudio splice (byte-integrity), opts + enqueue switch cases, both Enqueuer interfaces, reconciler routing + SC4 zero-recovery test
+- [ ] 31-04-PLAN.md — cmd/audio-worker entry point + .env.example audio block + live E2E (queued → active → done)
 
 ### Phase 32: Containerization & Local E2E + RTF Gate
 **Goal**: A running audio-worker container in docker-compose passes a full live E2E, with `AUDIO_ENGINE_TIMEOUT` sized from a measured realtime-factor go/no-go gate rather than a copied constant.
