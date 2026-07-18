@@ -248,6 +248,39 @@ func TestIsAudioTerminal(t *testing.T) {
 		t.Fatal("expected isAudioTerminal(ErrAudioDurationExceeded) = true")
 	}
 
+	// Deterministic ffprobe-stage failures -> terminal (WR-01): the duration
+	// guard's probe runs BEFORE ffmpeg on the same untrusted input, so a
+	// corrupt-but-sniffable file (valid magic bytes, broken container
+	// metadata) must fail terminal at the very first probe, not burn the
+	// AUDIO_MAX_RETRY + reconciler budget. Shapes mirror audioduration.go's
+	// actual wrapping: ProbeDuration wraps runCommand errors with
+	// "ffprobe: %w" (yielding exec.go's "ffprobe failed:" on a non-zero
+	// exit) and parseProbedDuration emits the unparseable/implausible
+	// rejections directly.
+	ffprobeTerminalCases := []error{
+		errors.New("ffprobe: ffprobe failed: exit status 1: moov atom not found"),
+		errors.New(`ffprobe: unparseable duration "N/A": strconv.ParseFloat: parsing "N/A": invalid syntax`),
+		errors.New("ffprobe: implausible duration -1"),
+	}
+	for _, err := range ffprobeTerminalCases {
+		if !isAudioTerminal(err) {
+			t.Fatalf("expected isAudioTerminal(%v) = true (deterministic ffprobe-stage failure, WR-01)", err)
+		}
+	}
+
+	// ffprobe environment/timeout shapes -> transient (WR-01's documented
+	// split): a missing binary or a probe-ctx expiry is a deployment/load
+	// problem, not an input problem — retry may succeed.
+	ffprobeTransientCases := []error{
+		fmt.Errorf("ffprobe: %w", errors.New(`start ffprobe: exec: "ffprobe": executable file not found in $PATH`)),
+		fmt.Errorf("ffprobe: %w", fmt.Errorf("ffprobe killed: %w", context.DeadlineExceeded)),
+	}
+	for _, err := range ffprobeTransientCases {
+		if isAudioTerminal(err) {
+			t.Fatalf("expected isAudioTerminal(%v) = false (ffprobe environment/timeout shape stays transient, WR-01)", err)
+		}
+	}
+
 	// Shared base classifier fallthrough.
 	sharedCases := []error{
 		fmt.Errorf("no converter for %s -> %s", "mp3", "txt"),

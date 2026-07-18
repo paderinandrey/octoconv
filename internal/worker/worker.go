@@ -244,8 +244,16 @@ func isHTMLTerminal(err error) bool {
 // isDocumentTerminal's/isHTMLTerminal's timeoutIsTerminal delegation.
 // ErrAudioDurationExceeded (the EnforceMaxDuration guard spliced into
 // process(), T-30-08/IN-02) always classifies terminal — a declared-duration
-// rejection can never succeed on retry. Every other error (S3/Postgres
-// blips, no-converter, non-timeout whisper-cli failures) falls through to
+// rejection can never succeed on retry. Deterministic ffprobe-stage failures
+// (the duration guard's own probe: a non-zero ffprobe exit on broken
+// container metadata, or an unparseable/implausible reported duration) are
+// likewise terminal (WR-01) — the probe runs BEFORE ffmpeg on the same
+// untrusted input, so a parse-level probe failure is the same
+// malformed/adversarial-input signal Key Decision 1 already classifies
+// terminal at the ffmpeg stage; ffprobe environment/timeout shapes ("start
+// ffprobe:", "ffprobe killed:") deliberately stay transient. Every other
+// error (S3/Postgres blips, no-converter, non-timeout whisper-cli failures,
+// ffprobe environment/timeout shapes) falls through to
 // the shared isTerminal classifier — per 31-RESEARCH.md A2 (Claude's
 // Discretion, adopted): the input to whisper-cli is a server-produced
 // normalized WAV, so a non-timeout whisper-cli failure is most plausibly
@@ -266,6 +274,25 @@ func isAudioTerminal(err error) bool {
 	if strings.Contains(msg, "audio: ffmpeg:") {
 		// Key Decision 1: ffmpeg-stage failure OR timeout is a
 		// malformed/adversarial input signal — terminal, no retry.
+		return true
+	}
+	if strings.Contains(msg, "ffprobe: unparseable duration") ||
+		strings.Contains(msg, "ffprobe: implausible duration") ||
+		strings.Contains(msg, "ffprobe failed:") {
+		// WR-01: duration-guard (ffprobe) stage. The probe runs BEFORE ffmpeg
+		// on the same untrusted input, so a deterministic probe-level failure
+		// (non-zero exit on malformed container metadata — exec.go's
+		// "ffprobe failed:" shape — or audioduration.go's
+		// unparseable/implausible duration rejections) is the same
+		// malformed/adversarial-input signal Key Decision 1 already
+		// classifies terminal at the ffmpeg stage: a corrupt-but-sniffable
+		// file must fail terminal at the very first probe instead of burning
+		// the AUDIO_MAX_RETRY + reconciler budget. Environment/timeout shapes
+		// are deliberately NOT matched here and stay transient: "start
+		// ffprobe:" (binary missing/unrunnable — a deployment problem, not an
+		// input problem) and "ffprobe killed:" (probe-ctx expiry under
+		// enforceAudioGuardBeforeConvert's short probe bound — a hung probe
+		// on a loaded host may succeed on retry).
 		return true
 	}
 	return isTerminal(err)
