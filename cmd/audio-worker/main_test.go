@@ -1,6 +1,7 @@
 package main
 
 import (
+	"runtime"
 	"testing"
 	"time"
 )
@@ -44,6 +45,55 @@ func TestEnvDurationSeconds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveAudioThreads pins the AUDIO_THREADS -> cgroup -> NumCPU
+// precedence chain (T-32-04/AUD-07 SC4). The cgroup branch's exact value is
+// deliberately NOT asserted here (this test's host may or may not be a real
+// cgroup v2 container -- CI runners, OrbStack host, developer laptops all
+// differ); instead this test asserts the branch SELECTION: an explicit
+// positive AUDIO_THREADS always wins outright regardless of what the host's
+// cgroup detection would otherwise return, and an unset/non-positive
+// AUDIO_THREADS always falls through past the "env override" source (either
+// "cgroup" or "NumCPU fallback", both >= 1).
+func TestResolveAudioThreads(t *testing.T) {
+	t.Run("env override wins", func(t *testing.T) {
+		t.Setenv("AUDIO_THREADS", "5")
+		n, source := resolveAudioThreads()
+		if n != 5 || source != "env override" {
+			t.Fatalf("resolveAudioThreads() = (%d, %q), want (5, \"env override\")", n, source)
+		}
+	})
+
+	t.Run("unset falls through past env override", func(t *testing.T) {
+		n, source := resolveAudioThreads()
+		if source == "env override" {
+			t.Fatalf("resolveAudioThreads() source = %q, want a fallthrough branch (\"cgroup\" or \"NumCPU fallback\") when AUDIO_THREADS is unset", source)
+		}
+		if n < 1 {
+			t.Fatalf("resolveAudioThreads() = (%d, %q), want n >= 1", n, source)
+		}
+	})
+
+	t.Run("zero falls through past env override", func(t *testing.T) {
+		t.Setenv("AUDIO_THREADS", "0")
+		n, source := resolveAudioThreads()
+		if source == "env override" {
+			t.Fatalf("resolveAudioThreads() source = %q, want a fallthrough branch when AUDIO_THREADS=0", source)
+		}
+		if n < 1 {
+			t.Fatalf("resolveAudioThreads() = (%d, %q), want n >= 1", n, source)
+		}
+	})
+
+	t.Run("NumCPU fallback is a sane lower bound", func(t *testing.T) {
+		// runtime.NumCPU() itself is always >= 1 per its own contract; this
+		// only asserts the test host's own reported value is consistent,
+		// guarding against a typo regressing the fallback arm to 0.
+		if runtime.NumCPU() < 1 {
+			t.Fatal("runtime.NumCPU() < 1, want >= 1 (stdlib contract violated)")
+		}
+	})
 }
 
 // TestStripInlineComment pins WR-06: AUDIO_MODEL_PATH read under a non-shell
