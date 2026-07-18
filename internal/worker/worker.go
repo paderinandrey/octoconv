@@ -777,6 +777,19 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 	return nil
 }
 
+// audioProbeTimeout is the SHORT bound the duration guard's ffprobe
+// invocation runs under (WR-02/T-30-03): ProbeDuration's contract is explicit
+// that its ctx must never carry the full AUDIO_ENGINE_TIMEOUT budget —
+// ffprobe reads container metadata and is near-instant even for large files,
+// while a hung/adversarial probe (the guard's own threat model: it runs on
+// untrusted input BEFORE any decode) would otherwise consume the entire
+// whole-attempt deadline on every retry. A probe-ctx expiry surfaces as
+// "ffprobe: ffprobe killed: context deadline exceeded", which isAudioTerminal
+// deliberately classifies TRANSIENT (WR-01's documented split — a hung probe
+// on a loaded host may succeed on retry), so this bound converts a
+// full-budget hang into a fast, retryable failure.
+const audioProbeTimeout = 15 * time.Second
+
 // enforceAudioGuardBeforeConvert splices the T-30-08/IN-02 declared-duration
 // guard in front of the engine's Convert call, gated on engine ==
 // convert.EngineAudio (image/document/html jobs never pay the ffprobe cost
@@ -791,7 +804,13 @@ func (h *Handler) HandleWebhookDeliver(ctx context.Context, t *asynq.Task) error
 // terminal.
 func enforceAudioGuardBeforeConvert(ctx context.Context, engine, inPath string, audioMaxDuration time.Duration, convertFn func() error) error {
 	if engine == convert.EngineAudio {
-		if err := convert.EnforceMaxDuration(ctx, inPath, audioMaxDuration); err != nil {
+		// WR-02/T-30-03: derive a short probe-only deadline from the
+		// whole-attempt ctx rather than passing it through — ProbeDuration
+		// must never run under the full AUDIO_ENGINE_TIMEOUT budget.
+		probeCtx, cancel := context.WithTimeout(ctx, audioProbeTimeout)
+		err := convert.EnforceMaxDuration(probeCtx, inPath, audioMaxDuration)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}

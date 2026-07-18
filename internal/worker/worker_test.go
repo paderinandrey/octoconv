@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -355,5 +356,42 @@ func TestEnforceAudioGuardBeforeConvert_IN02(t *testing.T) {
 	}
 	if !convertCalled {
 		t.Fatal("convertFn was not called for a non-audio engine — gate must be job.Engine == convert.EngineAudio only")
+	}
+}
+
+// TestEnforceAudioGuardProbeExpiryTransient_WR02 pins the WR-01/WR-02
+// interaction: when the guard's probe ctx expires (here forced via an
+// already-expired parent — audioProbeTimeout derives from the parent, so the
+// child deadline is expired too), the resulting "ffprobe: ffprobe killed:"
+// shape must classify TRANSIENT via isAudioTerminal (a hung probe is a
+// load/environment problem, not an input problem — retry may succeed), and
+// convertFn must never run. Gated on a real ffprobe binary since
+// EnforceMaxDuration shells out to it — there is no fake seam.
+func TestEnforceAudioGuardProbeExpiryTransient_WR02(t *testing.T) {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not on PATH; see Plan 01's \"Local Development Setup\"")
+	}
+
+	fixture := filepath.Join("..", "convert", "testdata", "audio", "jfk.wav")
+	convertCalled := false
+
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	err := enforceAudioGuardBeforeConvert(expiredCtx, convert.EngineAudio, fixture, 4*time.Hour, func() error {
+		convertCalled = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("enforceAudioGuardBeforeConvert(expired probe ctx) = nil, want ffprobe-killed error")
+	}
+	if !strings.Contains(err.Error(), "ffprobe killed:") {
+		t.Fatalf("enforceAudioGuardBeforeConvert(expired probe ctx) error = %v, want the \"ffprobe killed:\" ctx-expiry shape", err)
+	}
+	if convertCalled {
+		t.Fatal("convertFn ran despite the probe failing — guard must run strictly before Convert")
+	}
+	if isAudioTerminal(err) {
+		t.Fatalf("isAudioTerminal(%v) = true, want false (probe-ctx expiry stays transient, WR-01/WR-02)", err)
 	}
 }
