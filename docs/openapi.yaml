@@ -83,9 +83,14 @@ components:
           type: string
           enum: [queued]
         opts:
-          type: object
-          description: Present only when normalized opts were applied (echoes them back).
-          additionalProperties: true
+          description: >-
+            Present only when normalized opts were applied (echoes them
+            back). Shape depends on the target engine — AudioOpts for
+            audio-engine jobs, an arbitrary engine-specific object otherwise.
+          anyOf:
+            - $ref: "#/components/schemas/AudioOpts"
+            - type: object
+              additionalProperties: true
       required: [job_id, status]
 
     JobStatus:
@@ -102,8 +107,13 @@ components:
           type: string
           enum: [queued, active, done, failed]
         opts:
-          type: object
-          additionalProperties: true
+          description: >-
+            Shape depends on the target engine — AudioOpts for audio-engine
+            jobs, an arbitrary engine-specific object otherwise.
+          anyOf:
+            - $ref: "#/components/schemas/AudioOpts"
+            - type: object
+              additionalProperties: true
         download_url:
           type: string
           format: uri
