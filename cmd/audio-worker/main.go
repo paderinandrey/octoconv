@@ -62,7 +62,7 @@ func main() {
 		qc,
 		nil, // signingSecret — webhook-only; HandleAudioConvert never reads it
 		0,   // presignTTL — webhook-only; HandleAudioConvert never reads it
-		envDuration("AUDIO_MAX_DURATION_SECONDS", 4*time.Hour),
+		envDurationSeconds("AUDIO_MAX_DURATION_SECONDS", 4*time.Hour),
 	)
 
 	// D-04/D-05: the stale-job sweep loop runs solely in cmd/webhook-worker
@@ -155,6 +155,32 @@ func envDuration(key string, def time.Duration) time.Duration {
 			return d
 		}
 	}
+	return def
+}
+
+// envDurationSeconds reads a duration env var whose _SECONDS-suffixed name
+// invites a bare integer-seconds value (WR-05): time.ParseDuration alone
+// REJECTS "14400" ("missing unit in duration"), and the codebase-wide
+// silent-fallback pattern would then quietly replace an operator's explicit
+// ceiling with the default — unacceptable for a fail-closed resource guard.
+// Accepts, in order: Go duration syntax ("4h", "14400s") and bare
+// non-negative integer seconds ("14400"), both tolerant of a trailing inline
+// comment via firstField (same convention as envDuration/envInt). A set-but-
+// unparseable value is logged before falling back to def — this env guards a
+// security ceiling, so the fallback must never be silent.
+func envDurationSeconds(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f := firstField(v)
+	if d, err := time.ParseDuration(f); err == nil {
+		return d
+	}
+	if sec, err := strconv.Atoi(f); err == nil && sec >= 0 {
+		return time.Duration(sec) * time.Second
+	}
+	log.Printf("⚠️ %s=%q is neither a duration (\"4h\") nor bare integer seconds (\"14400\"); using default %v", key, f, def)
 	return def
 }
 
