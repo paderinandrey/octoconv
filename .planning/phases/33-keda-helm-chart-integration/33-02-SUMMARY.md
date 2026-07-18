@@ -89,6 +89,12 @@ None - no external service configuration required. This script requires a live O
 - `scripts/keda-audio-loadproof.sh` is ready for Plan 03's live execution once the chart templates from Plan 33-01 (`deployment-audio-worker.yaml`, `scaledobject-audio.yaml`, ConfigMap/values additions) land — the script references the `audio-worker` Deployment and its label selector, which do not yet exist in the chart as of this plan's completion (Plan 33-01 runs concurrently in a separate worktree).
 - No blockers for Plan 03. The script is self-verifying only at the syntax/static level here; actual SC3 proof (the live scale-from-zero event timeline) is produced when Plan 03 runs it against a real cluster.
 
+## Self-Check: PASSED
+
+- FOUND: scripts/keda-audio-loadproof.sh
+- FOUND commit: 84bb3da
+- FOUND: .planning/phases/33-keda-helm-chart-integration/33-02-SUMMARY.md
+
 ---
 *Phase: 33-keda-helm-chart-integration*
 *Completed: 2026-07-18*
