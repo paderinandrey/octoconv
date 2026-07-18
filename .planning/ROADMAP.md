@@ -107,7 +107,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 
 - [x] **Phase 29: v1.6 Hardening Tail** - Close WR-01 empty-PromQL semantics, OPER-01 compose passthrough + live gate, gate-tooling warnings, K8S-02 direct-dial recheck (completed 2026-07-17)
 - [x] **Phase 30: Audio Engine Foundation** - Standalone AudioConverter (ffmpeg→whisper-cli), magic-bytes (ID3v2-aware) + duration validation, txt/srt/vtt/json Pairs + JSON timestamp contract, validated AudioOpts (completed 2026-07-18)
-- [ ] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing
+- [x] **Phase 31: Queue, Worker & Routing Integration** - audio queue + cmd/audio-worker, stage-aware timeout classification, AudioUniqueTTL, API/reconciler engine routing (completed 2026-07-18)
 - [ ] **Phase 32: Containerization & Local E2E + RTF Gate** - Dockerfile.audio-worker (whisper.cpp from source, baked model), compose service, CI bake, measured RTF→timeout go/no-go
 - [ ] **Phase 33: KEDA/Helm Chart Integration** - audio-worker Deployment + ScaledObject, QueueAudio collector, scale-from-zero load-proof with baked model
 
@@ -163,7 +163,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 - [x] 31-01-PLAN.md — Foundation: 0006 migration, AudioConverter registration, AUDIO_MODEL_PATH setter, audio queue/task/AudioUniqueTTL + client + TestAudioUniqueTTL (SC3)
 - [x] 31-02-PLAN.md — Worker: stage-aware isAudioTerminal (Key Decision 1) + HandleAudioConvert, duration-guard splice (T-30-08/IN-02), IN-01 file: hardening, NewHandler threading, stale-after default raise
 - [x] 31-03-PLAN.md — API + reconciler routing: SniffAudio splice (byte-integrity), opts + enqueue switch cases, both Enqueuer interfaces, reconciler routing + SC4 zero-recovery test
-- [ ] 31-04-PLAN.md — cmd/audio-worker entry point + .env.example audio block + live E2E (queued → active → done)
+- [x] 31-04-PLAN.md — cmd/audio-worker entry point + .env.example audio block + live E2E (queued → active → done)
 
 ### Phase 32: Containerization & Local E2E + RTF Gate
 **Goal**: A running audio-worker container in docker-compose passes a full live E2E, with `AUDIO_ENGINE_TIMEOUT` sized from a measured realtime-factor go/no-go gate rather than a copied constant.
@@ -221,7 +221,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
-| 31. Queue, Worker & Routing Integration | v1.7 | 3/4 | In Progress|  |
+| 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete   | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
 
