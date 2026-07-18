@@ -1,0 +1,895 @@
+# OctoConv API — OpenAPI 3.1. Import into Yaak: Import -> OpenAPI -> docs/openapi.yaml
+openapi: 3.1.0
+info:
+  title: OctoConv API
+  version: "1.0.0"
+  description: >-
+    Internal asynchronous file-conversion service. Clients upload a file via
+    this HTTP API; the server stores it in S3-compatible storage, queues a
+    conversion job, and a worker runs the appropriate engine (libvips for
+    images, LibreOffice for documents, headless Chromium for HTML, and
+    whisper.cpp for audio transcription). This spec describes the API exactly
+    as implemented — every path, status code, and error body matches
+    internal/api/*.go and internal/auth/*.go verbatim.
+servers:
+  - url: "{base_url}"
+    description: OctoConv API server. Defaults to the local docker-compose deployment.
+    variables:
+      base_url:
+        default: "http://localhost:8090"
+        description: Scheme + host + port the API listens on (API_ADDR).
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Health
+    description: Unauthenticated liveness/dependency probe.
+  - name: Jobs
+    description: Create and poll asynchronous conversion jobs.
+  - name: Formats
+    description: Discover supported (source, target) conversion pairs.
+  - name: Presets
+    description: Caller-owned (scope=user) named conversion presets.
+  - name: System
+    description: >-
+      Operator-only system-scope (scope=system) presets, visible read-only to
+      every client via the merged /v1/presets view. Every operation here
+      requires the caller's client_id to be in OPERATOR_CLIENT_IDS; a
+      non-operator caller receives the same uniform 404 as any unknown
+      preset — never a 403.
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: >-
+        The header value must be the literal scheme token "ApiKey" (matched
+        case-insensitively) followed by a single space and the raw API key,
+        e.g. `Authorization: ApiKey <key>`. This cannot be expressed with
+        `type: http, scheme: apikey` (not a valid OpenAPI security scheme and
+        does not import cleanly), so the "ApiKey " prefix is documented here
+        instead of modeled structurally. A missing/malformed header returns
+        401 {"error":"missing or malformed Authorization header"}; an
+        unknown or revoked key returns 401 {"error":"invalid api key"}.
+
+  parameters:
+    PresetName:
+      name: name
+      in: path
+      required: true
+      description: Preset name.
+      schema:
+        type: string
+
+  schemas:
+    Error:
+      type: object
+      description: Uniform error body returned by every non-2xx response.
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    JobCreated:
+      type: object
+      description: Response body for a successfully accepted POST /v1/jobs.
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+        opts:
+          description: >-
+            Present only when normalized opts were applied (echoes them
+            back). Shape depends on the target engine — AudioOpts for
+            audio-engine jobs, an arbitrary engine-specific object otherwise.
+          anyOf:
+            - $ref: "#/components/schemas/AudioOpts"
+            - type: object
+              additionalProperties: true
+      required: [job_id, status]
+
+    JobStatus:
+      type: object
+      description: >-
+        Response body for GET /v1/jobs/{id}. download_url is present only
+        when status=done; error_code/error_message are present only when
+        status=failed (either or both may be set).
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, active, done, failed]
+        opts:
+          description: >-
+            Shape depends on the target engine — AudioOpts for audio-engine
+            jobs, an arbitrary engine-specific object otherwise.
+          anyOf:
+            - $ref: "#/components/schemas/AudioOpts"
+            - type: object
+              additionalProperties: true
+        download_url:
+          type: string
+          format: uri
+          description: Presigned S3 GET URL for the first output. Only present when status=done.
+        error_code:
+          type: string
+          description: >-
+            Machine-readable failure reason. Known value: "duration_exceeded"
+            (audio jobs whose declared duration exceeds the configured
+            maximum). Only present when status=failed.
+        error_message:
+          type: string
+          description: Human-readable failure detail. Only present when status=failed.
+      required: [job_id, status]
+
+    AudioOpts:
+      type: object
+      description: Engine-specific opts for audio (whisper) conversions.
+      properties:
+        language:
+          type: string
+          enum: [auto, en, ru, es, fr, de]
+          description: Omit for whisper's own language auto-detection.
+        translate:
+          type: boolean
+      additionalProperties: false
+
+    FormatsResponse:
+      type: object
+      description: >-
+        Registry-derived capability map: for each engine class, every
+        (source, target) pair it currently supports.
+      properties:
+        engines:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              pairs:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string
+                  minItems: 2
+                  maxItems: 2
+      required: [engines]
+
+    PresetRequest:
+      type: object
+      description: Write DTO for POST/PUT preset endpoints. No scope/client_id field — those are always server-derived.
+      properties:
+        name:
+          type: string
+        target_format:
+          type: string
+        options:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+      required: [name, target_format]
+
+    PresetResponse:
+      type: object
+      description: Read DTO for preset endpoints. Never carries id or client_id.
+      properties:
+        name:
+          type: string
+        version:
+          type: integer
+        scope:
+          type: string
+          enum: [user, system]
+          description: "\"system\" presets are visible but read-only via the /v1/presets surface."
+        operation:
+          type: string
+        target_format:
+          type: string
+        options:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required: [name, version, scope, operation, target_format, is_active, created_at, updated_at]
+
+    Health:
+      type: object
+      description: Per-dependency reachability probe result.
+      properties:
+        postgres:
+          type: string
+          enum: [ok, unreachable]
+        redis:
+          type: string
+          enum: [ok, unreachable]
+        s3:
+          type: string
+          enum: [ok, unreachable]
+        status:
+          type: string
+          enum: [ok, degraded]
+      required: [postgres, redis, s3, status]
+
+  responses:
+    Unauthorized:
+      description: Missing/malformed Authorization header, or an unknown/revoked API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource does not exist, is owned by a different client, or (for /v1/system/presets) the caller is not an operator.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooManyRequests:
+      description: Per-IP or per-client rate limit exceeded.
+      headers:
+        Retry-After:
+          description: Seconds until the rate-limit window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unexpected server-side failure (storage, database, or queue).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Liveness and dependency reachability probe
+      description: Read-only ping of Postgres, Redis, and S3/MinIO. Public — no API key required.
+      security: []
+      responses:
+        "200":
+          description: All dependencies reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                postgres: ok
+                redis: ok
+                s3: ok
+                status: ok
+        "503":
+          description: One or more dependencies unreachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example:
+                postgres: ok
+                redis: unreachable
+                s3: ok
+                status: degraded
+
+  /v1/jobs:
+    post:
+      tags: [Jobs]
+      operationId: createJob
+      summary: Create a conversion job
+      description: >-
+        Uploads a file and queues an asynchronous conversion job. Either
+        (target [+ opts]) or preset must be supplied, never both. The
+        declared filename extension must match the file's actual (magic-byte
+        detected) content, or the request is rejected.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to convert.
+                target:
+                  type: string
+                  description: Destination format, e.g. "json", "pdf", "webp". Mutually exclusive with preset.
+                opts:
+                  type: string
+                  description: >-
+                    A JSON-encoded string of engine-keyed options (e.g.
+                    AudioOpts for audio conversions). Mutually exclusive with
+                    preset.
+                callback_url:
+                  type: string
+                  format: uri
+                  description: Optional SSRF-validated webhook URL notified on completion.
+                preset:
+                  type: string
+                  description: Named server preset supplying target_format and opts. Mutually exclusive with target/opts.
+              required: [file]
+              additionalProperties: false
+            examples:
+              audioTranscriptRussian:
+                summary: Audio transcript (WAV -> plain text, Russian)
+                value:
+                  file: jfk.wav
+                  target: txt
+                  opts: '{"language":"ru"}'
+              audioTimestampedJSON:
+                summary: Audio transcript (WAV -> JSON with word/segment timestamps)
+                value:
+                  file: jfk.wav
+                  target: json
+      responses:
+        "202":
+          description: Job accepted and queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobCreated"
+              examples:
+                queued:
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: queued
+                queuedWithOpts:
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: queued
+                    opts:
+                      language: ru
+        "400":
+          description: >-
+            Invalid multipart form / missing file / missing target format /
+            cannot determine source format from filename / invalid
+            callback_url / invalid preset name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: File exceeds the configured size limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: file exceeds size limit
+        "422":
+          description: >-
+            Semantically rejected: unsupported conversion pair, declared
+            format mismatch, unrecognized content, invalid/inapplicable
+            opts, unknown or inactive preset, macro-carrying document,
+            password-protected or legacy Office file, or a declared
+            size/dimension over the configured limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/jobs/{id}:
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: Get job status (and download URL once done)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job found and visible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+              examples:
+                queued:
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: queued
+                done:
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: done
+                    download_url: "https://minio.example/results/3fa85f64.../0-jfk.txt?X-Amz-Signature=..."
+                failedDurationExceeded:
+                  value:
+                    job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                    status: failed
+                    error_code: duration_exceeded
+                    error_message: declared audio duration exceeds the configured maximum
+        "400":
+          description: Invalid job id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: invalid job id
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Job not found (also returned for a job owned by a different client).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: job not found
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/formats:
+    get:
+      tags: [Formats]
+      operationId: listFormats
+      summary: List supported (source, target) conversion pairs per engine class
+      responses:
+        "200":
+          description: Registry-derived capability map.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FormatsResponse"
+              example:
+                engines:
+                  image:
+                    pairs:
+                      - [png, jpg]
+                      - [png, webp]
+                      - [png, heic]
+                      - [png, tiff]
+                      - [jpg, png]
+                      - [jpg, webp]
+                      - [jpg, heic]
+                      - [jpg, tiff]
+                      - [webp, png]
+                      - [webp, jpg]
+                      - [webp, heic]
+                      - [webp, tiff]
+                      - [heic, png]
+                      - [heic, jpg]
+                      - [heic, webp]
+                      - [heic, tiff]
+                      - [tiff, png]
+                      - [tiff, jpg]
+                      - [tiff, webp]
+                      - [tiff, heic]
+                  document:
+                    pairs:
+                      - [docx, pdf]
+                      - [odt, pdf]
+                      - [xlsx, pdf]
+                      - [ods, pdf]
+                      - [pptx, pdf]
+                      - [odp, pdf]
+                      - [docx, odt]
+                      - [odt, docx]
+                      - [xlsx, ods]
+                      - [ods, xlsx]
+                      - [pptx, odp]
+                      - [odp, pptx]
+                  html:
+                    pairs:
+                      - [html, pdf]
+                  audio:
+                    pairs:
+                      - [mp3, txt]
+                      - [mp3, srt]
+                      - [mp3, vtt]
+                      - [mp3, json]
+                      - [wav, txt]
+                      - [wav, srt]
+                      - [wav, vtt]
+                      - [wav, json]
+                      - [m4a, txt]
+                      - [m4a, srt]
+                      - [m4a, vtt]
+                      - [m4a, json]
+                      - [ogg, txt]
+                      - [ogg, srt]
+                      - [ogg, vtt]
+                      - [ogg, json]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/presets:
+    post:
+      tags: [Presets]
+      operationId: createPreset
+      summary: Create a caller-owned (scope=user) preset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetRequest"
+      responses:
+        "201":
+          description: Preset created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name, or invalid JSON body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: A preset with this name already exists for the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: preset already exists
+        "422":
+          description: Invalid opts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    get:
+      tags: [Presets]
+      operationId: listPresets
+      summary: List the caller's effective presets (own + merged system presets)
+      parameters:
+        - name: all
+          in: query
+          required: false
+          description: When "true", includes inactive preset versions.
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "200":
+          description: Effective preset list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PresetResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/presets/{name}:
+    get:
+      tags: [Presets]
+      operationId: showPreset
+      summary: Get the effective preset for {name} (user override wins over same-name system preset)
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      responses:
+        "200":
+          description: Preset found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    put:
+      tags: [Presets]
+      operationId: updatePreset
+      summary: Update the caller's OWN (scope=user) preset named {name} (bumps version)
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetRequest"
+      responses:
+        "200":
+          description: Preset updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name, or invalid JSON body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >-
+            Preset not found. Also returned for a preset owned by a
+            different client, or a same-name system-scope preset (write
+            access to system presets is not exposed on this route).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: preset not found
+        "422":
+          description: Invalid opts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      tags: [Presets]
+      operationId: deactivatePreset
+      summary: Soft-deactivate the caller's OWN (scope=user) preset named {name}
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      responses:
+        "200":
+          description: Preset deactivated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  is_active:
+                    type: boolean
+                    enum: [false]
+                required: [name, is_active]
+              example:
+                name: my-preset
+                is_active: false
+        "400":
+          description: Invalid preset name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/system/presets:
+    post:
+      tags: [System]
+      operationId: createSystemPreset
+      summary: Create a system-scope (scope=system) preset — operator only
+      description: Operator-only. A non-operator caller receives 404, never 403.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetRequest"
+      responses:
+        "201":
+          description: System preset created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name, or invalid JSON body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Caller is not an authorized operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: preset not found
+        "409":
+          description: A system preset with this name already exists.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: Invalid opts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    get:
+      tags: [System]
+      operationId: listSystemPresets
+      summary: List every system-scope preset — operator only
+      description: Operator-only. A non-operator caller receives 404, never 403.
+      parameters:
+        - name: all
+          in: query
+          required: false
+          description: When "true", includes inactive preset versions.
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "200":
+          description: System preset list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PresetResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Caller is not an authorized operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /v1/system/presets/{name}:
+    get:
+      tags: [System]
+      operationId: showSystemPreset
+      summary: Get a system-scope preset by name — operator only
+      description: Operator-only. A non-operator caller receives 404, never 403.
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      responses:
+        "200":
+          description: System preset found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Not found, or caller is not an authorized operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    put:
+      tags: [System]
+      operationId: updateSystemPreset
+      summary: Update a system-scope preset by name (bumps version) — operator only
+      description: Operator-only. A non-operator caller receives 404, never 403.
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresetRequest"
+      responses:
+        "200":
+          description: System preset updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresetResponse"
+        "400":
+          description: Invalid preset name, or invalid JSON body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Not found, or caller is not an authorized operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: Invalid opts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      tags: [System]
+      operationId: deactivateSystemPreset
+      summary: Soft-deactivate a system-scope preset by name — operator only
+      description: Operator-only. A non-operator caller receives 404, never 403.
+      parameters:
+        - $ref: "#/components/parameters/PresetName"
+      responses:
+        "200":
+          description: System preset deactivated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  is_active:
+                    type: boolean
+                    enum: [false]
+                required: [name, is_active]
+        "400":
+          description: Invalid preset name.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Not found, or caller is not an authorized operator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
