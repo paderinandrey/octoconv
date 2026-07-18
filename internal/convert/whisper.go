@@ -8,6 +8,24 @@ import (
 	"strings"
 )
 
+// audioModelPath stores the AUDIO_MODEL_PATH budget for every subsequent
+// AudioConverter.model() call. It is set once at process startup via
+// SetAudioModelPath -- mirroring effectiveVeraPDFTimeout's threading
+// (verapdf.go), this package never reads AUDIO_MODEL_PATH (or any env var)
+// directly; env-only-in-main is the enforced convention. Zero value (empty
+// string) means "never set", in which case model() falls through to
+// defaultAudioModelPath.
+var audioModelPath string
+
+// SetAudioModelPath stores the AUDIO_MODEL_PATH override for every
+// subsequent AudioConverter.model() call. Call exactly once at process
+// startup, BEFORE the asynq server starts consuming tasks (single write
+// before any concurrent reader -- no mutex needed, mirroring
+// SetVeraPDFTimeout's contract in verapdf.go).
+func SetAudioModelPath(path string) {
+	audioModelPath = path
+}
+
 // audioSourceFormats and audioTargetFormats are the two disjoint sets whose
 // cross-product Pairs() advertises (AUD-02). Unlike libvips's imageFormats
 // (a single set converted to itself, minus identity pairs), source and
@@ -30,9 +48,9 @@ const defaultAudioModelPath = "/models/ggml-base.bin"
 // AudioConverter transcribes audio by shelling out to `ffmpeg` (normalize)
 // then `whisper-cli` (transcribe) -- the fourth engine class (EngineAudio),
 // after image (libvips), document (LibreOffice), and html (chromium). It is
-// deliberately NOT registered into convert.Default by this plan -- see
-// converters.go's comment and the SUMMARY for the registration-deferral
-// rationale (Phase 31 wires the live API/queue/worker routing).
+// registered into convert.Default by converters.go (Phase 31, AUD-05), which
+// makes EngineFor/Classes()/Lookup audio-aware; the model path itself is
+// resolved at runtime via model(), never at registration time.
 type AudioConverter struct {
 	// modelPath overrides defaultAudioModelPath when non-empty, letting
 	// tests inject a local model path (e.g. Plan 01's
@@ -43,10 +61,17 @@ type AudioConverter struct {
 }
 
 // model returns the model path to pass to whisper-cli's -m flag: the
-// injected modelPath when set, else the server-constant default.
+// injected modelPath when set (test-only), else the process-wide
+// audioModelPath set via SetAudioModelPath (AUDIO_MODEL_PATH, resolved once
+// at cmd/*-worker/main.go startup), else the server-constant default. This
+// 3-tier fallback is a strict superset of the prior 2-tier behavior -- no
+// existing test-injection path changes.
 func (c AudioConverter) model() string {
 	if c.modelPath != "" {
 		return c.modelPath
+	}
+	if audioModelPath != "" {
+		return audioModelPath
 	}
 	return defaultAudioModelPath
 }

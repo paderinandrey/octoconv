@@ -6,6 +6,5 @@ func init() {
 	Default.Register(LibvipsConverter{})
 	Default.Register(LibreOfficeConverter{})
 	Default.Register(ChromiumConverter{})
-	// Future engines (one line each):
-	// Default.Register(FFmpegConverter{})
+	Default.Register(AudioConverter{})
 }

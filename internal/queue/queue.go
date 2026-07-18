@@ -21,18 +21,21 @@ const (
 	TypeWebhookDeliver  = "webhook:deliver"
 	TypeDocumentConvert = "document:convert"
 	TypeHTMLConvert     = "html:convert"
+	TypeAudioConvert    = "audio:convert"
 )
 
 // Queue names. asynq routes tasks to a queue per engine class so workers and
 // autoscaling can be scoped to a single class. QueueImage/QueueDocument/
-// QueueHTML are tied to convert.EngineImage/EngineDocument/EngineHTML (the
-// single source of truth for engine-class literals, DEBT-02) so queue names
-// cannot drift from the engine-class identifiers.
+// QueueHTML/QueueAudio are tied to convert.EngineImage/EngineDocument/
+// EngineHTML/EngineAudio (the single source of truth for engine-class
+// literals, DEBT-02) so queue names cannot drift from the engine-class
+// identifiers.
 const (
 	QueueImage    = convert.EngineImage
 	QueueWebhook  = "webhook"
 	QueueDocument = convert.EngineDocument
 	QueueHTML     = convert.EngineHTML
+	QueueAudio    = convert.EngineAudio
 )
 
 // ConvertPayload is the task payload. It carries only the job id — all task
@@ -115,6 +118,26 @@ func NewHTMLConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) 
 	}
 	return asynq.NewTask(TypeHTMLConvert, b,
 		asynq.Queue(QueueHTML),
+		asynq.MaxRetry(maxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
+}
+
+// NewAudioConvertTask builds an asynq task for an audio transcription job,
+// routed to the audio queue, bounded to maxRetry (AUDIO_MAX_RETRY), and
+// carrying a per-job asynq.Unique lock (uniqueTTL, see AudioUniqueTTL) so a
+// second enqueue for the same jobID while the first task/lock is still live
+// collides on the same uniqueness key and returns asynq.ErrDuplicateTask
+// instead of creating a second concurrent task — mirrors
+// NewDocumentConvertTask exactly; reuses ConvertPayload/ParseConvertPayload
+// (no new payload type needed, all job detail is re-read from Postgres).
+func NewAudioConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) (*asynq.Task, error) {
+	b, err := json.Marshal(ConvertPayload{JobID: jobID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal convert payload: %w", err)
+	}
+	return asynq.NewTask(TypeAudioConvert, b,
+		asynq.Queue(QueueAudio),
 		asynq.MaxRetry(maxRetry),
 		asynq.Unique(uniqueTTL),
 	), nil
@@ -271,6 +294,32 @@ func HTMLRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 	return htmlRetrySchedule[idx]
 }
 
+// audioRetrySchedule is the backoff schedule for audio transcription
+// retries: 5s, 15s, 30s — no jitter, mirroring documentRetrySchedule's/
+// htmlRetrySchedule's shape exactly (a defensible default: a transient
+// audio-pipeline failure — ffmpeg normalize or whisper-cli transcribe — should
+// still be retried a few times quickly, on the same cadence as the other
+// non-webhook engine classes).
+var audioRetrySchedule = []time.Duration{
+	5 * time.Second,
+	15 * time.Second,
+	30 * time.Second,
+}
+
+// AudioRetryDelay is an asynq RetryDelayFunc for the audio queue. Mirrors
+// DocumentRetryDelay's/HTMLRetryDelay's clamp-index-to-schedule-length shape
+// exactly — NOT WebhookRetryDelay's jittered shape.
+func AudioRetryDelay(n int, e error, t *asynq.Task) time.Duration {
+	idx := n
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(audioRetrySchedule) {
+		idx = len(audioRetrySchedule) - 1
+	}
+	return audioRetrySchedule[idx]
+}
+
 // RetryDelayFunc dispatches to a per-queue retry delay function based on the
 // task type. It fixes the confirmed defect where every queue silently
 // inherited WebhookRetryDelay via a single server-wide
@@ -288,6 +337,8 @@ func RetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 		return DocumentRetryDelay(n, e, t)
 	case TypeHTMLConvert:
 		return HTMLRetryDelay(n, e, t)
+	case TypeAudioConvert:
+		return AudioRetryDelay(n, e, t)
 	default:
 		return asynq.DefaultRetryDelayFunc(n, e, t)
 	}
@@ -409,6 +460,48 @@ func htmlBackoffSum(maxRetry int) time.Duration {
 // uniqueTTLSafetyMargin const verbatim — no html-specific margin constant.
 func HTMLUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + htmlBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
+// audioBackoffSum sums AudioRetryDelay(i) for i in [0, maxRetry) — the total
+// backoff time asynq spends waiting before each of maxRetry retries, clamped
+// to the last schedule entry once i reaches len(audioRetrySchedule). Mirrors
+// documentBackoffSum/htmlBackoffSum; safe to call AudioRetryDelay directly
+// since it has no jitter (same reasoning as documentBackoffSum's doc
+// comment).
+func audioBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		sum += AudioRetryDelay(i, nil, nil)
+	}
+	return sum
+}
+
+// AudioUniqueTTL derives the per-job asynq.Unique lock TTL for audio
+// transcription tasks from the actual retry budget (maxRetry, normally
+// AUDIO_MAX_RETRY) and the per-attempt bound (engineTimeout, normally
+// AUDIO_ENGINE_TIMEOUT), mirroring DocumentUniqueTTL's/HTMLUniqueTTL's
+// derivation exactly so the lock can never silently drift under asynq's true
+// worst-case retry lifetime if either env var changes later.
+//
+// Per the AudioUniqueTTL binding decision (STATE.md): this is DERIVED FRESH
+// from AUDIO_MAX_RETRY/AUDIO_ENGINE_TIMEOUT — it deliberately never reuses
+// ImageUniqueTTL/DocumentUniqueTTL/HTMLUniqueTTL's values, since audio's
+// per-attempt cost (ffmpeg normalize + whisper-cli transcribe, bounded by a
+// distinct AUDIO_ENGINE_TIMEOUT) is not comparable to any other engine
+// class's.
+//
+// Worst-case formula: (maxRetry+1) * engineTimeout + audioBackoffSum(maxRetry) + margin.
+// Same "(maxRetry+1) executions, not maxRetry" correction as
+// ImageUniqueTTL/DocumentUniqueTTL/HTMLUniqueTTL applies here. REUSES the
+// shared uniqueTTLSafetyMargin const verbatim — no audio-specific margin
+// constant.
+//
+// The TTL is DERIVED rather than a hardcoded constant deliberately: if
+// AUDIO_MAX_RETRY or AUDIO_ENGINE_TIMEOUT are later changed via env, the
+// margin scales with them automatically and cannot fall behind the real
+// retry lifetime.
+func AudioUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*engineTimeout + audioBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
 // webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter

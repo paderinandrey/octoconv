@@ -52,13 +52,27 @@ type Client struct {
 	// HTML_ENGINE_TIMEOUT via HTMLUniqueTTL — see its doc comment for the
 	// worst-case-lifetime derivation this TTL must always exceed.
 	htmlUniqueTTL time.Duration
+	// audioMaxRetry is the per-task MaxRetry budget for audio transcription
+	// tasks (AUDIO_MAX_RETRY, default 3 — mirrors documentMaxRetry's/
+	// htmlMaxRetry's bounded-lower-than-image reasoning).
+	audioMaxRetry int
+	// audioUniqueTTL is the per-job asynq.Unique lock TTL for audio
+	// transcription tasks, derived once at construction from audioMaxRetry
+	// and AUDIO_ENGINE_TIMEOUT via AudioUniqueTTL — see its doc comment for
+	// the worst-case-lifetime derivation this TTL must always exceed.
+	// Derived fresh, never reused from another engine class's TTL (per the
+	// AudioUniqueTTL binding decision, STATE.md).
+	audioUniqueTTL time.Duration
 }
 
 // NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
 // 4), ENGINE_TIMEOUT (default 120s — same env var the worker reads to bound
 // a conversion attempt), DOCUMENT_MAX_RETRY (default 3),
 // DOCUMENT_ENGINE_TIMEOUT (default 300s — Phase 9 D-01), HTML_MAX_RETRY
-// (default 3), and HTML_ENGINE_TIMEOUT (default 60s).
+// (default 3), HTML_ENGINE_TIMEOUT (default 60s), AUDIO_MAX_RETRY (default
+// 3), and AUDIO_ENGINE_TIMEOUT (default 600s — an [ASSUMED] placeholder;
+// Phase 32 re-derives this from real-time-factor measurement against the
+// pinned whisper-cli model).
 func NewClient() (*Client, error) {
 	opt, err := RedisOpt()
 	if err != nil {
@@ -70,6 +84,8 @@ func NewClient() (*Client, error) {
 	documentEngineTimeout := envDuration("DOCUMENT_ENGINE_TIMEOUT", 300*time.Second)
 	htmlMaxRetry := envInt("HTML_MAX_RETRY", 3)
 	htmlEngineTimeout := envDuration("HTML_ENGINE_TIMEOUT", 60*time.Second)
+	audioMaxRetry := envInt("AUDIO_MAX_RETRY", 3)
+	audioEngineTimeout := envDuration("AUDIO_ENGINE_TIMEOUT", 600*time.Second)
 	return &Client{
 		c:                 asynq.NewClient(opt),
 		imageMaxRetry:     imageMaxRetry,
@@ -79,6 +95,8 @@ func NewClient() (*Client, error) {
 		documentUniqueTTL: DocumentUniqueTTL(documentMaxRetry, documentEngineTimeout),
 		htmlMaxRetry:      htmlMaxRetry,
 		htmlUniqueTTL:     HTMLUniqueTTL(htmlMaxRetry, htmlEngineTimeout),
+		audioMaxRetry:     audioMaxRetry,
+		audioUniqueTTL:    AudioUniqueTTL(audioMaxRetry, audioEngineTimeout),
 	}, nil
 }
 
@@ -131,6 +149,18 @@ func (c *Client) EnqueueHTMLConvert(ctx context.Context, jobID uuid.UUID) error 
 	}
 	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
 		return fmt.Errorf("enqueue html convert %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// EnqueueAudioConvert puts an audio transcription job onto the audio queue.
+func (c *Client) EnqueueAudioConvert(ctx context.Context, jobID uuid.UUID) error {
+	task, err := NewAudioConvertTask(jobID, c.audioMaxRetry, c.audioUniqueTTL)
+	if err != nil {
+		return err
+	}
+	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
+		return fmt.Errorf("enqueue audio convert %s: %w", jobID, err)
 	}
 	return nil
 }
