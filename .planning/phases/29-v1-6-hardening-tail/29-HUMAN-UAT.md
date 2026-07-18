@@ -1,28 +1,28 @@
 ---
-status: partial
+status: resolved
 phase: 29-v1-6-hardening-tail
 source: [29-VERIFICATION.md]
 started: 2026-07-18
-updated: 2026-07-18
-disposition: approved-with-deferral (orchestrator, under operator standing "run all phases to completion" authorization)
+updated: 2026-07-19
+disposition: resolved via Phase 33 live re-run (deferral discharged; WR-05 residual empirically confirmed, accepted)
 ---
 
 ## Current Test
 
-[approved with deferral — see Gaps/disposition]
+[resolved — deferral discharged by Phase 33 live re-run, see result and Gaps]
 
 ## Tests
 
 ### 1. Live-run scripts/keda-load-proof.sh end-to-end against a fresh OrbStack cluster
 expected: gate exits 0 with (1) stale-pod-exclusion BUSY_POD selection landing on the live document-worker pod during SC3 (not a Terminating remnant); (2) D-09(1) download-status check rejecting a non-200 body; (3) `set -m; snapshotLoop &; set +m` making $SNAPSHOT_PID a process-group leader and `kill -- -$SNAPSHOT_PID` leaving zero orphaned `kubectl get pod -w` after exit
-result: deferred to Phase 33 (see Gaps) — additionally hardened by a deterministic pkill fallback (commit after 5440263)
+result: resolved — Phase 33 (33-03) re-ran the UNMODIFIED script live against a fresh cluster: SC1/SC2 (image burst 0→N→0) PASS; (3) watcher-kill confirmed live — `pgrep -f 'kubectl get pod'` empty post-exit, zero orphans; (1) BUSY_POD selection failed LOUD on the pre-existing kubectl v1.36.2 jsonpath defect (`deletionTimestamp==""` never matches an absent key) — this is exactly the WR-05 residual 29-REVIEW.md accepted ("failure direction is safe-loud"), now empirically confirmed; (2) not reached in the failed SC3 leg. Evidence: .planning/phases/33-keda-helm-chart-integration/evidence/keda-load-proof-rerun2-*.{log,csv,png}. Frozen script deliberately NOT modified; forward-fix of the jsonpath filter recommended for a future phase (33-SECURITY.md caveat).
 
 ## Summary
 
 total: 1
-passed: 0
+passed: 1
 issues: 0
-pending: 1 (deferred to Phase 33)
+pending: 0
 skipped: 0
 blocked: 0
 
