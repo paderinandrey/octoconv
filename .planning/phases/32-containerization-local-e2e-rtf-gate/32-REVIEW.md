@@ -21,7 +21,8 @@ findings:
   warning: 5
   info: 4
   total: 9
-status: issues_found
+status: fixes_applied
+fixed: 5
 ---
 
 # Phase 32: Code Review Report
@@ -44,6 +45,9 @@ No Critical findings. Five Warnings (parser robustness, a silent negative-ceilin
 ## Warnings
 
 ### WR-01: parseCPUMax accepts Inf/NaN/negative/scientific inputs; "Inf" yields (MaxInt64, true)
+
+**Status:** fixed
+**Resolution:** commit ee4dc95 — both cpu.max fields now parsed with `strconv.ParseInt` (base 10) plus `> 0` positivity checks; Inf/NaN/negative/scientific/zero shapes all fall back `(0, false)`. Test table extended with Inf, NaN, 1e300, negative-quota, zero-quota, zero-period, and negative-period cases.
 
 **File:** `internal/convert/cgroup.go:35-47`
 **Issue:** cgroup v2 `cpu.max` fields are integers, but `parseCPUMax` parses both fields with `strconv.ParseFloat`, which additionally accepts `"Inf"`, `"NaN"`, negatives, and scientific notation. Verified live with the exact function body:
@@ -73,6 +77,9 @@ And add table cases `{"zero period falls back", "200000 0", 0, false}`, `{"negat
 
 ### WR-02: envDurationSeconds silently accepts a negative Go-duration, producing a ceiling that terminally rejects every audio job
 
+**Status:** fixed
+**Resolution:** commit ee0d521 — ParseDuration branch now requires `d >= 0`; negative durations ("-5s", "-30m") fall through to the existing logged-warning default, consistent with the bare-integer branch's `sec >= 0`. Zero remains a valid explicit ceiling (pinned test unchanged). `TestEnvDurationSeconds` extended with "-5s" and "-30m" cases.
+
 **File:** `cmd/audio-worker/main.go:208-222`
 **Issue:** The bare-integer branch correctly rejects negatives (`sec >= 0`, pinned by the `"negative bare seconds falls back"` test case), but the `time.ParseDuration` branch runs first and happily returns negative values: `AUDIO_MAX_DURATION_SECONDS="-5s"` or `"-30m"` parses and is returned as a negative duration with **no warning** — the exact silent-fallback failure mode this function's own doc comment says is "unacceptable for a fail-closed resource guard." Downstream, `enforceAudioGuardBeforeConvert` → `EnforceMaxDuration` (`internal/convert/audioduration.go:102`) does `if d > max` with no non-positive-max guard, so any probed duration `d >= 0` exceeds a negative max: **every audio job is terminally rejected** with `ErrAudioDurationExceeded` (classified terminal, never retried). Fail-closed, so no data corruption — but a one-character typo (`-30m` vs `30m`) becomes a silent, total audio-engine outage with a misleading per-job error instead of the designed startup warning.
 **Fix:**
@@ -84,6 +91,9 @@ if d, err := time.ParseDuration(f); err == nil && d >= 0 {
 (letting negative durations fall through to the existing logged-warning fallback), plus a `{"negative duration falls back", "-5s", true, def}` case in `TestEnvDurationSeconds`.
 
 ### WR-03: whisper.cpp source pinned by mutable git tag, not commit hash — the compiled binary has no integrity anchor
+
+**Status:** fixed
+**Resolution:** commit c4cce9d — added `ARG WHISPER_COMMIT=f049fff95a089aa9969deb009cdd4892b3e74916` (the commit the lightweight v1.9.1 tag resolves to via `git ls-remote`, 2026-07-18); shallow tag clone kept for size, followed by `git checkout --detach "${WHISPER_COMMIT}"` and a `rev-parse HEAD` equality guard so a force-pushed tag fails the build. `docker build --check` clean; image rebuild lands with next compose/CI build.
 
 **File:** `Dockerfile.audio-worker:21-22`
 **Issue:** `git clone --depth 1 --branch v1.9.1 https://github.com/ggml-org/whisper.cpp.git` pins a **tag**, and git tags are mutable — a force-pushed `v1.9.1` silently changes every byte of the `whisper-cli` binary and shared libs baked into the runtime image. The Dockerfile's own comment invokes "pinned-tag discipline (verapdf/chromium/MinIO)" — but those are pre-built registry images where the tag is the only available pin; this is the repo's **only from-source build**, where a stronger, free pin exists. Notably the same RUN block treats HuggingFace's mutable `main` pointer as untrustworthy and SHA-256-pins the model — the source code compiled into the executable deserves at least the same treatment.
@@ -97,11 +107,17 @@ RUN git clone https://github.com/ggml-org/whisper.cpp.git /whisper \
 
 ### WR-04: RTF script's WORKDIR is dead — the cleanup trap removes an empty dir while the floor log leaks into host /tmp
 
+**Status:** fixed
+**Resolution:** commit 9d2017a — floor run's whisper output now redirects to `"$WORKDIR/floor_whisper.log"` (trap-cleaned), eliminating the host `/tmp` leak and making `WORKDIR` live again; its purpose documented at the declaration. `bash -n` clean.
+
 **File:** `scripts/audio-rtf-measure.sh:47-48,88`
 **Issue:** `WORKDIR=$(mktemp -d)` is created at line 47 and removed by the EXIT trap, but **never referenced anywhere else in the script** — all real work happens in `/tmp/work` inside the container. Meanwhile line 88 redirects the floor run's whisper output to `>/tmp/floor_whisper.log` on the **host**, which the trap does not clean: the artifact that was evidently meant to live in `$WORKDIR` leaks into host `/tmp` on every run, and the cleanup trap's `rm -rf "$WORKDIR"` deletes an always-empty directory. The trap's container-removal half (`docker rm -f`) is correct.
 **Fix:** `docker exec "$CONTAINER" whisper-cli ... >"$WORKDIR/floor_whisper.log" 2>&1 || true` — or drop `WORKDIR` entirely and write the log inside the container (`/tmp/work/floor_whisper.log`), where it dies with the container.
 
 ### WR-05: compose audio-worker has no stop_grace_period — the 752s asynq ShutdownTimeout is unreachable (SIGKILL at docker's 10s default)
+
+**Status:** fixed
+**Resolution:** commit 441d5ae — added `stop_grace_period: 762s` to the audio-worker service (752s ShutdownTimeout = AUDIO_ENGINE_TIMEOUT 742s + 10s, plus 10s margin), with the derivation documented in a compose comment tied to AUDIO_ENGINE_TIMEOUT. `docker compose config` renders it (12m42s). Sibling workers' pre-existing gap left as-is (out of finding scope).
 
 **File:** `docker-compose.yml:360-412`, `cmd/audio-worker/main.go:103-114`
 **Issue:** `cmd/audio-worker` deliberately sets `asynq.Config.ShutdownTimeout = AUDIO_ENGINE_TIMEOUT + 10s` (752s) so "a genuinely long in-flight whisper-cli transcription survives SIGTERM instead of being aborted+requeued" — but the compose service defines no `stop_grace_period`, so `docker compose stop/down/restart` sends SIGKILL **10 seconds** after SIGTERM (docker's default). The 752s graceful window is dead configuration under the only deployment this phase ships: any transcription longer than ~10s at shutdown is killed mid-flight, the job stays `active`, and recovery waits on the 15m reconciler sweep. The sibling workers share this gap (pre-existing), but audio has by far the longest engine budget, making the mismatch between the code's documented intent and the actual kill window largest here — and this phase authored both sides.
