@@ -101,9 +101,10 @@ func Sniff(r io.Reader) (detected string, rest io.Reader, err error) {
 // home for format->MIME mapping shared by internal/api (stored Content-Type,
 // D-06) and internal/worker (output Content-Type). Covers image formats
 // (libvips), document formats + their pdf conversion target (LibreOffice),
-// html + its pdf conversion target (chromium), and the four audio
-// transcription output targets (whisper, AUD-02) -- so every job type is
-// served with the same Content-Type correctness guarantee.
+// html + its pdf conversion target (chromium), and the audio engine's four
+// input formats plus its four transcription output targets (whisper,
+// AUD-02) -- so every job type is served with the same Content-Type
+// correctness guarantee.
 func MIMEType(format string) string {
 	switch NormalizeFormat(format) {
 	case "png":
@@ -132,6 +133,14 @@ func MIMEType(format string) string {
 		return "application/vnd.oasis.opendocument.presentation"
 	case "html":
 		return "text/html"
+	case "mp3":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "m4a":
+		return "audio/mp4"
+	case "ogg":
+		return "audio/ogg"
 	case "txt":
 		return "text/plain"
 	case "srt":

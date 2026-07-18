@@ -221,6 +221,22 @@ func TestAudioConverter_Contract(t *testing.T) {
 	if MIMEType("vtt") != "text/vtt" {
 		t.Errorf(`MIMEType("vtt") = %q, want "text/vtt"`, MIMEType("vtt"))
 	}
+
+	// The four audio INPUT formats must map to real audio MIME types --
+	// internal/api stores convert.MIMEType(detected) as the uploaded
+	// input's Content-Type, so an omission here silently degrades every
+	// audio upload to application/octet-stream (WR-04).
+	inputMIMEs := map[string]string{
+		"mp3": "audio/mpeg",
+		"wav": "audio/wav",
+		"m4a": "audio/mp4",
+		"ogg": "audio/ogg",
+	}
+	for format, want := range inputMIMEs {
+		if got := MIMEType(format); got != want {
+			t.Errorf("MIMEType(%q) = %q, want %q", format, got, want)
+		}
+	}
 }
 
 // TestWhisperArgs asserts the exact whisper-cli argv construction, in
