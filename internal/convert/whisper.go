@@ -120,6 +120,19 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 		return fmt.Errorf("audio: %w", err)
 	}
 
+	// Fail fast on an unsupported target BEFORE stage 1 runs: without this
+	// check, a caller bug (unrecognized/missing outPath extension) would
+	// burn a full ffmpeg decode plus a whisper-cli transcription -- the most
+	// expensive operation in the system -- only to fail at the final
+	// validateAudioOutput stat with a misleading error. Registry routing
+	// makes this unreachable in the wired flow, but Convert is exported and
+	// the sibling converters fail fast on their invalid-input paths.
+	targetFormat := NormalizeFormat(filepath.Ext(outPath))
+	outFlags := whisperOutputFlag(targetFormat)
+	if outFlags == nil {
+		return fmt.Errorf("audio: unsupported target format %q", targetFormat)
+	}
+
 	workDir := filepath.Dir(outPath) // caller's per-job workDir; already unique, already cleaned up
 	normPath := filepath.Join(workDir, "norm.wav")
 
@@ -133,14 +146,13 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 		return fmt.Errorf("audio: ffmpeg: %w", err)
 	}
 
-	// Stage 2: whisper-cli transcribe. targetFormat drives which output
-	// flag Pairs() advertised for this job; -of pins a deterministic
-	// output path (never rely on whisper-cli's default input-filename-
-	// based naming -- RESEARCH.md "Output file naming").
-	targetFormat := NormalizeFormat(filepath.Ext(outPath))
+	// Stage 2: whisper-cli transcribe. targetFormat (validated above) drives
+	// which output flag Pairs() advertised for this job; -of pins a
+	// deterministic output path (never rely on whisper-cli's default
+	// input-filename-based naming -- RESEARCH.md "Output file naming").
 	outBase := strings.TrimSuffix(outPath, filepath.Ext(outPath))
 	args := []string{"-m", c.model(), "-f", normPath, "-of", outBase}
-	args = append(args, whisperOutputFlag(targetFormat)...)
+	args = append(args, outFlags...)
 	// o.Language/o.Translate are already allowlist-validated
 	// (AudioOptsFromMap -> ParseAudioOpts) -- passed as discrete argv
 	// slice elements, never a shell string; runCommand never invokes a

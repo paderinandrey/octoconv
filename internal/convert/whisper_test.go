@@ -223,6 +223,30 @@ func TestAudioConverter_Contract(t *testing.T) {
 	}
 }
 
+// TestAudioConverter_UnsupportedTargetFailsFast asserts Convert rejects an
+// unsupported target extension BEFORE invoking any subprocess (WR-02): the
+// input path deliberately does not exist, so if ffmpeg were invoked the error
+// would be an "audio: ffmpeg:" failure instead of the unsupported-target
+// error, and no stage-1 scratch file may appear. Runs ungated (no binaries
+// required precisely because nothing may be executed).
+func TestAudioConverter_UnsupportedTargetFailsFast(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, out := range []string{"out.xyz", "out"} {
+		outPath := filepath.Join(dir, out)
+		err := (AudioConverter{}).Convert(context.Background(), filepath.Join(dir, "does-not-exist.wav"), outPath, nil)
+		if err == nil {
+			t.Fatalf("Convert(-> %s) = nil, want unsupported-target error", out)
+		}
+		if !strings.Contains(err.Error(), "unsupported target format") {
+			t.Errorf("Convert(-> %s) error = %q, want it to mention \"unsupported target format\" (fail fast, not a subprocess error)", out, err.Error())
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "norm.wav")); statErr == nil {
+			t.Errorf("Convert(-> %s) created norm.wav; stage 1 (ffmpeg) must not run for an unsupported target", out)
+		}
+	}
+}
+
 // TestAudioConverter_GarbageOpts asserts Convert rejects unparseable opts
 // before invoking any subprocess (AudioOptsFromMap fails first) -- safe to
 // run ungated since it never reaches ffmpeg/whisper-cli.
