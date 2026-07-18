@@ -21,7 +21,8 @@ findings:
   warning: 6
   info: 4
   total: 10
-status: issues_found
+fixed: 6
+status: fixes_applied
 ---
 
 # Phase 31: Code Review Report
@@ -29,7 +30,7 @@ status: issues_found
 **Reviewed:** 2026-07-18T15:16:34Z
 **Depth:** standard
 **Files Reviewed:** 12
-**Status:** issues_found
+**Status:** fixes_applied (all 6 warnings fixed 2026-07-18; IN-01..IN-04 remain tracked, out of fix scope)
 
 ## Summary
 
@@ -95,6 +96,9 @@ if strings.Contains(msg, "ffprobe: unparseable duration") ||
 ```
 (Keep `"start ffprobe:"` / `"ffprobe killed:"` — environment/timeout shapes — transient if desired, but document the split.) Add the corresponding cases to `TestIsAudioTerminal`.
 
+**Status:** fixed
+**Resolution:** commit 548c4d5 — added a terminal arm in `isAudioTerminal` for the deterministic ffprobe shapes audioduration.go actually emits (`"ffprobe failed:"`, `"ffprobe: unparseable duration"`, `"ffprobe: implausible duration"`); `"start ffprobe:"`/`"ffprobe killed:"` documented and pinned transient. Both sides covered in `TestIsAudioTerminal`.
+
 ### WR-02: ProbeDuration runs under the full AUDIO_ENGINE_TIMEOUT, violating its own documented short-bound contract (T-30-03)
 
 **File:** `internal/worker/worker.go:765-772` (enforceAudioGuardBeforeConvert), `internal/convert/audioduration.go:49-55`
@@ -112,11 +116,17 @@ if engine == convert.EngineAudio {
 ```
 Note the interaction with WR-01: a probe-timeout expiry then surfaces as `"ffprobe killed: context deadline exceeded"` and needs a deliberate classification decision.
 
+**Status:** fixed
+**Resolution:** commit a7c92fd — `enforceAudioGuardBeforeConvert` now derives a 15s probe-only deadline (`audioProbeTimeout` const, documented) from the attempt ctx before calling `EnforceMaxDuration`. Deliberate classification decision: a probe-ctx expiry (`"ffprobe: ffprobe killed:"`) stays TRANSIENT (WR-01's documented split), pinned by `TestEnforceAudioGuardProbeExpiryTransient_WR02`.
+
 ### WR-03: Accidental cross-engine signature matches silently make whisper-stage "no output" failures terminal, contradicting isAudioTerminal's documented contract
 
 **File:** `internal/worker/worker.go:51-66,88-92,256-272`, `internal/convert/whisper.go:231-240`
 **Issue:** `isAudioTerminal`'s doc comment (and 31-RESEARCH.md A2, cited in it) asserts that non-timeout whisper-stage failures fall through to `isTerminal` and stay **transient** ("no dedicated terminalWhisperSignatures list is introduced this phase"). That is false for the exit-0-but-no-output failure mode: `validateAudioOutput` returns `"audio: output is empty"` and `"audio: stat output: …"`, which substring-match `terminalLibreOfficeSignatures`/`terminalChromiumSignatures` entries `"output is empty"` and `"stat output"` inside the shared `isTerminal` loop — so these audio failures classify **terminal** via a foreign engine's signature list. The outcome is plausibly the desirable one (deterministic empty output should not retry), but it is achieved by accident: rewording a LibreOffice/Chromium signature or `validateAudioOutput`'s message would silently flip audio retry behavior with no failing test (worker_test.go pins `"convert: chromium: output is empty"` but no audio-prefixed variant). The same mechanism cuts the other way: whisper-cli/ffmpeg stderr is folded verbatim into the error (`exec.go:52`) and matched against *all four* engine signature lists, so any engine's stderr containing e.g. "output is empty" or "no export filter for" flips transient→terminal.
 **Fix:** Introduce an explicit `terminalAudioSignatures = []string{"audio: output is empty", "audio: stat output"}` checked in `isAudioTerminal` (before the `isTerminal` fallthrough), correct the doc comment's "stays transient" claim, and add pinning tests for both messages — same commit-coupling discipline the LibreOffice/veraPDF lists already document.
+
+**Status:** fixed
+**Resolution:** commit 50a60be — introduced `terminalAudioSignatures` exactly as suggested, checked in `isAudioTerminal` before the shared fallthrough; corrected the doc comment's stale "stays transient" claim. `TestIsAudioTerminalOutputSignatures` pins both messages terminal via the audio path AND re-verifies with the LibreOffice/Chromium lists emptied (independence proof — rewording a foreign signature can no longer flip audio behavior).
 
 ### WR-04: ffmpeg-stage terminal-on-timeout can permanently misclassify upstream budget exhaustion as corrupt input
 
@@ -131,17 +141,26 @@ if dl, ok := ctx.Deadline(); ok && time.Until(dl) < minFfmpegBudget {
 ```
 Alternatively, document this explicitly as an accepted residual of Key Decision 1 (it currently isn't — the doc comments attribute ffmpeg-stage timeouts solely to input badness).
 
+**Status:** fixed
+**Resolution:** commit ac2f074 — implemented the review's cheapest mitigation: `whisper.go`'s `Convert` now requires `minFfmpegBudget` (30s) remaining on the attempt ctx before starting stage 1; below the floor it returns `"audio: insufficient attempt budget remaining: %w(context.DeadlineExceeded)"` — no `"audio: ffmpeg:"` prefix, so it classifies transient and asynq retries. Residual documented in the code comment: an upstream stall leaving >= 30s can still be misattributed to ffmpeg; the floor removes only the near-total-exhaustion case deterministically. Pinned by `TestAudioConverter_InsufficientBudgetFailsFast` (convert side, ungated) and a transient-classification case in `TestIsAudioTerminal` (worker side).
+
 ### WR-05: AUDIO_MAX_DURATION_SECONDS name invites bare-seconds values that silently fall back to the 4h default
 
 **File:** `cmd/audio-worker/main.go:65,152-159`, `.env.example:54`
 **Issue:** The variable is named `…_SECONDS` but is parsed by `envDuration` → `time.ParseDuration`, which **rejects** a bare number ("time: missing unit in duration"). An operator who writes `AUDIO_MAX_DURATION_SECONDS=7200` — the exact form the name advertises — gets a silent fallback to the 4-hour default with no log line, weakening (or unexpectedly loosening) a fail-closed resource guard. `.env.example` ships the working-but-self-contradictory `14400s`, i.e. a duration string under a `_SECONDS` name; no other duration env in the codebase carries a `_SECONDS` suffix (peers are `*_TIMEOUT=300s`, `*_STALE_AFTER=15m`).
 **Fix:** Rename to `AUDIO_MAX_DURATION=4h` (matching the codebase's duration-env convention) before any deployment depends on the name, or parse it as integer seconds to match the name. At minimum, log a warning when an env value is present but unparseable instead of silently using the default (this fallback pattern is codebase-wide, but here it guards a security ceiling).
 
+**Status:** fixed
+**Resolution:** commit 382ae85 — kept the name (no rename churn) and made parsing match it: new `envDurationSeconds` accepts both Go duration syntax (`4h`/`14400s`) and bare non-negative integer seconds (`14400`), with `firstField` inline-comment tolerance; a set-but-unparseable value now logs a warning before defaulting (never silent — security ceiling). `.env.example` ships the bare-seconds form and documents both accepted shapes. Covered by `TestEnvDurationSeconds` (new `cmd/audio-worker/main_test.go`).
+
 ### WR-06: AUDIO_MODEL_PATH read without firstField while .env.example ships it with an inline comment — env-file loaders would pass a garbage path to whisper-cli
 
 **File:** `cmd/audio-worker/main.go:80`, `.env.example:55`
 **Issue:** Every numeric/duration env in this codebase is defended against trailing inline `# comments` via `firstField`, precisely because non-shell loaders (`docker run --env-file`, compose `env_file:`, k8s configmap-from-env-file) do **not** strip them. `AUDIO_MODEL_PATH` is read raw (`convert.SetAudioModelPath(os.Getenv("AUDIO_MODEL_PATH"))`) yet is the only string env in `.env.example` documented *with* a long inline comment on the same line (line 55). Under an env-file-style loader, `audioModelPath` becomes `/models/ggml-base.bin   # whisper.cpp model path passed to whisper-cli -m; …`, and every transcription fails at whisper-cli model load with a confusing error. Today's compose file uses inline `environment:` maps (and has no audio-worker service yet — see IN-04), so this is latent, but the Phase 32 container wiring is exactly when an env_file is most likely to appear.
 **Fix:** Either strip the value defensively (`strings.TrimSpace` + the same inline-comment convention: `convert.SetAudioModelPath(firstField(os.Getenv("AUDIO_MODEL_PATH")))` — noting paths with spaces would then be unsupported, which is acceptable for an operator-set container path), or move the comment in `.env.example` to its own line above the assignment. Doing both is cheapest.
+
+**Status:** fixed
+**Resolution:** commit 379f2d4 — did both, with one improvement over the suggested `firstField`: new `stripInlineComment` only cuts at a `#` preceded by whitespace (the only shape a .env-style inline comment takes), so paths containing spaces or embedded `#` survive intact. `.env.example`'s comment moved to its own lines above the assignment. Covered by `TestStripInlineComment`.
 
 ## Info
 
