@@ -19,6 +19,56 @@ func requireFFprobe(t *testing.T) {
 	}
 }
 
+// TestParseProbedDuration_AdversarialValuesFailClosed proves the declared-
+// duration guard cannot be bypassed by adversarial ffprobe output: NaN, +/-Inf,
+// negative, and huge (float->int64-overflowing) declared durations are all
+// rejected in float space BEFORE the implementation-defined float->Duration
+// conversion can run (CR-01). Runs ungated (no ffprobe) and is deliberately
+// platform-independent -- the amd64 MinInt64-saturation bypass this guards
+// against is invisible on arm64 dev machines.
+func TestParseProbedDuration_AdversarialValuesFailClosed(t *testing.T) {
+	for _, raw := range []string{
+		"nan",
+		"NaN",
+		"inf",
+		"+inf",
+		"-inf",
+		"-1",
+		"-0.5",
+		"1e18",                // overflows int64 nanoseconds: MinInt64 on amd64, MaxInt64 on arm64
+		"9223372036854775807", // ffmpeg's int64-microseconds ceiling in seconds, absurd but parseable
+	} {
+		d, err := parseProbedDuration(raw)
+		if err == nil {
+			t.Errorf("parseProbedDuration(%q) = (%v, nil), want fail-closed error", raw, d)
+		}
+		if d != 0 {
+			t.Errorf("parseProbedDuration(%q) returned duration=%v alongside an error, want zero-value", raw, d)
+		}
+	}
+}
+
+// TestParseProbedDuration_PlausibleValuesAccepted proves ordinary ffprobe
+// output (including trailing newline, as ffprobe emits) still parses.
+func TestParseProbedDuration_PlausibleValuesAccepted(t *testing.T) {
+	cases := map[string]time.Duration{
+		"2.000000\n": 2 * time.Second,
+		"0":          0,
+		"0.5":        500 * time.Millisecond,
+		"3600":       time.Hour,
+	}
+	for raw, want := range cases {
+		d, err := parseProbedDuration(raw)
+		if err != nil {
+			t.Errorf("parseProbedDuration(%q) error: %v", raw, err)
+			continue
+		}
+		if d != want {
+			t.Errorf("parseProbedDuration(%q) = %v, want %v", raw, d, want)
+		}
+	}
+}
+
 func TestEnforceMaxDuration_UnderCeilingPasses(t *testing.T) {
 	requireFFprobe(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

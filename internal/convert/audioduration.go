@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,34 @@ import (
 // unit-testable; mapping it to an HTTP 422 response is a future
 // (out-of-scope) API-routing phase's job.
 var ErrAudioDurationExceeded = errors.New("declared audio duration exceeds configured maximum")
+
+// maxSaneDurationSeconds is a server-constant plausibility ceiling on the
+// ffprobe-reported declared duration, applied in FLOAT space BEFORE the
+// float64 -> time.Duration conversion. Go's out-of-range float-to-int
+// conversion is implementation-defined (spec, "Conversions"): on amd64 an
+// overflowing product saturates to math.MinInt64 (negative), silently
+// bypassing a naive `d > max` check -- while arm64 saturates to MaxInt64
+// and rejects, so the bypass is invisible on dev machines and live in
+// production. 1<<31 seconds (~68 years) is far above any real ceiling and
+// safely below float64(math.MaxInt64)/1e9, so the multiplication by
+// float64(time.Second) can never overflow int64 for accepted values.
+const maxSaneDurationSeconds = 1 << 31
+
+// parseProbedDuration parses ffprobe's duration output and validates it in
+// float space before any conversion to time.Duration -- rejecting NaN, +/-Inf,
+// negative, and implausibly huge declared durations fail-closed. Split from
+// ProbeDuration so the adversarial-input validation is unit-testable without
+// ffprobe on PATH and independent of platform conversion behavior.
+func parseProbedDuration(raw string) (time.Duration, error) {
+	secs, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0, fmt.Errorf("ffprobe: unparseable duration %q: %w", raw, err)
+	}
+	if math.IsNaN(secs) || math.IsInf(secs, 0) || secs < 0 || secs > maxSaneDurationSeconds {
+		return 0, fmt.Errorf("ffprobe: implausible duration %v", secs)
+	}
+	return time.Duration(secs * float64(time.Second)), nil
+}
 
 // ProbeDuration runs ffprobe as its own short, bounded, killable subprocess
 // (runCommand, exec.go) to read the container's declared duration BEFORE any
@@ -30,11 +59,7 @@ func ProbeDuration(ctx context.Context, path string) (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("ffprobe: %w", err)
 	}
-	secs, perr := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if perr != nil {
-		return 0, fmt.Errorf("ffprobe: unparseable duration %q: %w", out, perr)
-	}
-	return time.Duration(secs * float64(time.Second)), nil
+	return parseProbedDuration(string(out))
 }
 
 // EnforceMaxDuration probes path's declared duration and rejects it with
