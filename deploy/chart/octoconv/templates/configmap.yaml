@@ -32,10 +32,19 @@ data:
   DOCUMENT_MAX_RETRY: "3"
   HTML_ENGINE_TIMEOUT: "60s"
   HTML_MAX_RETRY: "3"
+  AUDIO_WORKER_CONCURRENCY: "1"
+  AUDIO_ENGINE_TIMEOUT: "742s"
+  AUDIO_MAX_RETRY: "3"
+  AUDIO_MAX_DURATION_SECONDS: "1800"
+  AUDIO_MODEL_PATH: "/models/ggml-base.bin"
   VERAPDF_TIMEOUT: "60s"
   WEBHOOK_PRESIGN_TTL: "6h"
   RECONCILER_QUEUED_STALE_AFTER: "90s"
-  RECONCILER_ACTIVE_STALE_AFTER: "5m"
+  # 15m (not the stale 5m) -- mirrors compose's already-shipped Phase-32
+  # IN-16 fix. The audio engine timeout above (742s) must stay below this
+  # value (15m/900s) so the reconciler never double-processes a genuinely
+  # in-flight audio job as abandoned.
+  RECONCILER_ACTIVE_STALE_AFTER: "15m"
   RECONCILER_SWEEP_INTERVAL: "1m"
   RECONCILER_MAX_RECOVERIES: "3"
   STORAGE_TTL: "168h"

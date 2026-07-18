@@ -89,7 +89,7 @@ func main() {
 	// Matching every worker's existing precedent, the Inspector is never
 	// closed — Collect() is pull-based/lazy, invoked once per scrape.
 	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt),
-		queue.QueueImage, queue.QueueDocument, queue.QueueHTML, queue.QueueWebhook))
+		queue.QueueImage, queue.QueueDocument, queue.QueueHTML, queue.QueueAudio, queue.QueueWebhook))
 
 	salt := []byte(os.Getenv("API_KEY_SALT"))
 	if len(salt) == 0 {
