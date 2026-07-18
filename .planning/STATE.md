@@ -4,8 +4,8 @@ milestone: v1.7
 milestone_name: Audio Engine & Hardening
 status: executing
 stopped_at: Phase 29 context gathered
-last_updated: "2026-07-18T03:40:47.246Z"
-last_activity: 2026-07-18 -- Phase 31 planning complete
+last_updated: "2026-07-18T03:41:20.331Z"
+last_activity: 2026-07-18 -- Phase 31 execution started
 progress:
   total_phases: 5
   completed_phases: 2
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-17 after v1.7 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 31 — queue, worker & routing integration
+**Current focus:** Phase 31 — queue-worker-routing-integration
 
 ## Current Position
 
-Phase: 31
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-18 -- Phase 31 planning complete
+Phase: 31 (queue-worker-routing-integration) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 31
+Last activity: 2026-07-18 -- Phase 31 execution started
 
 ## Performance Metrics
 
