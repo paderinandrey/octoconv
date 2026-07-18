@@ -161,8 +161,8 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
   4. `RECONCILER_ACTIVE_STALE_AFTER` for audio is set above `AUDIO_ENGINE_TIMEOUT` and a test confirms repeated sweep ticks against a long in-flight audio job fire zero spurious `reconciler_recovery` events.
 **Plans**: 4 plans
 - [x] 31-01-PLAN.md — Foundation: 0006 migration, AudioConverter registration, AUDIO_MODEL_PATH setter, audio queue/task/AudioUniqueTTL + client + TestAudioUniqueTTL (SC3)
-- [ ] 31-02-PLAN.md — Worker: stage-aware isAudioTerminal (Key Decision 1) + HandleAudioConvert, duration-guard splice (T-30-08/IN-02), IN-01 file: hardening, NewHandler threading, stale-after default raise
-- [ ] 31-03-PLAN.md — API + reconciler routing: SniffAudio splice (byte-integrity), opts + enqueue switch cases, both Enqueuer interfaces, reconciler routing + SC4 zero-recovery test
+- [x] 31-02-PLAN.md — Worker: stage-aware isAudioTerminal (Key Decision 1) + HandleAudioConvert, duration-guard splice (T-30-08/IN-02), IN-01 file: hardening, NewHandler threading, stale-after default raise
+- [x] 31-03-PLAN.md — API + reconciler routing: SniffAudio splice (byte-integrity), opts + enqueue switch cases, both Enqueuer interfaces, reconciler routing + SC4 zero-recovery test
 - [ ] 31-04-PLAN.md — cmd/audio-worker entry point + .env.example audio block + live E2E (queued → active → done)
 
 ### Phase 32: Containerization & Local E2E + RTF Gate
@@ -221,7 +221,7 @@ Full details: `.planning/milestones/v1.6-ROADMAP.md`
 | 28. Autoscale Load-Proof | v1.6 | 3/3 | Complete    | 2026-07-17 |
 | 29. v1.6 Hardening Tail | v1.7 | 3/3 | Complete    | 2026-07-17 |
 | 30. Audio Engine Foundation | v1.7 | 3/3 | Complete    | 2026-07-18 |
-| 31. Queue, Worker & Routing Integration | v1.7 | 1/4 | In Progress|  |
+| 31. Queue, Worker & Routing Integration | v1.7 | 3/4 | In Progress|  |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 0/? | Not started | - |
 | 33. KEDA/Helm Chart Integration | v1.7 | 0/? | Not started | - |
 
