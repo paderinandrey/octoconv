@@ -2,6 +2,7 @@ package convert
 
 import (
 	"bytes"
+	"io"
 	"testing"
 )
 
@@ -195,5 +196,141 @@ func TestMIMEType_Video(t *testing.T) {
 		if got := MIMEType(format); got != want {
 			t.Fatalf("MIMEType(%q) = %q, want %q", format, got, want)
 		}
+	}
+}
+
+// --- EBML/DocType bounded-peek parser (matchEBML) ---
+
+// buildEBMLHeader constructs a byte-exact EBML header fixture matching the
+// live-verified layout in 34-RESEARCH.md Pattern 3: magic, a 1-byte master
+// SIZE vint, four fixed 4-byte elements (EBMLVersion/EBMLReadVersion/
+// EBMLMaxIDLength/EBMLMaxSizeLength), the DocType element (variable-length
+// value), then two more fixed 4-byte elements (DocTypeVersion/
+// DocTypeReadVersion). docType must be shorter than 16 bytes so its SIZE
+// vint fits in a single byte (0x80|len).
+func buildEBMLHeader(docType string) []byte {
+	body := []byte{}
+	body = append(body, 0x42, 0x86, 0x81, 0x01) // EBMLVersion = 1
+	body = append(body, 0x42, 0xf7, 0x81, 0x01) // EBMLReadVersion = 1
+	body = append(body, 0x42, 0xf2, 0x81, 0x04) // EBMLMaxIDLength = 4
+	body = append(body, 0x42, 0xf3, 0x81, 0x08) // EBMLMaxSizeLength = 8
+	body = append(body, 0x42, 0x82, byte(0x80|len(docType)))
+	body = append(body, []byte(docType)...)
+	body = append(body, 0x42, 0x87, 0x81, 0x04) // DocTypeVersion = 4
+	body = append(body, 0x42, 0x85, 0x81, 0x02) // DocTypeReadVersion = 2
+
+	header := append([]byte{}, ebmlMagic...)
+	header = append(header, byte(0x80|len(body))) // master-element SIZE vint
+	header = append(header, body...)
+	return header
+}
+
+func TestMatchEBML_MKV(t *testing.T) {
+	buf := buildEBMLHeader("matroska")
+	format, ok := matchEBML(buf)
+	if !ok || format != "mkv" {
+		t.Fatalf("matchEBML(matroska fixture) = (%q, %v), want (mkv, true)", format, ok)
+	}
+}
+
+func TestMatchEBML_WebM(t *testing.T) {
+	buf := buildEBMLHeader("webm")
+	format, ok := matchEBML(buf)
+	if !ok || format != "webm" {
+		t.Fatalf("matchEBML(webm fixture) = (%q, %v), want (webm, true)", format, ok)
+	}
+}
+
+func TestMatchEBML_RejectsNonEBML(t *testing.T) {
+	if _, ok := matchEBML([]byte("not an ebml file at all")); ok {
+		t.Fatal("matchEBML(non-EBML bytes) = true, want false")
+	}
+}
+
+func TestMatchEBML_RejectsTruncated(t *testing.T) {
+	full := buildEBMLHeader("matroska")
+	// Truncate mid-way through the DocType element's value bytes -- past the
+	// magic+size vint, but before the declared header size worth of body.
+	truncated := full[:20]
+	if _, ok := matchEBML(truncated); ok {
+		t.Fatal("matchEBML(truncated header) = true, want false (fail closed)")
+	}
+}
+
+func TestMatchEBML_RejectsUnknownDocType(t *testing.T) {
+	buf := buildEBMLHeader("notaformat")
+	if format, ok := matchEBML(buf); ok {
+		t.Fatalf("matchEBML(unrecognized DocType) = (%q, true), want (_, false)", format)
+	}
+}
+
+// TestMatchEBML_RejectsOversizedElementSize proves a declared element size
+// that would run past the bounded window fails closed rather than being
+// grown into or seeked past -- the DoS-defense half of T-34-03/T-34-04.
+func TestMatchEBML_RejectsOversizedElementSize(t *testing.T) {
+	buf := append([]byte{}, ebmlMagic...)
+	buf = append(buf, 0x80|0x08) // master SIZE = 8 (small, valid header)
+	// DocType element declaring a SIZE vint far larger than any bytes present.
+	buf = append(buf, 0x42, 0x82, 0xBF) // SIZE = 0xBF & 0x7F = 0x3F = 63
+	buf = append(buf, []byte("short")...)
+	if _, ok := matchEBML(buf); ok {
+		t.Fatal("matchEBML(oversized declared element size) = true, want false (fail closed)")
+	}
+}
+
+func TestVintLen(t *testing.T) {
+	cases := []struct {
+		first byte
+		want  int
+	}{
+		{0x80, 1}, {0xFF, 1},
+		{0x40, 2}, {0x7F, 2},
+		{0x20, 3}, {0x3F, 3},
+		{0x10, 4}, {0x1F, 4},
+		{0x00, 0},
+	}
+	for _, c := range cases {
+		if got := vintLen(c.first); got != c.want {
+			t.Fatalf("vintLen(0x%02X) = %d, want %d", c.first, got, c.want)
+		}
+	}
+}
+
+// --- SniffVideo ---
+
+func TestSniffVideo_EBML(t *testing.T) {
+	cases := map[string]string{
+		"matroska": "mkv",
+		"webm":     "webm",
+	}
+	for docType, want := range cases {
+		buf := buildEBMLHeader(docType)
+		detected, rest, err := SniffVideo(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatalf("SniffVideo(%s) error: %v", docType, err)
+		}
+		if detected != want {
+			t.Fatalf("SniffVideo(%s) = %q, want %q", docType, detected, want)
+		}
+		got, err := io.ReadAll(rest)
+		if err != nil {
+			t.Fatalf("ReadAll(rest) error: %v", err)
+		}
+		if !bytes.Equal(got, buf) {
+			t.Fatalf("SniffVideo(%s) rest stream does not preserve full original bytes", docType)
+		}
+	}
+}
+
+func TestSniffVideo_Unrecognized(t *testing.T) {
+	detected, rest, err := SniffVideo(bytes.NewReader([]byte("not video at all, just text")))
+	if err != nil {
+		t.Fatalf("SniffVideo error: %v", err)
+	}
+	if detected != "" {
+		t.Fatalf("SniffVideo(garbage) = %q, want \"\"", detected)
+	}
+	if rest == nil {
+		t.Fatal("rest must not be nil even for unrecognized input")
 	}
 }

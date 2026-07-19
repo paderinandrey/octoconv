@@ -79,6 +79,13 @@ func TestSniffHEIC(t *testing.T) {
 	}
 }
 
+// TestSniffHEIC_ForeignBrandNotDetected proves an ordinary MP4 video brand
+// ("mp42") is never misdetected as heic, even though both formats share the
+// identical ftyp+brand box shape. Since Phase 34 (34-01) added mp4/mov/avi
+// to the signatures table, "mp42" is now correctly classified as mp4
+// instead of going undetected -- the assertion here narrowed from "detected
+// nothing at all" to "did not misdetect as heic", which is what this test
+// has always actually been proving (T-34-02).
 func TestSniffHEIC_ForeignBrandNotDetected(t *testing.T) {
 	data := []byte{0x00, 0x00, 0x00, 0x18}
 	data = append(data, []byte("ftyp")...)
@@ -87,8 +94,11 @@ func TestSniffHEIC_ForeignBrandNotDetected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sniff error: %v", err)
 	}
-	if detected != "" {
-		t.Fatalf("detected = %q, want \"\" for non-HEIF ftyp brand", detected)
+	if detected == "heic" {
+		t.Fatalf("detected = %q, want anything but heic for non-HEIF ftyp brand", detected)
+	}
+	if detected != "mp4" {
+		t.Fatalf("detected = %q, want mp4 (mp42 is a registered mp4VideoBrands entry)", detected)
 	}
 }
 
