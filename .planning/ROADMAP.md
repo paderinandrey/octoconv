@@ -146,7 +146,10 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
   3. `AVConverter`'s automatic stream-copy fast path remuxes instead of re-encoding whenever ffprobe reports the source codec is already legal in the target container.
   4. Video container sniffers — fixed-offset mp4/mov `ftyp` and RIFF `AVI ` matchers plus a new bounded-peek EBML/DocType parser distinguishing mkv from webm — classify fixtures correctly, and a collision test proves zero overlap with the existing WAV/RIFF, m4a-brand, and heic-brand sniffers.
   5. `AVOpts` (thumbnail timecode, closed resolution-height enum 480/720/1080, HEVC codec choice) is validated through the same `checkStrictObject` closed-allowlist pattern as `AudioOpts`, an injection test proves client bytes never reach ffmpeg argv, and `-protocol_whitelist file,crypto` plus duration/resolution guards block SSRF/LFI and multi-axis decompression-bomb vectors on every ffmpeg/ffprobe invocation (verified by an offline canary test).
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 34-01-PLAN.md — Video container magic-bytes sniffers (mp4/mov/avi fixed-offset + EBML mkv/webm bounded-peek), disjointness test (AVE-01)
+- [ ] 34-02-PLAN.md — Closed AVOpts allowlist (timecode/resolution/HEVC), video resolution guard, EngineAV const (AVO-01/02/03, AVE-02)
+- [ ] 34-03-PLAN.md — Standalone AVConverter (transcode/audio-extract/thumbnail, stream-copy fast path, protocol-whitelist canary) (AVC-01..05, AVE-02)
 
 ### Phase 35: Queue, Worker & Routing Integration
 **Goal**: av-engine jobs (transcode/audio-extract/thumbnail) and video→transcript jobs both flow end-to-end through the async pipeline with correct queue routing, retry classification, and reconciler recovery.
