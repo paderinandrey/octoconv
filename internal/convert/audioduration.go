@@ -56,7 +56,13 @@ func parseProbedDuration(raw string) (time.Duration, error) {
 // ffprobeDurationArgs builds ffprobe's argv for ProbeDuration, isolated as
 // its own function so IN-01's "file:" protocol prefix on the path argv
 // element is unit-testable without invoking a real ffprobe subprocess
-// (mirrors whisper.go's whisperArgs argv-pinning test style).
+// (mirrors whisper.go's whisperArgs argv-pinning test style). Also carries
+// "-protocol_whitelist file,crypto" (AVE-02/ROADMAP SC5): this probe is
+// reused verbatim by Plan 03 as the FIRST ffprobe invocation on untrusted
+// VIDEO input in the AV engine's guard stage, so it must be hardened
+// identically to the AV engine's new resolution probe (ffprobeStreamArgs,
+// avduration.go) -- "every ffmpeg/ffprobe invocation" holds with no
+// exception, closing T-34-08b.
 func ffprobeDurationArgs(path string) []string {
 	// IN-01 (30-REVIEW.md, defense-in-depth): the argv element handed to
 	// ffprobe is prefixed with the explicit "file:" protocol specifier so
@@ -67,7 +73,8 @@ func ffprobeDurationArgs(path string) []string {
 	// is a no-op for current behavior; it only matters if a future caller
 	// ever threads a client-influenced filename through here.
 	return []string{"-v", "error", "-show_entries",
-		"format=duration", "-of", "default=noprint_wrappers=1:nokey=1", "file:" + path}
+		"format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+		"-protocol_whitelist", "file,crypto", "file:" + path}
 }
 
 func ProbeDuration(ctx context.Context, path string) (time.Duration, error) {
