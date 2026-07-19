@@ -12,7 +12,18 @@ OctoConv — внутренний асинхронный сервис конве
 
 **v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18.** Четвёртый engine-класс (офлайн whisper.cpp-транскрипция) в полном контуре: fail-closed валидация → async-пайплайн со stage-aware retry → контейнер с RTF-измеренным таймаутом → KEDA scale-from-zero (live-proven). Плюс закрыт hardening-хвост v1.6. Аудит 12/12 требований, интеграция 22/22, E2E 2/2.
 
-**Next milestone:** не определён — кандидат SEED-001 (разбор урока: анализ ошибок + spaced-repetition колода) поверх готового JSON-таймстамп контракта. Запуск: `/gsd:new-milestone`.
+## Current Milestone: v1.8 AV Engine (video/ffmpeg)
+
+**Goal:** Пятый engine-класс — обработка видео через ffmpeg в отдельном av-воркере по проверенному паттерну (своя очередь, свой контейнер, свои таймауты, KEDA), включая сквозную цепочку видео → транскрипт через существующий whisper-пайплайн.
+
+**Target features:**
+- Транскод видео (mov/avi/mkv/webm → mp4 H.264 и т.п.) с собственным RTF-гейтом по образцу аудио — самая дорогая операция класса
+- Извлечение аудио: видео → mp3/wav/m4a
+- Превью/thumbnail: кадр из видео → jpg/png/webp (таймкод через opts)
+- Видео → транскрипт: mp4/mov → txt/srt/vtt/json одним job'ом (ffmpeg-экстракция + whisper)
+- Отдельный `cmd/av-worker`: очередь `av`, Dockerfile с ffmpeg, fail-closed magic-bytes валидация видео-контейнеров, transient/terminal retry, compose + chart + KEDA ScaledObject
+
+**Key context:** воркеры остаются офлайн (ffmpeg локальный, без внешних API); паттерн v1.7 переиспользуется целиком (RTF-гейт → measured timeout, stage-aware retry, IN-02 пропагация, scale-from-zero proof); способ реализации видео→транскрипт (whisper внутри av-контейнера vs межочередная цепочка) решается на research/planning. SEED-001 остаётся в банке семян — не выбран в этот milestone.
 
 <details>
 <summary>v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18</summary>
@@ -106,9 +117,13 @@ OctoConv — внутренний асинхронный сервис конве
 
 ### Active
 
-<!-- Milestone v1.7 shipped 2026-07-18. Next milestone: define via /gsd:new-milestone (candidate: SEED-001 lesson-recording analysis, consumes v1.7's JSON timestamp contract). -->
+<!-- Milestone v1.8 AV Engine (video/ffmpeg) — defined 2026-07-19. -->
 
-- [ ] (следующий милстоун не определён — кандидат: SEED-001 разбор урока: анализ ошибок + spaced-repetition колода поверх JSON-таймстамп контракта v1.7)
+- [ ] Клиент может транскодировать видео (mov/avi/mkv/webm → mp4 и др.) через тот же async-пайплайн, с RTF-измеренным таймаутом
+- [ ] Клиент может извлечь аудиодорожку из видео (mp3/wav/m4a)
+- [ ] Клиент может получить превью-кадр из видео (jpg/png/webp, таймкод через opts)
+- [ ] Клиент может получить транскрипт видео (txt/srt/vtt/json) одним job'ом
+- [ ] av-класс встроен в полный контур: fail-closed валидация, stage-aware retry, отдельный воркер/контейнер, compose + chart + KEDA
 
 ### Out of Scope
 
@@ -197,4 +212,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-19 after v1.7 milestone (Audio Engine & Hardening — shipped 2026-07-18)*
+*Last updated: 2026-07-19 after v1.8 milestone start (AV Engine — video/ffmpeg)*
