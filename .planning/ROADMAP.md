@@ -147,8 +147,8 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
   4. Video container sniffers — fixed-offset mp4/mov `ftyp` and RIFF `AVI ` matchers plus a new bounded-peek EBML/DocType parser distinguishing mkv from webm — classify fixtures correctly, and a collision test proves zero overlap with the existing WAV/RIFF, m4a-brand, and heic-brand sniffers.
   5. `AVOpts` (thumbnail timecode, closed resolution-height enum 480/720/1080, HEVC codec choice) is validated through the same `checkStrictObject` closed-allowlist pattern as `AudioOpts`, an injection test proves client bytes never reach ffmpeg argv, and `-protocol_whitelist file,crypto` plus duration/resolution guards block SSRF/LFI and multi-axis decompression-bomb vectors on every ffmpeg/ffprobe invocation (verified by an offline canary test).
 **Plans**: 3 plans
-- [ ] 34-01-PLAN.md — Video container magic-bytes sniffers (mp4/mov/avi fixed-offset + EBML mkv/webm bounded-peek), disjointness test (AVE-01)
-- [ ] 34-02-PLAN.md — Closed AVOpts allowlist (timecode/resolution/HEVC), video resolution guard, EngineAV const (AVO-01/02/03, AVE-02)
+- [x] 34-01-PLAN.md — Video container magic-bytes sniffers (mp4/mov/avi fixed-offset + EBML mkv/webm bounded-peek), disjointness test (AVE-01)
+- [x] 34-02-PLAN.md — Closed AVOpts allowlist (timecode/resolution/HEVC), video resolution guard, EngineAV const (AVO-01/02/03, AVE-02)
 - [ ] 34-03-PLAN.md — Standalone AVConverter (transcode/audio-extract/thumbnail, stream-copy fast path, protocol-whitelist canary) (AVC-01..05, AVE-02)
 
 ### Phase 35: Queue, Worker & Routing Integration
@@ -221,7 +221,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
-| 34. AV Engine Foundation | v1.8 | 0/TBD | Not started | - |
+| 34. AV Engine Foundation | v1.8 | 2/3 | In Progress|  |
 | 35. Queue, Worker & Routing Integration | v1.8 | 0/TBD | Not started | - |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
