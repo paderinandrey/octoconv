@@ -10,6 +10,7 @@
 - ✅ **v1.5 MCP Access & Document Fidelity** — Phases 20-23 (shipped 2026-07-13) — see `.planning/milestones/v1.5-ROADMAP.md`
 - ✅ **v1.6 Kubernetes & KEDA** — Phases 24-28 (shipped 2026-07-17) — see `.planning/milestones/v1.6-ROADMAP.md`
 - ✅ **v1.7 Audio Engine & Hardening** — Phases 29-33 (shipped 2026-07-18) — see `.planning/milestones/v1.7-ROADMAP.md`
+- ⏳ **v1.8 AV Engine (video/ffmpeg)** — Phases 34-37 (in progress, started 2026-07-19)
 
 ## Phases
 
@@ -116,6 +117,70 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 
 </details>
 
+### v1.8 AV Engine (video/ffmpeg) (Phases 34-37) — IN PROGRESS
+
+- [ ] **Phase 34: AV Engine Foundation** - Standalone AVConverter (transcode/audio-extract/thumbnail via ffmpeg), video container sniffers (mp4/mov ftyp, RIFF AVI, EBML mkv/webm), validated AVOpts, duration/resolution guards + protocol-whitelist hardening
+- [ ] **Phase 35: Queue, Worker & Routing Integration** - av queue + cmd/av-worker, stage-aware retry classification, API/reconciler engine routing, video→transcript pairs routed onto the existing audio queue/worker with a pair-disjointness test
+- [ ] **Phase 36: Containerization & RTF-Measured Timeout** - Dockerfile.av-worker (pinned ffmpeg), compose service, RTF-matrix measured AV_ENGINE_TIMEOUT, disk-space guard, CI bake
+- [ ] **Phase 37: KEDA/Helm Chart Integration** - av-worker Deployment + ScaledObject (WR-01 triad), QueueAV collector, scale-from-zero load-proof
+
+## Phase Details
+
+### v1.8 AV Engine (video/ffmpeg)
+
+**Milestone goal:** Ship the fifth engine class — video processing via ffmpeg in a dedicated av-worker — following the proven engine-class pattern (own queue/worker/binary/container/KEDA), including a sixth conversion chain (video → transcript) that routes onto the existing audio pipeline rather than duplicating whisper.cpp.
+
+**Dependency spine:** 34 (first, standalone/unregistered — highest-uncertainty EBML sniffer starts here) → 35 (async wiring, needs 34's working converter) → 36 (RTF go/no-go gate — must follow 34's opts allowlist closing, not precede it) → 37 (KEDA tuning consumes 36's measured `AV_ENGINE_TIMEOUT`).
+
+**Key decision (resolved before roadmapping):** video→transcript extends `AudioConverter.Pairs()` to route video-source/transcript-target jobs onto the existing `audio` queue/worker (`Engine()` stays `EngineAudio`) — NOT a duplicate whisper.cpp pipeline inside av-worker. This avoids ~400MB of duplicated whisper.cpp+model image weight and reuses the already-measured `AUDIO_ENGINE_TIMEOUT`/duration-guard machinery. Trade-off: the registry's pair-keyed lookup must for the first time arbitrate between two converters sharing a source-format family, so a pair-disjointness test is a hard requirement of Phase 35, not optional polish.
+
+---
+
+### Phase 34: AV Engine Foundation
+**Goal**: A standalone `AVConverter` transcodes, extracts audio, and extracts thumbnails from video files with fail-closed content validation, built and testable directly against ffmpeg before any queue/worker plumbing.
+**Depends on**: Nothing (first phase of v1.8 — validate the novel ffmpeg/container-sniffing surface standalone first, mirroring the audio engine's Phase 30 scope fence)
+**Requirements**: AVC-01, AVC-02, AVC-03, AVC-04, AVC-05, AVO-01, AVO-02, AVO-03, AVE-01, AVE-02
+**Success Criteria** (what must be TRUE):
+  1. `AVConverter` transcodes mov/avi/mkv/webm → mp4 (H.264/AAC, `-movflags +faststart`) and mp4 → webm (VP9/Opus), verified by direct invocation against a real ffmpeg binary — every transcode is a full re-encode.
+  2. `AVConverter` extracts an audio track to mp3/wav/m4a, using ffprobe-checked stream-copy (`-c:a copy`) when the source is AAC and the target is m4a, and full re-encode otherwise; and extracts a thumbnail frame via fast input-side `-ss` seek at a client-supplied or 1.0s-default (duration-clamped) timecode.
+  3. `AVConverter`'s automatic stream-copy fast path remuxes instead of re-encoding whenever ffprobe reports the source codec is already legal in the target container.
+  4. Video container sniffers — fixed-offset mp4/mov `ftyp` and RIFF `AVI ` matchers plus a new bounded-peek EBML/DocType parser distinguishing mkv from webm — classify fixtures correctly, and a collision test proves zero overlap with the existing WAV/RIFF, m4a-brand, and heic-brand sniffers.
+  5. `AVOpts` (thumbnail timecode, closed resolution-height enum 480/720/1080, HEVC codec choice) is validated through the same `checkStrictObject` closed-allowlist pattern as `AudioOpts`, an injection test proves client bytes never reach ffmpeg argv, and `-protocol_whitelist file,crypto` plus duration/resolution guards block SSRF/LFI and multi-axis decompression-bomb vectors on every ffmpeg/ffprobe invocation (verified by an offline canary test).
+**Plans**: TBD
+
+### Phase 35: Queue, Worker & Routing Integration
+**Goal**: av-engine jobs (transcode/audio-extract/thumbnail) and video→transcript jobs both flow end-to-end through the async pipeline with correct queue routing, retry classification, and reconciler recovery.
+**Depends on**: Phase 34 (needs the working AVConverter to wire into the async lifecycle)
+**Requirements**: AVE-03, AVT-01
+**Success Criteria** (what must be TRUE):
+  1. An uploaded video job targeting mp4/webm/mp3/wav/m4a/jpg/png/webp is routed to a dedicated `av` asynq queue by the API's `EngineFor` content-detection path and consumed end-to-end by `cmd/av-worker` (queued → active → done), with the reconciler routing stranded `jobs.engine='av'` jobs to the same queue.
+  2. An uploaded video job targeting txt/srt/vtt/json is routed instead to the existing `audio` queue/worker (video-source pairs added to `AudioConverter.Pairs()`, `Engine()` stays `EngineAudio`), with a dedicated pair-disjointness unit test proving zero overlap between `AVConverter.Pairs()` and `AudioConverter.Pairs()`.
+  3. A stage-aware transient/terminal classifier for av jobs is derived fresh (not copied from audio's ffmpeg-timeout-is-terminal precedent, since ffmpeg IS the expensive operation for transcode) and a unit test pins transcode-timeout as transient versus deterministic/malformed-input failures as terminal.
+  4. An `AVUniqueTTL` derived from the av engine's own timeout/retry budget prevents duplicate processing, verified by a monotonicity/lower-bound test mirroring `AudioUniqueTTL`.
+**Plans**: TBD
+
+### Phase 36: Containerization & RTF-Measured Timeout
+**Goal**: A running av-worker container in docker-compose passes a full live E2E, with `AV_ENGINE_TIMEOUT` sized from a measured RTF matrix across the closed opts space rather than a copied or guessed constant.
+**Depends on**: Phase 35 (needs the queue/worker contract stable before containerizing; timeout measurement must follow the opts allowlist closing in Phase 34, not precede it)
+**Requirements**: AVE-04
+**Success Criteria** (what must be TRUE):
+  1. `Dockerfile.av-worker` installs a version-pinned Debian `ffmpeg` package (exact `apt-get install ffmpeg=<version>` pin, per STACK.md — Debian backports CVE fixes into 5.1.x; the CVE-2026-8461 backport status is verified against the Debian security tracker during planning, fail-loud if unfixed), and an `av-worker` compose service transcodes/extracts/thumbnails an uploaded file end-to-end through the live compose stack (upload → poll → presigned download) with a signed webhook confirmed.
+  2. `AV_ENGINE_TIMEOUT` is derived from a measured RTF matrix spanning the codec × resolution × preset combinations exposed by the closed `AVOpts` allowlist (not a single fixture), with any NO-GO lever applied and documented like Phase 32's audio precedent.
+  3. A new disk-space/ephemeral-storage guard and cgroup-derived `-threads`/RAM sizing (mirroring `CgroupCPULimit()`) are wired and verified against the container's real resource ceiling.
+  4. The `av-worker` image is added to the CI bake matrix with its `AV_ENGINE_TIMEOUT`/`AV_WORKER_CONCURRENCY`/ShutdownTimeout env wired, and all queue-client-constructing services propagate the new env identically (IN-02 pattern).
+**Plans**: TBD
+
+### Phase 37: KEDA/Helm Chart Integration
+**Goal**: The av class autoscales in the cluster with production parity to the other four engine classes, and scale-from-zero is live-proven.
+**Depends on**: Phase 36 (KEDA cooldown/stabilization and grace-period tuning consume Phase 36's measured `AV_ENGINE_TIMEOUT`)
+**Requirements**: AVE-05
+**Success Criteria** (what must be TRUE):
+  1. An `av-worker` Deployment plus a KEDA `ScaledObject` ship in the chart with `terminationGracePeriodSeconds`/`scaleDownStabilizationSeconds` derived from the measured `AV_ENGINE_TIMEOUT`, and the WR-01 fail-safe triad (`ignoreNullValues:"false"`, fallback replicas, retry-inclusive PromQL) applied verbatim from the first commit.
+  2. `QueueAV` is registered in the always-on api queue-depth collector so KEDA resolves the av backlog at genuinely zero replicas.
+  3. Scale-from-zero is live-proven for the av class, capturing timestamped Phase-33-style evidence.
+  4. env-parity (IN-02 pattern) is confirmed across all queue-client-constructing services for the new `AV_*` env vars, and a long transcode job survives a genuine N→N-1 HPA downscale without a premature SIGTERM.
+**Plans**: TBD
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -153,7 +218,11 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
+| 34. AV Engine Foundation | v1.8 | 0/TBD | Not started | - |
+| 35. Queue, Worker & Routing Integration | v1.8 | 0/TBD | Not started | - |
+| 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
+| 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
 
 ---
 
-*v1.7 (Audio Engine & Hardening) shipped 2026-07-18 — the fourth engine class (offline whisper.cpp audio transcription) autoscaling in k8s. Next: `/gsd:new-milestone`.*
+*v1.7 shipped 2026-07-18. v1.8 (AV Engine — video/ffmpeg) roadmapped 2026-07-19, Phases 34-37. Next: `/gsd:plan-phase 34`.*

@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
 status: planning
-last_updated: "2026-07-19T13:45:52.210Z"
+last_updated: "2026-07-19T18:40:00.000Z"
 last_activity: 2026-07-19
 progress:
-  total_phases: 0
+  total_phases: 4
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -17,23 +17,23 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-07-17 after v1.7 milestone start)
+See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
-**Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Milestone complete
+**Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
+**Current focus:** v1.8 AV Engine (video/ffmpeg) — Phase 34: AV Engine Foundation
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 34 (AV Engine Foundation) — Not started
 Plan: —
-Status: Defining requirements
-Last activity: 2026-07-19 — Milestone v1.8 started
+Status: Roadmap created (Phases 34-37), awaiting `/gsd:plan-phase 34`
+Last activity: 2026-07-19 — Roadmap created for v1.8, requirements traceability updated (14/14 mapped)
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 84 (all v1.0–v1.6)
+- Total plans completed: 84 (all v1.0–v1.7)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -72,6 +72,10 @@ Last activity: 2026-07-19 — Milestone v1.8 started
 | 31 | 4 | - | - |
 | 32 | 5 | - | - |
 | 33 | 3 | - | - |
+| 34 | TBD | - | - |
+| 35 | TBD | - | - |
+| 36 | TBD | - | - |
+| 37 | TBD | - | - |
 
 **Recent Trend:**
 
@@ -84,14 +88,14 @@ Last activity: 2026-07-19 — Milestone v1.8 started
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table. v1.7-specific decisions surfaced by research, to be recorded as Key Decisions before/at implementation:
+Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions surfaced by research, to be recorded as Key Decisions before/at implementation:
 
-- **Key Decision 1 — Stage-aware timeout classification (Phase 31, MUST resolve before `isAudioTerminal` is written):** ffmpeg-stage failure/timeout → terminal (malformed/adversarial input signal, same rationale as the image dimension-bomb guard); whisper-stage timeout on audio that already passed the ffprobe duration/format check → transient (mirror the image engine's classifier, no `context.DeadlineExceeded` terminal arm), bounded by `AUDIO_MAX_RETRY`. FEATURES.md/ARCHITECTURE.md recommended blanket-terminal (document precedent); PITFALLS.md's stage-aware split adopted as strictly-more-correct without added complexity. Do NOT copy-paste from a sibling class.
-- **Key Decision 2 — Model choice base vs small (Phase 32):** ship `base` (142 MiB) as the default with `small` as a later values/preset opt-in; keep the choice reversible (build-arg/preset variant), do not lock permanently in the Dockerfile with no revisit trigger. Bundling both by default is rejected (pushes image toward ~1GB, hurts Key Decision 3).
-- **Key Decision 3 — Model distribution bake-in vs volume (Phase 33):** bake-in is simplest and matches the offline constraint, but risks silently defeating the scale-from-zero SLA Phases 27/28 proved. Require a Phase-28-style timestamped load-proof for the audio class specifically (image-pull vs scale-from-zero measured) before calling KEDA integration done; treat bake-vs-volume as reversible based on that measurement.
-- **AudioUniqueTTL (Phase 31):** derive fresh from the real `AUDIO_ENGINE_TIMEOUT`/`AUDIO_MAX_RETRY` (never reuse image/document TTL) — the T-03-10 double-processing race is worst for the most expensive class; ship `TestAudioUniqueTTL` mirroring the three existing monotonicity/lower-bound tests.
-- **whisper.cpp threads/concurrency (Phase 32):** pass explicit `--threads` sized to the container's cgroup CPU limit (not host core count); size `AUDIO_WORKER_CONCURRENCY` from measured per-job RSS (likely 1). `-DGGML_NATIVE=OFF` is load-bearing (default `-march=native` SIGILLs on non-build-host CPUs).
-- **Accepted residual risk — hallucination on silence/music (Phase 30):** whisper exits 0 with structurally-valid garbage; no terminal-signature classifier catches it. Document as accepted residual risk; surface no-speech-probability in the JSON contract if the pinned binary exposes it cleanly (cheapest mitigation).
+- **Key Decision (resolved before roadmapping) — Video→transcript implementation path:** extend `AudioConverter.Pairs()` with video-container × transcript-target pairs, routing those jobs onto the existing `audio` queue/worker (`Engine()` stays `EngineAudio`); the ffmpeg audio-normalize stage already demuxes any container ffmpeg can decode, video or not. Rejected alternative: baking a second ffmpeg-extract→whisper-transcribe pipeline inside av-worker (duplicates ~400MB whisper.cpp+model image weight, doubles the RTF-measurement/GO-NO-GO burden, couples two CPU-bound classes' resource ceilings). Do NOT resolve this decision differently later — it is a hard input to Phase 35's routing and pair-disjointness test.
+- **Phase ordering — opts-allowlist before RTF measurement (Phases 34/35 before Phase 36):** a single RTF fixture does not generalize across video's codec × resolution × preset space the way it did for whisper's roughly content-invariant RTF; the `AVOpts` allowlist and the timeout measurement matrix must be designed together, sequenced, not independent tasks. Measuring first and opening opts later silently reintroduces this pitfall.
+- **Stage-aware terminal/transient classification cannot be copied from audio (Phase 35):** audio's `isAudioTerminal` treats ffmpeg-stage timeout as terminal because ffmpeg is audio's *cheap* normalize step; for video transcode, ffmpeg IS the expensive operation, so the classification must be re-derived per av feature (transcode: timeout stays transient; thumbnail/extract: closer to audio's terminal-on-timeout profile).
+- **New resource axis — disk-space/ephemeral-storage guard (Phase 36):** video decode/transcode has no prior codebase precedent for a disk-space ceiling (no earlier engine class needed one); must be sized explicitly during containerize/measure, not assumed-safe by analogy to CPU/RAM guards.
+- **FFmpeg decoder RCE surface — pin ffmpeg ≥8.1.2, not floating `apt-get install` (Phase 36):** a live June-2026 disclosure (CVE-2026-8461 "PixelSmash") achieved RCE via a 50KB crafted file against comparable services; this project has no existing dependency-advisory-tracking process — flagged as accepted-risk/tech-debt to revisit, not assumed durable after a one-time pin.
+- **Open question carried into planning — upload-size ceiling for video:** `MAX_UPLOAD_BYTES` is currently one global value enforced before content-type detection runs; video files are legitimately much larger than other engine classes' typical inputs, and raising the global ceiling weakens DoS posture for all other classes too. Must be an explicit named decision during Phase 34/36 planning, not an implicit side effect of picking a video-friendly number.
 
 ### Quick Tasks Completed
 
@@ -102,28 +106,29 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.7-specific decisions 
 
 ### Pending Todos
 
-- Plan Phase 29 (v1.6 Hardening Tail): HARD-01, HARD-02, HARD-03, HARD-04. Zero audio dependency, all four independent and pre-diagnosed by 26/27/28-REVIEW — cheap, mechanical opener. WR-01 must land here so the audio ScaledObject (Phase 33) is authored correctly from its first commit.
+- Plan Phase 34 (AV Engine Foundation): AVC-01..05, AVO-01..03, AVE-01, AVE-02. Zero async/queue dependency (standalone, unregistered like Phase 30's AudioConverter) — start with the EBML/DocType mkv/webm sniffer first (highest-uncertainty item, no prior codebase precedent, ARCHITECTURE.md-flagged).
 
 ### Blockers/Concerns
 
 None currently blocking. Sequencing carried into the roadmap:
 
-- Hard-ordered spine: 29 (independent, first) → 30 → 31 → 32 (RTF go/no-go gate) → 33. AUD-07's measured RTF/`AUDIO_ENGINE_TIMEOUT` (Phase 32) is a hard input to AUD-08's KEDA cooldown/stabilization/grace-period tuning (Phase 33) — keep this ordering.
-- WR-01 (Phase 29) must precede authoring `scaledobject-audio.yaml` (Phase 33) — else a known-bad chart pattern gets copied into the new audio ScaledObject.
-- Two research phases likely need execution-time research (`--research-phase`): Phase 30 (whisper-cli v1.9.1 JSON schema field names verified live against the pinned binary; MP3 ID3v2 synchsafe-decode correctness) and Phase 32 (RTF/thread/memory sizing empirically measured against the real container `cpus`/`memory` limits). Phase 33 may need a scoped pass on init-container/PVC patterns if measured bake-in pull time proves unacceptable.
-- Operational discipline (OrbStack): pre-build all images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (four confirmed daemon wedges on record). A GB-scale audio image raises cold-pull time — measure it, do not assume it generalizes from the other three classes.
-- `MAX_UPLOAD_BYTES` (global 100 MiB default) may 413 legitimate long audio (an uncompressed 1-hour WAV is >600MB) — decide a per-format/engine ceiling deliberately during Phase 30/32, do not let it fail silently.
+- Hard-ordered spine: 34 (independent, first) → 35 → 36 (RTF go/no-go gate) → 37. Phase 36's measured RTF/`AV_ENGINE_TIMEOUT` is a hard input to Phase 37's KEDA cooldown/stabilization/grace-period tuning — keep this ordering.
+- Phase 34's `AVOpts` allowlist must be closed before Phase 36 measures the RTF matrix — the opts scope determines the measurement matrix bounds (codec × resolution × preset), not the other way around.
+- Phase 35's pair-disjointness test between `AVConverter.Pairs()` and `AudioConverter.Pairs()` is a hard requirement, not optional polish — this is the first time two converters in this codebase share a source-format family, and the registry's "later registration wins silently" semantics is a genuine hazard here.
+- `-protocol_whitelist file,crypto` must land on every ffmpeg/ffprobe invocation from Phase 34's first commit (day-one exec-hardening scope, not deferred) — closes an SSRF/LFI vector (HLS/concat/subtitle references embedded in file content) that the existing `"file:"`-prefix argv hardening does not cover.
+- Operational discipline (OrbStack): pre-build all images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (four confirmed daemon wedges on record, per v1.6/v1.7 history).
+- `MAX_UPLOAD_BYTES` (global 100 MiB default) will likely 413 legitimate video uploads — decide a per-format/engine ceiling deliberately during Phase 34/36, do not let it fail silently (carried from research Gaps to Address).
 
 ## Deferred Items
 
-Acknowledged at v1.7 close (2026-07-19):
+Acknowledged at v1.7 close (2026-07-18):
 
 | Category | Item | Status |
 |----------|------|--------|
-| seed | SEED-001: Lesson-recording analysis (tutors/language schools) | Deferred — planned subject of the NEXT milestone; v1.7 built its foundation (transcription + JSON timestamp contract) |
+| seed | SEED-001: Lesson-recording analysis (tutors/language schools) | Deferred — not resumed by v1.8 (video processing, not lesson-analysis); still awaiting a future milestone |
 | seed | SEED-004: Local k8s + KEDA full-stack validation | Deferred — superseded in practice by per-phase live gates (keda-gate 21/21, load-proofs Phases 28/33); revisit as CI k8s validation (K8SV2-01) |
 | tech_debt | WR-05 keda-load-proof.sh BUSY_POD jsonpath defect (kubectl v1.36.2, `deletionTimestamp==""` vs absent key) | Accepted residual (29-REVIEW), empirically confirmed live in Phase 33; forward-fix of the frozen script recommended in a future phase |
-| tech_debt | Registry cold-pull time for 682MB audio image | Unmeasurable on OrbStack shared store (Pulling→Pulled ≈0 recorded); measure in a real-registry environment before production KEDA tuning is trusted |
+| tech_debt | Registry cold-pull time for 682MB audio image | Unmeasurable on OrbStack shared store (Pulling→Pulled ≈0 recorded); measure in a real-registry environment before production KEDA tuning is trusted; same open question now applies to the av-worker image (AVX-02, v2 requirement) |
 | tooling_noise | audit-open flags 29-HUMAN-UAT.md (status resolved) and quick task 260712-cqg (complete, SUMMARY present) | Both artifacts closed; audit parser counts them regardless |
 
 Items acknowledged and carried forward at milestone closes (see `.planning/milestones/*-MILESTONE-AUDIT.md` for full detail):
@@ -140,7 +145,8 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | v2_scope | Custom fonts / extended CJK-RTL coverage for HTML→PDF | Deferred to v2 (DOCV3-03, carried) | v1.3 requirements definition (2026-07-10) |
 | accepted_risk | Active anti-DoS by document complexity (sheets/cells/unzipped size) | Accepted residual risk (DOC-V2-05, carried) | v1.2 requirements definition (2026-07-09) |
 | accepted_risk | `file://` passive subresource read inside chromium-worker (shared UID nobody) | Accepted residual risk (v1.3 Phase 15) | v1.3 close (2026-07-12) |
-| seed | SEED-001: Lesson-recording analysis for tutors and language schools | Foundation in v1.7 (transcription + JSON timestamp contract); mistake-analysis/deck = next milestone (LESN-01/02) | v1.2 close (2026-07-10) |
+| accepted_risk | Hallucination on silence/music (whisper exits 0 with structurally-valid garbage) | Accepted residual risk (Phase 30, carried); applies equally to video→transcript pairs added in v1.8 | v1.7 close (2026-07-18) |
+| seed | SEED-001: Lesson-recording analysis for tutors and language schools | Foundation in v1.7 (transcription + JSON timestamp contract); mistake-analysis/deck remains a future milestone, not v1.8 | v1.2 close (2026-07-10) |
 | seed | SEED-003: MCP-сервер для OctoConv | ✓ Implemented (v1.5 Phase 21, MCP-01..05) | v1.4 planning (2026-07-12) |
 | seed | SEED-004: OctoConv on Kubernetes + KEDA autoscaling | ✓ Delivered (v1.6 Phases 24-28) | v1.6 requirements definition (2026-07-14) |
 | infra | k8s-валидация в CI (kind/k3d) | Deferred to v2 (K8SV2-01) | v1.6 requirements definition (2026-07-14) |
@@ -149,13 +155,15 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 | ops | Branch-protection required-checks (gate/race/docker-build) — manual GitHub UI step | Open operational follow-up | v1.4 close (2026-07-13) |
 | tech_debt | presets D-04 single-active-version: application-transactional only, no DB backstop | Accepted residual | v1.4 close (2026-07-13) |
 | seed | SEED-002: Decouple webhook delivery from any specific engine worker binary | ✓ Implemented (v1.3 Phase 16, WEBH-01) | v1.2 close (2026-07-10) |
+| v2_scope | AVX-01: Trim/crop as validated closed-opts (start/end timecodes) | Deferred to v2 — only on confirmed demand | v1.8 requirements definition (2026-07-19) |
+| v2_scope | AVX-02: Registry cold-pull measurement for heavy images (av-worker) | Deferred to v2 — carries forward the same unmeasured-on-OrbStack gap as the audio image | v1.8 requirements definition (2026-07-19) |
 
 ## Session Continuity
 
-Last session: 2026-07-17T21:16:11.093Z
-Stopped at: Phase 29 context gathered
-Resume file: .planning/phases/29-v1-6-hardening-tail/29-CONTEXT.md
+Last session: 2026-07-19T18:40:00.000Z
+Stopped at: v1.8 roadmap created (Phases 34-37), requirements traceability 14/14 mapped, awaiting `/gsd:plan-phase 34`
+Resume file: .planning/ROADMAP.md
 
 ## Operator Next Steps
 
-- Start the next milestone with /gsd-new-milestone
+- Start Phase 34 with `/gsd:plan-phase 34`

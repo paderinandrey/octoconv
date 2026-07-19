@@ -63,26 +63,26 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AVC-01 | — | Pending |
-| AVC-02 | — | Pending |
-| AVC-03 | — | Pending |
-| AVC-04 | — | Pending |
-| AVC-05 | — | Pending |
-| AVO-01 | — | Pending |
-| AVO-02 | — | Pending |
-| AVO-03 | — | Pending |
-| AVT-01 | — | Pending |
-| AVE-01 | — | Pending |
-| AVE-02 | — | Pending |
-| AVE-03 | — | Pending |
-| AVE-04 | — | Pending |
-| AVE-05 | — | Pending |
+| AVC-01 | Phase 34 | Mapped |
+| AVC-02 | Phase 34 | Mapped |
+| AVC-03 | Phase 34 | Mapped |
+| AVC-04 | Phase 34 | Mapped |
+| AVC-05 | Phase 34 | Mapped |
+| AVO-01 | Phase 34 | Mapped |
+| AVO-02 | Phase 34 | Mapped |
+| AVO-03 | Phase 34 | Mapped |
+| AVT-01 | Phase 35 | Mapped |
+| AVE-01 | Phase 34 | Mapped |
+| AVE-02 | Phase 34 | Mapped |
+| AVE-03 | Phase 35 | Mapped |
+| AVE-04 | Phase 36 | Mapped |
+| AVE-05 | Phase 37 | Mapped |
 
 **Coverage:**
 - v1 requirements: 14 total
-- Mapped to phases: 0
-- Unmapped: 14 ⚠️ (roadmap pending)
+- Mapped to phases: 14
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-19*
-*Last updated: 2026-07-19 after initial definition*
+*Last updated: 2026-07-19 after roadmap creation (Phases 34-37)*
