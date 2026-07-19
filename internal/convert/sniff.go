@@ -41,6 +41,9 @@ var signatures = []signature{
 	{"webp", matchWebP},
 	{"heic", matchHEIC},
 	{"tiff", matchTIFF},
+	{"mp4", matchMP4},
+	{"mov", matchMOV},
+	{"avi", matchAVI},
 }
 
 func matchPNG(b []byte) bool {
@@ -149,6 +152,16 @@ func MIMEType(format string) string {
 		return "text/vtt"
 	case "json":
 		return "application/json"
+	case "mp4":
+		return "video/mp4"
+	case "mov":
+		return "video/quicktime"
+	case "avi":
+		return "video/x-msvideo"
+	case "mkv":
+		return "video/x-matroska"
+	case "webm":
+		return "video/webm"
 	default:
 		return "application/octet-stream"
 	}
