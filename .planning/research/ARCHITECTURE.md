@@ -1,333 +1,642 @@
 # Architecture Research
 
-**Domain:** Async file-conversion microservice — adding a 4th engine class (offline audio transcription via whisper.cpp) to an established Go/asynq/Postgres/S3 pipeline, plus a v1.6 hardening tail.
-**Researched:** 2026-07-17
-**Confidence:** HIGH (every claim below is grounded in direct reads of the real `octoconv` codebase — `internal/convert`, `internal/queue`, `internal/worker`, `internal/api`, `internal/reconciler`, `internal/metrics`, `cmd/*-worker`, `deploy/chart/octoconv`, `docker-compose.yml`, `.github/workflows/ci.yml` — cross-referenced against three prior engine-class additions: image (v1.0), document (v1.2), html (v1.3). whisper.cpp CLI/model facts are MEDIUM confidence, WebSearch-verified since there is no existing in-repo precedent for that specific tool.)
+**Domain:** Async file-conversion service — fifth engine class (av/video via ffmpeg)
+**Researched:** 2026-07-19
+**Confidence:** HIGH (codebase-derived; container-format magic-byte facts verified against current specs)
 
 ## Standard Architecture
 
-### System Overview
-
-octoconv already has a proven, three-times-replicated "engine-class" pattern. Audio is not a new architecture — it is the pattern's 4th instantiation. Everything below shows the SAME shape with `audio` slotted in wherever `image`/`document`/`html` currently appear.
+### System Overview (unchanged shape, av is a fifth vertical slice)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  cmd/api  (single always-on process)                                      │
-│  handleCreateJob: multipart → Sniff/SniffContainer/LooksLikeHTML/(NEW:    │
-│  audio magic-bytes) → convert.Default.EngineFor(detected,target) →        │
-│  S3 upload → jobs.Create (Postgres, status=queued) → route by `engine`    │
-│  switch → EnqueueImageConvert|EnqueueDocumentConvert|EnqueueHTMLConvert|   │
-│  (NEW) EnqueueAudioTranscribe                                             │
-│  Also hosts: queue-depth Prometheus collector (ALL queues, incl. audio)   │
-└───────────────────────────┬───────────────────────────────────────────────┘
-                             │ asynq / Redis — 5 queues total after this milestone
-        ┌───────────┬───────┼────────┬──────────┬──────────────┐
-        ▼           ▼       ▼        ▼          ▼              ▼
-   image queue  document  html    webhook   (NEW) audio    (existing)
-                  queue    queue   queue        queue
-        │           │       │        │          │
-        ▼           ▼       ▼        ▼          ▼
-  cmd/worker  cmd/document- cmd/    cmd/     (NEW)
-  (libvips)   worker (LO)  chromium-webhook- cmd/audio-worker
-                            worker  worker×2  (ffmpeg + whisper.cpp)
-        │           │       │        │          │
-        └───────────┴───────┴────────┴──────────┘
-                             │ all write back through the SAME
-                             ▼ jobs/storage/queue interfaces
-                    Postgres (system of record) + S3/MinIO (uploads/results)
+│  cmd/api  (always-on)                                                      │
+│  Sniff/SniffAudio/SniffVideo(new) → EngineFor(detected,target) → route     │
+├───────────────────────────────────────────────────────────────────────────┤
+│  asynq / Redis  — one queue per engine class                               │
+│  image | document | html | audio | av(NEW) | webhook                      │
+├──────────┬──────────┬──────────┬──────────┬──────────┬────────────────────┤
+│  worker  │ document │chromium  │ audio    │ av(NEW)  │ webhook-worker×2    │
+│ (libvips)│ -worker  │ -worker  │ -worker  │ -worker  │ (+ reconciler       │
+│          │(LibreOff)│(chromium)│(ffmpeg+  │ (ffmpeg  │  sweeper, advisory  │
+│          │          │          │ whisper) │  ONLY)   │  lock elected)      │
+├──────────┴──────────┴──────────┴──────────┴──────────┴────────────────────┤
+│  Postgres (system of record: jobs, job_inputs/outputs, job_events)         │
+│  S3/MinIO (uploads/, results/)                                             │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-Cross-cutting singletons every engine class plugs into automatically once registered:
-- `convert.Default` registry (`internal/convert/convert.go`) — format-pair → `Converter` lookup, engine-class grouping for `GET /v1/formats`.
-- `internal/reconciler` — routes stale-job recovery by `jobs.engine` string; unrecognized engines are a fail-closed skip today (`EngineAudio` must be added as a new `case`, not fall through to `default`).
-- `internal/metrics.NewQueueDepthCollector` — registered once in `cmd/api/main.go` with an explicit queue-name list; audio's queue name must be added to that call site.
-- Helm chart: ConfigMap (`commonEnv`) + per-class Deployment + per-class ScaledObject, all keyed off `.Values.<class>.*` — audio needs its own block, not a reuse of an existing one.
+The av class does **not** get a new architectural layer — it slots into the
+existing `Converter`/`Registry`/`EngineFor` abstraction exactly like
+document/html/audio did (v1.2/v1.3/v1.7). The one structural wrinkle worth
+calling out up front: **not every "video" pair routes to the new av queue.**
+Video→transcript pairs are deliberately registered under `EngineAudio` and
+processed by the *existing* audio-worker (see Key Decision A below) — the av
+queue only carries transcode/audio-extract/thumbnail.
 
 ### Component Responsibilities
 
-| Component | Responsibility | New or Modified for Audio |
-|-----------|----------------|----------------------------|
-| `internal/convert/whisper.go` (NEW) | `AudioConverter` implementing `Converter`: `Pairs()` = cross-product of 4 source audio formats × 4 target transcript formats; `Convert()` shells out to `ffmpeg` then `whisper-cli`; `Engine()` returns `EngineAudio` | NEW |
-| `internal/convert/convert.go` | Adds `EngineAudio = "audio"` const (single source of truth, per its own doc comment) | MODIFIED |
-| `internal/convert/converters.go` | One-line `Default.Register(AudioConverter{})` in `init()` | MODIFIED |
-| `internal/convert/audiosniff.go` (NEW, or extend `sniff.go`) | Magic-byte signatures for wav/ogg/m4a + the ID3/frame-sync dual-path mp3 detector | NEW |
-| `internal/convert/sniff.go` | `MIMEType()` gains cases for mp3/wav/m4a/ogg (inputs) and txt/srt/vtt/json (outputs) | MODIFIED |
-| `internal/convert/dimensions.go` | No change — `HasDimensionLimit` already scopes to the closed `dimensionParsers` map; audio formats are absent from it, so the pixel-dimension check is automatically bypassed (same free-ride as documents/html today) | UNCHANGED (verify only) |
-| `internal/queue/queue.go` | `TypeAudioTranscribe`, `QueueAudio = convert.EngineAudio`, `NewAudioTranscribeTask`, `audioRetrySchedule`/`AudioRetryDelay`, `audioBackoffSum`/`AudioUniqueTTL`, `RetryDelayFunc` switch case | MODIFIED |
-| `internal/queue/client.go` | `audioMaxRetry`/`audioUniqueTTL` fields, `AUDIO_MAX_RETRY`/`AUDIO_ENGINE_TIMEOUT` env reads in `NewClient`, `EnqueueAudioTranscribe` method | MODIFIED |
-| `cmd/audio-worker/main.go` (NEW) | Mirrors `cmd/document-worker/main.go` structure exactly: connect Postgres/S3/Redis, build `worker.Handler` via `worker.NewHandler`, register `queue.TypeAudioTranscribe` on the mux, `AUDIO_WORKER_CONCURRENCY`, `ShutdownTimeout = AUDIO_ENGINE_TIMEOUT + margin`, own `/metrics` listener | NEW |
-| `internal/worker/worker.go` | `HandleAudioTranscribe` (mirrors `HandleDocumentConvert`), `isAudioTerminal` (mirrors `isDocumentTerminal`/`isHTMLTerminal` — timeout-is-terminal), `terminalWhisperSignatures`/`terminalFFmpegSignatures` slices | MODIFIED |
-| `internal/api/api.go` | `Enqueuer` interface gains `EnqueueAudioTranscribe` | MODIFIED |
-| `internal/api/handlers.go` | `handleCreateJob`'s engine-routing `switch` gains an `EngineAudio` case; content-type-parity/dimension logic already generalizes (no format-specific branching needed beyond the switch) | MODIFIED |
-| `internal/reconciler/reconciler.go` | `enqueuer` interface gains `EnqueueAudioTranscribe`; `sweep()`'s engine-routing `switch` gains an `EngineAudio` case (else it silently fails closed into `unroutable_engine`, which is safe but wrong) | MODIFIED |
-| `cmd/api/main.go` | `queue.QueueAudio` added to the `NewQueueDepthCollector(...)` call's queue list | MODIFIED |
-| `Dockerfile.audio-worker` (NEW) | Multi-stage: Go build stage (unchanged shape) + whisper.cpp build stage (clone+cmake, NOT an apt package) + baked-in pinned ggml model + `ffmpeg` via apt in the runtime stage + `USER nobody` | NEW |
-| `docker-compose.yml` | New `audio-worker` service block (mirrors `document-worker`'s shape: env, resource limits); `api`/other services' `queue.NewClient()`-read env vars gain the audio pair per the existing "every process reads every class's vars" convention (DEBT-05 precedent) | MODIFIED |
-| `.github/workflows/ci.yml` | `docker-build` and `e2e` jobs' bake `set:` lists gain `audio-worker.cache-to`/`cache-from` entries | MODIFIED |
-| `deploy/chart/octoconv/values.yaml` | New `audioWorker:` block (image, replicas, terminationGracePeriodSeconds, resources) + new `keda.audio:` block (threshold, maxReplicaCount, pollingInterval, cooldownPeriod) | MODIFIED |
-| `deploy/chart/octoconv/templates/configmap.yaml` | `AUDIO_ENGINE_TIMEOUT`, `AUDIO_MAX_RETRY`, `AUDIO_WORKER_CONCURRENCY` keys | MODIFIED |
-| `deploy/chart/octoconv/templates/deployment-audio-worker.yaml` (NEW) | Mirrors `deployment-document-worker.yaml` (probes on `:9090/metrics`, `octoconv.io/tier: app` label, conditional `spec.replicas` per the WR-02-fixed pattern if that fix lands first) | NEW |
-| `deploy/chart/octoconv/templates/scaledobject-audio.yaml` (NEW) | Mirrors `scaledobject-document.yaml`; PromQL `sum(octoconv_queue_depth{queue="audio", state=~"pending|active"})`; **must carry the WR-01 fix** (`ignoreNullValues: "false"`, or the alert-based compensating control) from day one — do not reintroduce the bug this milestone is also fixing | NEW |
+| Component | Responsibility | New or modified |
+|-----------|----------------|------------------|
+| `internal/convert/avsniff.go` (new) | Magic-byte detection for mp4/mov/avi (fixed 12-byte window, extends `sniff.go`'s table) + a separate bounded-peek EBML parser for mkv/webm DocType disambiguation | **New** |
+| `internal/convert/av.go` (new) | `AVConverter` — transcode, audio-extract, thumbnail. `Engine() == EngineAV`. Wraps ffmpeg only (no whisper) | **New** |
+| `internal/convert/avopts.go` (new) | `AVOpts` — closed allowlist (e.g. `timecode` for thumbnail, `video_bitrate`/`resolution_preset` for transcode), mirrors `AudioOpts`/`HTMLOpts` pattern | **New** |
+| `internal/convert/whisper.go` (existing) | `AudioConverter.Pairs()` extended with video-container sources × transcript targets; `Convert()` body **unchanged** (ffmpeg already extracts+normalizes audio from any container it can demux) | **Modified** (Pairs only) |
+| `internal/convert/convert.go` | `EngineAV = "av"` constant added to the single source-of-truth block | **Modified** (1 line) |
+| `internal/convert/converters.go` | `Default.Register(AVConverter{})` added | **Modified** (1 line) |
+| `internal/queue/queue.go` | `TypeAVConvert`/`QueueAV`, `NewAVConvertTask`, `avRetrySchedule`/`AVRetryDelay`, `AVUniqueTTL` — mirrors `Audio*` symbols exactly | **New** (mirrors existing) |
+| `internal/worker/worker.go` | `isAVTerminal` (stage-aware classifier, mirrors `isAudioTerminal`), `HandleAVConvert`, `enforceAVGuardBeforeConvert` (duration guard, reuses `convert.EnforceMaxDuration`) | **New** (mirrors existing) |
+| `internal/api/handlers.go` | `engine` switch (both the enqueue switch and the opts-dispatch switch) gets an `EngineAV` case | **Modified** (2 switch arms) |
+| `internal/reconciler/reconciler.go` | `enqueuer` interface + engine switch gets `EnqueueAVConvert`/`case convert.EngineAV` | **Modified** (2 additions) |
+| `cmd/av-worker/main.go` (new) | Entry point — mirrors `cmd/audio-worker/main.go` minus whisper-specific env (no `AV_MODEL_PATH`, no thread-count resolution) | **New** |
+| `Dockerfile.av-worker` (new) | `debian:bookworm-slim` + `ffmpeg` only — **no whisper.cpp build stage, no baked model** | **New** (much lighter than `Dockerfile.audio-worker`'s 682MB) |
+| `internal/db/migrations/*` | **None needed** — `jobs_engine_check` already allow-lists `'av'` (added speculatively alongside `'cad'`/`'archive'`/`'probe'` in the same migration family as `'audio'`, confirmed live in `0006_audio_engine.sql`) | **No change** |
 
-## Recommended Project Structure
+## Key Design Decisions
+
+### Decision A — video→transcript routes to the EXISTING audio queue, not a new whisper-in-av-container or cross-queue chain
+
+**The question posed three options: whisper baked into av-worker (heavy image), cross-queue job chaining, or routing video targets to the audio queue. Recommendation: the third, with a specific mechanism.**
+
+`AudioConverter.Convert` (`internal/convert/whisper.go`) already runs a
+two-stage `ffmpeg` (normalize) → `whisper-cli` (transcribe) pipeline. Stage 1
+(`ffmpegNormalizeArgs`) is `ffmpeg -y -i file:<in> -ar 16000 -ac 1 -c:a
+pcm_s16le <norm.wav>` — **ffmpeg already demuxes the audio track out of any
+container it can decode, video or not.** Nothing in `Convert()` assumes the
+input is audio-only. This means video→transcript is not a new capability
+that needs a new pipeline — it is the *same* pipeline with a wider `Pairs()`
+set.
+
+**Recommended change:** extend `AudioConverter.Pairs()` with a
+`videoContainerFormats` × `audioTargetFormats` cross product (mp4, mov, mkv,
+webm, avi → txt/srt/vtt/json), keeping `Engine() == EngineAudio` unchanged.
+`Registry.Register` iterates `c.Pairs()` and indexes each `(From,To)` pair
+independently — nothing about the registry, `EngineFor`, or the audio
+queue/worker needs to know these new pairs exist beyond that one `Pairs()`
+extension. `EngineFor("mp4", "txt")` then returns `"audio"`, so the job is
+enqueued onto the existing `QueueAudio`, processed by the existing
+`audio-worker` container, bounded by the existing (RTF-measured)
+`AUDIO_ENGINE_TIMEOUT=742s` and `AUDIO_MAX_DURATION_SECONDS=1800s` guard
+(`enforceAudioGuardBeforeConvert` is already gated on `job.Engine ==
+convert.EngineAudio`, not on source format — it fires correctly for these
+jobs with zero code change to the guard itself).
+
+**Why not the other two options:**
+- **Whisper baked into av-worker** duplicates the ~682MB whisper.cpp+model
+  image layer into a second container, doubles the RTF-measurement/GO-NO-GO
+  burden (Phase 32's proof would need to be re-run for a second image), and
+  gives the av-worker two completely different resource profiles (fast
+  ffmpeg ops vs. whisper's CPU-bound transcription) to size `AV_WORKER_CONCURRENCY`/
+  resource limits against — the same "heterogeneous cost in one queue"
+  problem Decision C addresses, but worse because it also duplicates the
+  binary/model.
+- **Cross-queue job chaining** (av-worker extracts audio → enqueues a
+  second task on the audio queue → some mechanism marks the *original* job
+  done once the second task completes) requires a genuinely new
+  orchestration primitive this codebase has never needed: today one
+  `jobs` row maps to exactly one queue task for its entire lifecycle
+  (`Postgres-first double write`, `guarded status transitions`,
+  `asynq.Unique` keyed by `job_id` — all built around single-task-per-job).
+  Chaining would need either a sub-job/parent-job schema addition or a
+  saga-style intermediate state, new reconciler-routing logic (which queue
+  is "the" job currently on?), and a new unique-lock TTL derivation
+  spanning two engine timeouts. This is a multi-phase schema change for a
+  feature the reused-pipeline approach gets for free.
+
+**Residual work this decision still requires** (tracked as build-order
+items below, not free): (1) `ffmpegNormalizeArgs` should gain an explicit
+`-vn` flag when the source is a video container (defense-in-depth — without
+it ffmpeg still only *writes* an audio-only WAV, since the output container
+has no video stream, but explicitly declaring "no video output" makes the
+intent self-documenting and matches the `IN-01` file-protocol-prefix
+precedent of hardening argv construction even when today's caller can't yet
+trigger the gap); (2) a **new RTF measurement is still owed** for
+video-source jobs specifically, even though `Convert()` code is unchanged —
+video demuxing overhead before whisper's dominant cost is a plausible but
+unverified assumption (see Pitfalls-equivalent notes in Decision C/D); (3)
+`SniffVideo`/`avsniff.go` (Decision B) is needed regardless of which engine
+ultimately handles the job, since content detection happens before
+`EngineFor` is even called.
+
+### Decision B — container sniffing: two different techniques for two different container shapes
+
+The API's content-detection chain (`internal/api/handlers.go`) runs, in
+order: `Sniff` (fixed 12-byte table) → ZIP central-directory inspection →
+`LooksLikeHTML` → `IsOLECFB`/`ClassifyCFB` → `SniffAudio` (mp3's variable-
+length ID3v2 tag, bounded 512KiB peek) → reject. Video containers split
+across **both** existing techniques, not one:
+
+| Container | Magic shape | Fits `sniff.go`'s fixed 12-byte table? | Verified brand/signature facts |
+|-----------|-------------|------------------------------------------|-------------------------------|
+| MP4 | ISO BMFF `ftyp` box at offset 4-8, major brand at offset 8-12 | **Yes** — identical shape to the existing `matchHEIC`/`matchM4A` matchers | Major brands: `isom`, `mp41`, `mp42`, `mp4v`, `avc1`, `iso2`-`iso9`, `3gp4`/`3gp5`, etc. — **must** be a closed allowlist disjoint from `heicBrands`/`m4aBrands` (already disjoint by construction: those are `heic`/`heix`/`hevc`/`hevx`/`mif1`/`msf1` and `M4A `/`M4B `) |
+| QuickTime `.mov` | Same `ftyp` box shape, major brand `"qt  "` (two trailing spaces) | **Yes** — same 12-byte window | `qt  ` is the QuickTime-specific major brand; ISO BMFF is directly derived from QuickTime's container, so this is the standard disambiguator |
+| AVI | RIFF container, `"AVI "` fourCC at offset 8-12 | **Yes** — literally the same shape as the existing `matchWAV`/`matchWebP` matchers (`RIFF` at 0-3, fourCC at 8-11) | No new technique needed at all — copy `matchWAV`'s body with `"AVI "` |
+| Matroska (`.mkv`) | EBML header, magic `0x1A45DFA3` at offset 0, then a variable-position `DocType` element (`matroska` vs `webm`) | **No** — DocType is not at a fixed offset (preceded by variable-length `EBMLVersion`/`EBMLReadVersion`/`EBMLMaxIDLength`/`EBMLMaxSizeLength` elements) | Verified against RFC 8794 / Matroska spec: docType MUST be `"matroska"` |
+| WebM | Same EBML magic, `DocType` **SHOULD** be `"webm"` | **No** — same variable-position problem as mkv | WebM and Matroska are both EBML; the *only* reliable disambiguator is the DocType string, not the outer magic bytes |
+
+**Recommendation:** add `matchMP4`, `matchMOV`, `matchAVI` directly to
+`sniff.go`'s existing `signatures` table (zero new infrastructure, exactly
+mirrors `matchHEIC`/`matchWAV`'s existing shape). Build a **separate**
+bounded-peek matcher for mkv/webm — `matchEBML`/`SniffVideo` — following
+`matchMP3`'s established discipline exactly: peek a bounded window (mp3
+used 512KiB for ID3v2's declared-length tag; EBML's header elements are
+typically only tens of bytes, so a much smaller bound, e.g. 4KiB, is
+comfortably safe while still fail-closed), walk the EBML element IDs to
+find the DocType element (ID `0x4282`), read its declared vint length,
+extract the ASCII value, and match against `{"matroska": "mkv", "webm":
+"webm"}`. A DocType that pushes past the bounded window, or any parse
+failure, **fails closed** — `""`, not a guess — exactly mirroring
+`matchMP3`'s "never grow the buffer, never seek further, just reject"
+philosophy for its own declared-length parse. This is real, non-trivial
+parsing work (a minimal vint/EBML element reader), not just registry
+wiring — flag it in the build order as its own task, not a one-liner.
+
+**How `EngineFor` handles "same source, different target → different
+engine":** this is not a special case that needs new registry mechanism.
+`Registry.m` is keyed by the **full** `(From, To)` pair, never by `From`
+alone. `mp4→mp3` (audio-extraction, registered by `AVConverter`, `Engine()
+== "av"`) and `mp4→txt` (transcription, registered by `AudioConverter`'s
+extended `Pairs()`, `Engine() == "audio"`) are two entirely independent map
+entries. The only real risk is **accidental pair collision** — if
+`AVConverter.Pairs()` and `AudioConverter.Pairs()` ever both claim the same
+`(From, To)` tuple, `Register`'s documented "later registration wins,
+silently" semantics would make the outcome depend on `init()` ordering in
+`converters.go`. Today the target sets are disjoint by design
+(`mp3`/`wav`/`m4a`/`mp4`/`jpg`/`png`/`webp` for av vs.
+`txt`/`srt`/`vtt`/`json` for audio-via-video), but this must be enforced by
+a **unit test that enumerates both converters' `Pairs()` and asserts zero
+intersection** — there is no existing precedent for this check because no
+two converters have ever shared a source-format family before av.
+
+### Decision C — one shared `AV_ENGINE_TIMEOUT` for the whole queue, not per-pair budgets
+
+Every existing engine class uses exactly **one** timeout constant for its
+entire queue, sized to that class's worst-case operation:
+`ENGINE_TIMEOUT=120s` (image), `DOCUMENT_ENGINE_TIMEOUT=300s`,
+`HTML_ENGINE_TIMEOUT=60s`, `AUDIO_ENGINE_TIMEOUT=742s` (RTF-measured against
+whisper transcription, the dominant cost regardless of which of the 16
+`(source,target)` audio pairs is used). There is **no precedent anywhere in
+this codebase for per-pair timeouts**, and `asynq.Unique` TTL derivation
+(`ImageUniqueTTL`/`DocumentUniqueTTL`/`AudioUniqueTTL`) is built entirely
+around "one `engineTimeout` value, one `maxRetry` value, one formula" — a
+per-pair scheme would need a parallel TTL-derivation and retry-schedule
+system with no reusable shape to copy.
+
+**Recommendation:** follow the existing pattern exactly — one
+`AV_ENGINE_TIMEOUT`, RTF/wall-clock-measured against the **worst-case
+transcode** (the genuinely expensive operation; 10-100× more than
+thumbnail per the milestone brief), the same "measure, don't guess" GO/NO-GO
+discipline Phase 32 used for audio (`scripts/audio-rtf-measure.sh` →
+`scripts/av-transcode-measure.sh` analog). Thumbnail and audio-extraction
+jobs will simply finish in a small fraction of that ceiling — the shared
+ceiling costs nothing in the correctness dimension, only in "how long we
+wait before declaring a genuinely stuck process transient-then-terminal,"
+and `isAVTerminal`'s stage classification already fails a corrupted input
+fast (ffmpeg exits non-zero almost immediately on unparseable input; it
+does not wait out the timeout) — so the oversized ceiling on cheap
+operations is paid only in the rare stuck-process case, not on every job.
+
+**What genuinely differs from audio and must be built new:** unlike whisper
+(where cost is driven almost entirely by declared duration, hence
+`AUDIO_MAX_DURATION_SECONDS` alone bounds worst-case cost), transcode cost
+is driven by **duration × resolution × codec complexity**. A duration guard
+alone under-bounds a very-high-resolution short clip. This is a genuine gap
+relative to the audio precedent, not just a copy — see Decision D.
+
+**Per-pair timeouts were considered and explicitly rejected** for this
+milestone: the engineering cost (new per-task-type `asynq.MaxRetry`/timeout
+wiring, a second TTL-derivation formula, a second retry schedule, and
+`RetryDelayFunc`'s dispatch switch growing a third dimension) is
+disproportionate to the benefit (saving wall-clock on retries of jobs that
+already fail fast on bad input). If real production data later shows
+thumbnail jobs are meaningfully retry-budget-starved by a transcode-sized
+ceiling, that is a targeted future revisit, not a Phase-1 requirement.
+
+### Decision D — duration AND resolution guards for video (duration alone is insufficient)
+
+`convert.ProbeDuration`/`convert.EnforceMaxDuration`
+(`internal/convert/audioduration.go`) are **already generic** — they call
+`ffprobe -show_entries format=duration` and validate in float space
+(NaN/Inf/negative/overflow-safe, per the documented amd64/arm64 conversion
+pitfall). This is directly reusable verbatim for an `AV_MAX_DURATION_SECONDS`
+guard, gated the same way `enforceAudioGuardBeforeConvert` gates on
+`job.Engine == convert.EngineAudio` — a new `enforceAVGuardBeforeConvert`
+gated on `job.Engine == convert.EngineAV`, run **before** the expensive
+ffmpeg operation, same fail-closed ordering discipline (sniff → duration
+guard → decode/transcode).
+
+**Where this is NOT sufficient, unlike audio:** whisper's cost is duration-
+dominated regardless of the audio codec/bitrate — a duration ceiling alone
+correctly bounds worst-case whisper cost. Transcode cost is **not**
+duration-dominated alone; a short clip at very high resolution
+(e.g. 4K/8K) or an absurd declared resolution in a malformed/adversarial
+container can still be a decode-bomb even under a modest duration ceiling.
+There is **no existing zero-dependency parser** for arbitrary video
+codecs' declared resolution the way `VALID-03` built one for
+png/jpg/webp/heic/tiff pixel dimensions — building one for H.264/H.265/VP9/
+AV1 bitstreams is out of proportion to this milestone. Two honest options:
+(1) accept this as a **documented residual risk**, mirroring the
+codebase's existing discipline for LibreOffice/chromium resource-exhaustion
+risk (`DOC-V2-05`, the `file://` residual-read risk in Phase 15) — ffmpeg's
+own internal resource limits are the backstop; or (2) additionally probe
+`ffprobe -show_entries stream=width,height` (same near-instant, bounded-ctx
+call pattern as `ProbeDuration`, trivially extendable) and reject
+declared resolutions above a configured ceiling before transcode starts.
+**Recommendation: do (2)** — it is a small, mechanical extension of the
+exact function that already exists (`ProbeDuration`'s sibling), and video
+resolution bombs are a well-known, well-understood attack class (unlike
+audio, where no equivalent "bomb" concept applies) — treating it as
+optional-later residual risk when the guard is this cheap to add is not
+consistent with this codebase's established fail-closed bias (VALID-03,
+CFB classification, zip-bomb rejection all made the same call: build the
+cheap probe rather than accept the risk).
+
+**Upload-size ceiling gap (flag, not solved in this research):**
+`MAX_UPLOAD_BYTES` is currently **one global value** enforced uniformly
+across every engine class via `http.MaxBytesReader` in `handleCreateJob`,
+applied **before** `Sniff`/`EngineFor` even runs — the engine class isn't
+known yet when the byte ceiling is enforced. Video files are legitimately
+much larger than the other four classes' typical inputs at equivalent
+"content amount." Raising the global ceiling to accommodate reasonable
+video sizes weakens the DoS posture for image/document/html/audio uploads
+too; introducing a genuinely per-engine ceiling would require restructuring
+upload-size enforcement to happen **after** content detection (a nontrivial
+API-layer reordering, not a config bump) since today's `MaxBytesReader` is
+applied to the raw multipart body before any byte of it is inspected. This
+research recommends treating it as a **documented open question for
+planning**, not silently defaulting to "just raise the global limit" —
+raising it is the pragmatic MVP choice (matches the "one flag, all
+classes" precedent already in place) but should be an explicit,
+named decision in ROADMAP/PROJECT.md, not an implicit side effect of
+picking a video-friendly number.
+
+## Recommended Project Structure (new files only)
 
 ```
-cmd/
-├── audio-worker/                    # NEW — mirrors cmd/document-worker exactly
-│   └── main.go
-internal/
-├── convert/
-│   ├── convert.go                   # MODIFIED: + EngineAudio const
-│   ├── converters.go                # MODIFIED: + Default.Register(AudioConverter{})
-│   ├── whisper.go                   # NEW: AudioConverter (Pairs/Convert/Engine)
-│   ├── audiosniff.go                # NEW: mp3/wav/m4a/ogg magic-byte signatures
-│   ├── sniff.go                     # MODIFIED: + MIMEType cases (in+out formats)
-│   └── exec.go                      # UNCHANGED: runCommand reused verbatim for
-│                                     #   BOTH ffmpeg and whisper-cli invocations
-├── queue/
-│   ├── queue.go                     # MODIFIED: audio task/queue/retry/TTL, mirrors
-│   │                                 #   Document*/HTML* blocks structurally
-│   └── client.go                    # MODIFIED: audioMaxRetry/audioUniqueTTL, Enqueue*
-├── worker/
-│   └── worker.go                    # MODIFIED: HandleAudioTranscribe, isAudioTerminal,
-│                                     #   terminalWhisperSignatures/terminalFFmpegSignatures
-├── api/
-│   ├── api.go                       # MODIFIED: Enqueuer + EnqueueAudioTranscribe
-│   └── handlers.go                  # MODIFIED: engine-routing switch + EngineAudio
-├── reconciler/
-│   └── reconciler.go                # MODIFIED: enqueuer interface + sweep() switch
-└── metrics/                         # UNCHANGED — queue_collector.go is already
-                                      #   generic (takes ...queues); only the CALL
-                                      #   SITE in cmd/api/main.go changes
-Dockerfile.audio-worker              # NEW
-docker-compose.yml                   # MODIFIED: + audio-worker service
-.github/workflows/ci.yml             # MODIFIED: + audio-worker bake cache entries
-deploy/chart/octoconv/
-├── values.yaml                      # MODIFIED: + audioWorker, keda.audio blocks
-└── templates/
-    ├── configmap.yaml               # MODIFIED: + AUDIO_* keys
-    ├── deployment-audio-worker.yaml # NEW
-    └── scaledobject-audio.yaml      # NEW
+internal/convert/
+├── av.go                # AVConverter: Pairs()/Convert()/Engine()==EngineAV
+├── av_test.go
+├── avopts.go             # AVOpts (timecode, resolution_preset, ...) — mirrors audioopts.go
+├── avopts_test.go
+├── avduration.go         # thin wrapper reusing ProbeDuration + a new resolution probe (Decision D)
+├── avduration_test.go
+├── avsniff.go             # matchEBML/SniffVideo (mkv/webm DocType, bounded peek) — mirrors audiosniff.go's discipline
+├── avsniff_test.go
+├── sniff.go              # MODIFIED: += matchMP4, matchMOV, matchAVI in the existing signatures table
+├── whisper.go             # MODIFIED: Pairs() += video-container × transcript-target cross product; ffmpegNormalizeArgs gains explicit -vn for video sources
+└── converters.go          # MODIFIED: += Default.Register(AVConverter{})
+
+cmd/av-worker/
+└── main.go                # mirrors cmd/audio-worker/main.go, no whisper env vars
+
+Dockerfile.av-worker         # ffmpeg only, no whisper build stage — much lighter than Dockerfile.audio-worker
+
+deploy/chart/octoconv/templates/
+├── deployment-av-worker.yaml   # mirrors deployment-audio-worker.yaml
+└── scaledobject-av.yaml        # mirrors scaledobject-audio.yaml, WR-01 triad verbatim
+
+scripts/
+├── av-transcode-measure.sh     # worst-case-transcode timeout GO/NO-GO measurement (mirrors audio-rtf-measure.sh)
+└── keda-av-loadproof.sh        # mirrors keda-audio-loadproof.sh, frozen-script discipline
 ```
 
 ### Structure Rationale
 
-Every "NEW" file above has a direct, structurally-identical sibling already in the tree (`document-worker`/`chromium-worker` for the Dockerfile+cmd+chart pair, `libreoffice.go`/`chromium.go` for the Converter, `DocumentRetryDelay`/`HTMLRetryDelay` for the queue plumbing). This is deliberate: the codebase's own doc comments repeatedly say "mirrors X exactly" when a new engine class is added, and code review (26/27/28-REVIEW.md) rewards that consistency and flags drift. The audio class should be built by copy-adapt from `document-worker`, not from `image`/`worker` — document/html are the closer analogues because both (a) run an external binary that can legitimately hang on bad input (timeout-should-be-terminal), and (b) need a heavier, non-trivial-to-install runtime dependency baked into a dedicated Dockerfile (LibreOffice / chromium-headless-shell / whisper.cpp+ffmpeg), unlike the `worker`/libvips class which is a single lightweight CLI already in Debian's apt repo.
+- Every new file mirrors an existing sibling 1:1 (`av.go`↔`libreoffice.go`/
+  `chromium.go` shape; `avopts.go`↔`audioopts.go`; `avsniff.go`↔
+  `audiosniff.go`) — this is deliberate: the codebase's own convention is
+  "one file per responsibility, package name matches directory," and every
+  prior engine class (document, html, audio) was added this way with zero
+  package restructuring. There is no reason for av to deviate.
+- `whisper.go` gets a real (if small) modification rather than a new file,
+  because the video→transcript capability genuinely lives in the audio
+  engine's existing `Convert()` — creating a separate file/type for it would
+  duplicate `ffmpegNormalizeArgs`/`whisperArgs`/`model()`/
+  `validateAudioOutput` for no benefit.
 
 ## Architectural Patterns
 
-### Pattern 1: Engine-class routing (the load-bearing pattern — apply verbatim)
+### Pattern 1: Converter interface + Registry (reused unchanged)
 
-**What:** One `Converter` implementation per engine, registered into a single process-wide `Registry`; one asynq queue + one dedicated worker binary + one Dockerfile + one compose service + one chart Deployment + one chart ScaledObject per engine class. `convert.EngineImage`/`EngineDocument`/`EngineHTML` are the single source of truth for the engine-class string literal, referenced by name in `internal/api`, `internal/reconciler`, and `internal/queue`.
-**When to use:** Every new file-conversion capability. This is not optional or up for reinterpretation — three prior milestones (v1.0, v1.2, v1.3) converged on it, and the codebase's own comments call out any place that must stay in lock-step (`internal/convert/convert.go:11-17`).
-**Trade-offs:** Verbose (touches ~15 files per new class) but mechanically safe — each touch point is small, typed, and covered by an existing compile-time or test-time check (`go vet`, the `internal/api`/`internal/queue` test suites, `helm template` render checks). The alternative (a generic `Handler`/`Capability` contract) was explicitly rejected in Key Decisions for v1.2 and never revisited.
+**What:** `Pairs()`/`Convert()`/`Engine()` — a converter self-describes its
+supported `(from,to)` pairs and its engine class; the process-wide
+`Registry` indexes every pair, and `EngineFor` is the single source of
+truth for API/reconciler routing.
 
-**Example — the exact shape `AudioConverter` must follow (`internal/convert/libreoffice.go` structure, adapted):**
-```go
-const EngineAudio = "audio" // add to internal/convert/convert.go's const block
+**When to use:** Every new engine class, without exception — this is the
+whole reason av "slots in" rather than requiring a framework change (the
+milestone's own Out-of-Scope note confirms: "Полный контракт ядра... —
+решено расширять существующий Converter/Registry вместо рефакторинга").
 
-type AudioConverter struct{}
+**Trade-off surfaced by av specifically:** the registry has never before
+needed to arbitrate between two *different* converters both claiming
+pairs from the *same source format family*. It still works correctly
+(pair-keyed, not source-keyed), but the "later registration wins silently"
+semantics (`Register`'s doc comment) becomes a real hazard for the first
+time — mitigate with an explicit pair-disjointness test (Decision B).
 
-var audioSourceFormats = []string{"mp3", "wav", "m4a", "ogg"}
-var audioTargetFormats = []string{"txt", "srt", "vtt", "json"}
+### Pattern 2: Stage-aware terminal/transient classification (reused, extended)
 
-func (AudioConverter) Pairs() []Pair {
-	pairs := make([]Pair, 0, len(audioSourceFormats)*len(audioTargetFormats))
-	for _, from := range audioSourceFormats {
-		for _, to := range audioTargetFormats {
-			pairs = append(pairs, Pair{From: from, To: to}) // full cross-product,
-			// unlike LibvipsConverter's from!=to filter -- source and target
-			// sets are disjoint here, so no self-pair exists to exclude
-		}
-	}
-	return pairs
-}
+**What:** `isAudioTerminal`'s Key Decision 1 — classify by *which stage*
+failed (ffmpeg-stage = malformed input = terminal; whisper-stage timeout =
+transient) rather than a blanket "any timeout is terminal"
+(`isDocumentTerminal`/`isHTMLTerminal`'s simpler shape) or "timeout is
+always transient" (image's shape).
 
-func (AudioConverter) Engine() string { return EngineAudio }
-```
+**When to use for av:** `isAVTerminal` should mirror `isAudioTerminal`'s
+stage-aware shape, not the simpler document/html blanket-timeout shape —
+av's ffmpeg invocations (decode/transcode/thumbnail-seek) are the *only*
+stage (no second binary like whisper-cli), so the natural mapping is:
+ffmpeg failure or timeout on a malformed/adversarial input → terminal
+(mirrors the image engine's dimension-bomb terminal philosophy the audio
+engine's own comment explicitly cross-references); a *duration/resolution*
+guard rejection (`ErrAVDurationExceeded`/`ErrAVResolutionExceeded`, mirroring
+`ErrAudioDurationExceeded`) → always terminal (rejection can never
+succeed on retry); everything else (S3/Postgres blips) → falls through to
+the shared `isTerminal`. Unlike audio (two distinct binaries, two distinct
+stage-prefixes to match on), av likely does **not** need audio's
+`minFfmpegBudget`-style "insufficient remaining budget" special case in the
+same form, since there's only one stage to protect — but the *general*
+principle (an attempt-ctx pre-exhausted by a slow S3 download must not be
+misattributed to "the engine timed out") still applies and should be
+re-derived, not assumed away.
 
-### Pattern 2: Timeout-is-terminal for engines with deterministic hang behavior (DOC-08's precedent, not image's)
+### Pattern 3: Env-only-in-main + setter injection (reused, simplified)
 
-**What:** `isTerminal` (the shared classifier) deliberately treats a `context.DeadlineExceeded` as TRANSIENT so the image path keeps retrying real S3/network blips. `isDocumentTerminal`/`isHTMLTerminal` deliberately DIVERGE from that and treat a timeout as TERMINAL, via the shared `timeoutIsTerminal` helper, because LibreOffice/chromium hangs on bad input are deterministic — retrying burns the whole `*_MAX_RETRY` budget on a render that will time out identically every time.
-**When to use for audio:** whisper.cpp transcription time is a near-deterministic function of (audio duration × model size × CPU). An `AUDIO_ENGINE_TIMEOUT` expiry is therefore far more likely to mean "this file is pathologically long/silent/corrupt for this model" than "transient contention" — the SAME reasoning DOC-08 already documents. **Recommendation: `isAudioTerminal` should be `timeoutIsTerminal(err)` (mirroring `isDocumentTerminal`/`isHTMLTerminal` verbatim), not a bespoke transient-timeout classifier.** This is a real design decision, not a formality — get it wrong and a single pathological audio file burns `AUDIO_MAX_RETRY × AUDIO_ENGINE_TIMEOUT` of worker time before finally failing.
-**Trade-offs:** A file that times out for a genuinely transient reason (e.g., the audio-worker pod was CPU-starved by a co-scheduled load spike) will fail one attempt sooner than it would under image's transient-timeout policy. This is the same trade-off document/html already accepted; the reconciler's stale-job sweep is the backstop for genuinely-stuck-not-yet-timed-out jobs either way.
+**What:** `internal/convert` never calls `os.Getenv` directly; `cmd/*/main.go`
+reads env vars once at startup and injects via a package-level setter
+(`SetAudioModelPath`, `SetAudioThreads`) before the asynq server starts
+consuming tasks (single-write-before-concurrent-reads, no mutex needed).
 
-### Pattern 3: Two-stage external-process pipeline inside a single `Convert()` call
-
-**What:** Every existing `Converter.Convert()` shells out to exactly ONE external binary via `runCommand` (vips / soffice / chromium-headless-shell). Audio is the first engine class that legitimately needs TWO sequential external processes: `ffmpeg` (resample arbitrary input to 16kHz mono 16-bit PCM WAV — whisper.cpp's hard input requirement, MEDIUM confidence, WebSearch-verified) then `whisper-cli` (the actual transcription).
-**When to use:** Keep both invocations INSIDE `AudioConverter.Convert()`, calling `runCommand` twice sequentially, sharing the same `ctx` (and therefore the same `AUDIO_ENGINE_TIMEOUT` budget) for both. Do NOT split ffmpeg preprocessing into a separate queue/task stage — that would break the "one task = one attempt = one Postgres transition" invariant every other engine class relies on (`process()` in `internal/worker/worker.go` wraps the ENTIRE attempt, not just `conv.Convert()`, in one `context.WithTimeout`; a second queue hop would need its own asynq.Unique lock derivation, duplicating `ImageUniqueTTL`'s whole worst-case-lifetime reasoning for no benefit).
-**Trade-offs:** `AUDIO_ENGINE_TIMEOUT` must budget for BOTH steps (ffmpeg resampling is fast/near-linear in file size; whisper-cli is the dominant cost). A single combined budget is simpler to reason about than two separate timeouts and matches every existing engine's "one timeout covers the whole attempt" shape.
-**Example (Convert() sketch, mirrors chromium.go's direct-argv-write, no-shell-involved discipline):**
-```go
-func (AudioConverter) Convert(ctx context.Context, inPath, outPath string, opts map[string]any) error {
-	workDir := filepath.Dir(outPath)
-	wavPath := filepath.Join(workDir, "pcm16.wav")
-	if _, err := runCommand(ctx, "ffmpeg", "-y", "-i", inPath, "-ar", "16000", "-ac", "1",
-		"-c:a", "pcm_s16le", wavPath); err != nil {
-		return fmt.Errorf("audio: ffmpeg: %w", err)
-	}
-	target := NormalizeFormat(filepath.Ext(outPath)) // txt|srt|vtt|json
-	outBase := strings.TrimSuffix(outPath, filepath.Ext(outPath)) // whisper-cli appends its own ext
-	if _, err := runCommand(ctx, "whisper-cli", "-m", whisperModelPath,
-		"-f", wavPath, "-of", outBase, "--output-"+target, "-nt" /* no timestamps in txt */); err != nil {
-		return fmt.Errorf("audio: whisper-cli: %w", err)
-	}
-	// whisper-cli writes outBase+"."+target deterministically (--output-file
-	// pins the basename) -- verify/os.Stat exactly like validatePDF does,
-	// no blind "assume success on exit 0" (every existing engine has been
-	// bitten by an engine that exits 0 with no/empty output; whisper.cpp
-	// should get the same non-trusting treatment).
-	return validateAudioOutput(outPath, target)
-}
-```
+**When to use for av:** any AV-specific tunable that `internal/convert`
+needs at runtime (e.g. a resolution ceiling for Decision D's guard,
+transcode preset/codec defaults) must follow this exact convention. Av
+needs meaningfully **fewer** of these than audio did — no model path, no
+thread-count cgroup detection (ffmpeg's own `-threads` handling under a
+cgroup CPU quota is a separate, real question worth verifying empirically
+during the containerize phase rather than assuming ffmpeg self-limits
+correctly, but it is not a new *mechanism*, just a new value to measure).
 
 ## Data Flow
 
-### Request Flow (job creation → transcript delivered)
+### Video→transcode/extract/thumbnail (new av queue)
 
 ```
-Client POST /v1/jobs (file=recording.mp3, target=srt)
-    │
-    ▼
-handleCreateJob (internal/api/handlers.go)
-    │  1. multipart parse, size cap (unchanged)
-    │  2. convert.Sniff(file) -- NEW: mp3/wav/ogg/m4a signatures checked here
-    │     (ID3-tagged mp3 needs a second, ID3-aware branch -- see Anti-Pattern 3)
-    │  3. HasDimensionLimit("mp3") == false -> pixel-dimension check SKIPPED
-    │     automatically (dimensionParsers map has no audio entries) -- same
-    │     free bypass documents/html already get, VERIFY not IMPLEMENT
-    │  4. convert.Default.EngineFor("mp3","srt") -> ("audio", true)
-    │  5. S3 upload (uploads/{job_id}/0-recording.mp3)
-    │  6. jobs.Create (Postgres, status=queued, engine="audio")
-    │  7. switch engine { case EngineAudio: s.queue.EnqueueAudioTranscribe(...) }
-    ▼
-audio asynq queue (Redis) -- asynq.Unique-locked, AudioUniqueTTL-derived
-    ▼
-cmd/audio-worker (asynq.ServeMux -> HandleAudioTranscribe)
-    │  1. MarkActive (guarded transition, same as every class)
-    │  2. process(): download input, registry.Lookup("mp3","srt") -> AudioConverter
-    │  3. AudioConverter.Convert(): ffmpeg resample -> whisper-cli transcribe
-    │     -- both bounded by the SAME attemptCtx (AUDIO_ENGINE_TIMEOUT)
-    │  4. upload output (results/{job_id}/0-out.srt, Content-Type per
-    │     MIMEType("srt"))
-    │  5. AddOutput + MarkDone (Postgres)
-    │  6. EnqueueWebhookDeliver if callback_url set (unchanged, engine-agnostic)
-    ▼
-Client GET /v1/jobs/{id} -> download_url (presigned) OR webhook delivered
+POST /v1/jobs (file=video.mp4, target=mp4|mp3|jpg)
+    ↓
+Sniff() misses (video isn't in the 12-byte table... except mp4/mov/avi ARE
+    now added there, Decision B) → detected="mp4"
+    ↓
+EngineFor("mp4","mp4"|"mp3"|"jpg") → AVConverter.Engine() → "av"
+    ↓
+Postgres-first double write: jobs row (engine="av", status=queued)
+    ↓
+EnqueueAVConvert → QueueAV (asynq.Unique keyed by job_id, AVUniqueTTL)
+    ↓
+av-worker: HandleAVConvert → MarkActive → process()
+    → enforceAVGuardBeforeConvert (duration + resolution probe, Decision D)
+    → AVConverter.Convert (single ffmpeg invocation, stage-aware terminal check)
+    → upload result → AddOutput → MarkDone
+    ↓
+webhook enqueue (if callback_url set) — unchanged, engine-agnostic
 ```
 
-### Failure/Retry Flow
+### Video→transcript (existing audio queue, Decision A)
 
 ```
-whisper-cli/ffmpeg failure or AUDIO_ENGINE_TIMEOUT expiry
-    │
-    ▼
-isAudioTerminal(err)  -- timeoutIsTerminal wrapper (Pattern 2 above)
-    │
-    ├─ terminal (bad input signature match, OR timeout) ──► MarkFailed + SkipRetry
-    │                                                        + webhook (if set)
-    │                                                        + metrics.RecordJobOutcome
-    │
-    └─ transient (S3/Postgres blip, non-timeout) ──────────► return unwrapped err,
-                                                               job stays "active",
-                                                               asynq retries per
-                                                               AudioRetryDelay
-                                                               (bounded AUDIO_MAX_RETRY)
+POST /v1/jobs (file=video.mp4, target=txt|srt|vtt|json)
+    ↓
+Sniff() → detected="mp4" (same detection as above — content detection is
+    engine-agnostic, per-PAIR routing happens one step later)
+    ↓
+EngineFor("mp4","txt") → AudioConverter.Engine() (Pairs() extended,
+    Decision A) → "audio"
+    ↓
+Postgres-first double write: jobs row (engine="audio", status=queued)
+    ↓
+EnqueueAudioConvert → QueueAudio (existing queue, existing
+    AudioUniqueTTL/AUDIO_ENGINE_TIMEOUT=742s, UNCHANGED)
+    ↓
+audio-worker (existing container, unchanged image): HandleAudioConvert
+    → enforceAudioGuardBeforeConvert (existing AUDIO_MAX_DURATION_SECONDS
+        guard fires correctly — gated on job.Engine==EngineAudio, not on
+        source format, so zero code change needed here)
+    → AudioConverter.Convert: ffmpeg normalize (now also handles video
+        demux, -vn added) → whisper-cli transcribe (UNCHANGED)
+    → upload result → AddOutput → MarkDone
 ```
 
-If a task is dropped without a status transition (pod killed mid-attempt), the reconciler's `sweep()` picks it up on the next tick via `FindStale` + the `jobs.engine` routing switch — this is why that switch MUST gain an `EngineAudio` case; without it, a stranded audio job silently degrades into `unroutable_engine` (a safe-but-wrong metric-visible no-op) forever.
+### Key Data Flows
+
+1. **Same source, different queue depending on target** — `mp4→mp3` (av
+   queue, audio-extraction) and `mp4→txt` (audio queue, transcription) are
+   two independent `Registry` entries; there is no shared "video job" state
+   anywhere in Postgres or Redis, no cross-queue awareness, no chaining.
+   Each is a completely ordinary single-task job from the reconciler's,
+   webhook's, and metrics' point of view — they just happen to share a
+   `SourceFormat` value.
+2. **Reconciler recovery** — `reconciler.go`'s engine switch already fails
+   closed on an unrecognized `jobs.engine` value ("av"/"cad"/"archive"/
+   "probe" are explicitly named in the fail-closed comment as future
+   engines that must add their own case rather than fall through). Adding
+   `case convert.EngineAV: enqueueErr = s.enq.EnqueueAVConvert(...)` is a
+   two-line, low-risk addition to an already-designed-for-this switch.
 
 ## Scaling Considerations
 
-| Concern | Image/Document/HTML (existing) | Audio (new) |
-|---------|-------------------------------|--------------|
-| CPU cost shape | Bounded, sub-second to low-tens-of-seconds per job | Proportional to audio DURATION × model size; can be the most CPU-hungry class per-job in the whole system (whisper.cpp on CPU is commonly single-digit-multiples of real-time for base/small models — MEDIUM confidence) |
-| `AUDIO_ENGINE_TIMEOUT` sizing | N/A | Must be sized generously against the LONGEST audio file the service is expected to accept, not against a "typical" file — unlike document (worst case is a complex-but-bounded office file) audio's worst case scales with a client-controlled duration. Consider whether an upload-time duration/size ceiling belongs alongside `MAX_UPLOAD_BYTES` (the existing size cap already bounds duration indirectly for a given bitrate, but is not an explicit duration guard the way `MAX_IMAGE_PIXELS`/`MAX_DOCUMENT_UNCOMPRESSED_BYTES` are explicit resource-exhaustion guards for their classes) |
-| KEDA scaling | `threshold`/`maxReplicaCount` tuned per class already (image 5/4, document 1/2, html 2/2) | Audio's per-job cost is higher and more variable than any existing class — start `keda.audio.threshold` LOW (e.g. `1`, mirroring document's conservative "1 pending job = scale up" posture, not image's "5") given each job can legitimately occupy a worker for minutes |
-| Retry-state stranding (27-REVIEW WR-06) | Documented invariant: `cooldownPeriod` must exceed the class's max retry backoff or scale-to-zero can strand a retry-state task | Applies identically to audio — whatever `audioRetrySchedule` is chosen (recommend mirroring `documentRetrySchedule`'s shape: short, no-jitter, e.g. 5s/15s/30s — the timeout-is-terminal policy means retries only ever fire for genuinely transient blips, not long-running work) must stay below `keda.audio.cooldownPeriod` |
-| Model/image size | N/A | Baking a whisper.cpp ggml model into `Dockerfile.audio-worker` adds real, fixed image weight (tiny≈75MB, base/small are the realistic production choices, large-v3≈3.1GB — MEDIUM confidence, WebSearch-verified) — pin ONE model explicitly (mirrors the project's existing "never `:latest`, pin everything" discipline: MinIO release tags, veraPDF `v1.30.2`, asynqmon `0.7.2`) rather than downloading at container startup, which would violate the "workers remain offline" constraint restated in PROJECT.md's v1.7 Key context |
+| Scale | Architecture Adjustments |
+|-------|--------------------------|
+| Current (internal clients, single-cluster) | One `av-worker` Deployment, KEDA scale-0→N→0 on `octoconv_queue_depth{queue="av"}`, mirrors audio's proven pattern exactly (Phase 33 evidence directly reusable as a template) |
+| If transcode volume dominates | `AV_WORKER_CONCURRENCY` and CPU/memory limits are the first knob (mirrors audio's `AUDIO_WORKER_CONCURRENCY=1` choice, driven by whisper's RSS footprint under a fixed cgroup budget — av's equivalent constraint is ffmpeg's CPU-bound transcode competing for the same 2-CPU limit; concurrency=1 is the safe starting assumption until measured otherwise) |
+| If thumbnail volume dominates and is retry-budget-starved by the shared transcode-sized `AV_ENGINE_TIMEOUT` | This is the one scenario where Decision C's "one shared timeout" tradeoff bites — revisit with real production metrics before building per-pair timeouts speculatively |
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Reusing an existing engine's timeout-classification policy without re-deriving it
+### Anti-Pattern 1: Assuming "video" needs its own end-to-end pipeline
 
-**What people might do:** Copy `isTerminal`'s image-path "timeout is always transient, keep retrying" behavior for audio because it's the "default"/first-written classifier in the file.
-**Why it's wrong:** whisper.cpp's cost is a deterministic function of input duration/model — a timing-out job will time out again on retry. Retrying it anyway burns `AUDIO_MAX_RETRY × AUDIO_ENGINE_TIMEOUT` of worker capacity (potentially the most expensive class in the system) on guaranteed-repeat failures, exactly the DOC-08 defect class that document/html were deliberately written to avoid.
-**Do this instead:** `isAudioTerminal(err) = timeoutIsTerminal(err)`, mirroring `isDocumentTerminal`/`isHTMLTerminal` (see Pattern 2).
+**What people do:** build a second whisper.cpp integration inside the av
+container because "video→transcript" sounds like a new capability.
 
-### Anti-Pattern 2: Trusting whisper-cli/ffmpeg exit code 0 as proof of a valid output file
+**Why it's wrong:** it duplicates ~682MB of image weight, doubles the
+RTF-measurement/GO-NO-GO burden, and ignores that `ffmpeg -i <video>`
+already IS the audio-extraction step the existing `AudioConverter.Convert`
+performs — the "new capability" is entirely in `Pairs()`, not `Convert()`.
 
-**What people might do:** Skip output validation because "the process exited 0."
-**Why it's wrong:** Every existing engine in this codebase has been live-tested to exit 0 while producing empty/no/wrong output under some failure mode (LibreOffice's documented "exit 0, no output file"; chromium-headless-shell's one-shot handler silently producing nothing under specific flag combinations). There is no reason to assume whisper.cpp/ffmpeg are exempt, and the codebase's own `terminalLibreOfficeSignatures`/`terminalChromiumSignatures` comments explicitly warn against this assumption.
-**Do this instead:** `validateAudioOutput` should `os.Stat` the produced file, reject zero-size, and — for `json`/`srt`/`vtt` — do a cheap structural sanity check (e.g. `srt`/`vtt` start with an expected header/cue pattern, `json` is valid JSON) mirroring `validatePDF`'s magic-byte discipline. Couple any new terminal-signature substrings into `terminalWhisperSignatures`/`terminalFFmpegSignatures` in the SAME commit that introduces the validator, exactly as `libreoffice.go`'s validator and `worker.go`'s signature slice are documented to ship atomically (see the D-04/T-13-02 comment pattern already in the codebase).
+**Do this instead:** extend `AudioConverter.Pairs()` (Decision A).
 
-### Anti-Pattern 3: Shallow mp3 magic-byte matching that ignores the ID3v2 prefix problem
+### Anti-Pattern 2: Treating mkv/webm sniffing like mp4/mov/avi sniffing
 
-**What people might do:** Add mp3 to `sniff.go`'s `signatures` table with a single naive check like the existing `matchJPEG`/`matchWebP` shallow-prefix pattern (e.g. only checking for a raw `0xFF 0xE0`-masked frame-sync at byte 0).
-**Why it's wrong:** A large fraction of real-world mp3 files begin with an `"ID3"` (0x49 0x44 0x33) tag of ARBITRARY, self-declared length (a syncsafe-encoded size field) BEFORE the actual MPEG frame sync bytes — this is exactly the class of "prefix lies about structure" problem `docsniff.go`/`olecfb.go`/`dimensions.go` already solve carefully for other formats. A frame-sync-only check silently rejects every ID3-tagged mp3 as unrecognized content (422 for a huge share of real client uploads), while a naive `"ID3"`-prefix-only check risks being too loose (though in practice `"ID3"` as a 3-byte literal is a low-collision signature, unlike a single-byte or 2-byte magic).
-**Do this instead:** Match EITHER (a) raw frame sync `b[0]==0xFF && (b[1]&0xE0)==0xE0` at offset 0 (untagged mp3) OR (b) the 3-byte `"ID3"` literal at offset 0 (tagged mp3, accepted at the shallow-prefix level — consistent with the codebase's existing shallow-signature precedent for webp/tiff/jpeg, which also don't fully validate structure past the magic). `sniffLen=12` already covers both cases; no buffer-size change is needed for the signature check itself (unlike the separate audio-duration-bomb question under Scaling Considerations, which is a distinct, larger-buffer concern if pursued).
+**What people do:** try to add `matchMKV`/`matchWebM` to `sniff.go`'s fixed
+12-byte-window `signatures` table, copying `matchHEIC`'s shape.
 
-### Anti-Pattern 4: Reintroducing the WR-01 empty-PromQL bug in the new `scaledobject-audio.yaml`
+**Why it's wrong:** EBML's `DocType` element (the only reliable mkv/webm
+disambiguator) is not at a fixed offset — it's preceded by a variable
+number of variable-length preceding EBML elements. A fixed-offset matcher
+will silently misdetect or reject valid files depending on how many
+optional header elements a given encoder emitted.
 
-**What people might do:** Copy `scaledobject-document.yaml` verbatim (including its as-shipped `ignoreNullValues: "true"`) before the WR-01 hardening-tail fix lands, then have to patch a 4th file when WR-01 is fixed.
-**Why it's wrong:** Doing the audio ScaledObject work before the hardening-tail fix means writing the known-bad pattern once more, guaranteed to need a follow-up edit.
-**Do this instead:** Sequence WR-01's chart fix BEFORE `scaledobject-audio.yaml` is authored (see Suggested Build Order below), so audio's ScaledObject is written correctly the first time and the other three are fixed in the same commit/phase.
+**Do this instead:** a bounded-peek, declared-length-aware parser mirroring
+`matchMP3`'s discipline (Decision B) — fail closed on anything past the
+bound, never grow/seek further.
+
+### Anti-Pattern 3: Sizing `AV_ENGINE_TIMEOUT` off the cheapest operation
+
+**What people do:** measure thumbnail extraction (fast, easy to test) and
+set `AV_ENGINE_TIMEOUT` based on that, then discover transcode jobs
+routinely time out and get misclassified.
+
+**Why it's wrong:** the milestone brief itself states transcode is 10-100×
+more expensive than thumbnail — sizing off the wrong end of that range
+means every real transcode job gets killed mid-attempt and (per
+`isAVTerminal`'s ffmpeg-timeout-is-terminal classification, mirroring
+audio's Key Decision 1) fails terminally instead of transiently, wasting
+the retry budget entirely.
+
+**Do this instead:** measure the worst-case transcode explicitly
+(`scripts/av-transcode-measure.sh`), same GO/NO-GO discipline as
+`scripts/audio-rtf-measure.sh`.
 
 ## Integration Points
 
-### External Tools (new)
+### External Services
 
-| Tool | Integration Pattern | Notes |
-|------|---------------------|-------|
-| `whisper.cpp` (`whisper-cli` binary) | Built from source in the Dockerfile's builder stage (no Debian apt package exists — confirmed via search; official images build from source too) via `git clone` pinned to a tag/commit + `cmake`/`make`, ggml model downloaded and BAKED into the image at build time (never at container runtime — matches the "offline worker" constraint), invoked via the existing hardened `runCommand` (`internal/convert/exec.go`) — no new exec-wrapper mechanism needed | Pin the model explicitly (recommend `base` or `small`, English or multilingual per requirements) mirroring the project's "never `:latest`" discipline (veraPDF `v1.30.2`, MinIO release tags, asynqmon `0.7.2`). MEDIUM confidence — WebSearch-verified, no in-repo precedent. |
-| `ffmpeg` | Installed via `apt-get install ffmpeg` in the runtime stage (available in `debian:bookworm-slim`'s repos, unlike whisper.cpp) — same `runCommand` invocation mechanism, called as the first of two sequential steps inside `AudioConverter.Convert()` | Confirms the project's existing "one apt-installed CLI tool per engine class" pattern (libvips-tools / libreoffice-*-nogui / chromium-headless-shell) extends cleanly to "two CLI tools, one apt + one built-from-source" |
+| Service | Integration Pattern | Notes |
+|---------|---------------------|-------|
+| `ffmpeg` (video decode/transcode/thumbnail/audio-extract) | Hardened `os/exec` via `runCommand` (process-group kill on timeout) — **identical** invocation discipline to the existing `ffmpegNormalizeArgs`/`ffprobeDurationArgs` | No new exec-hardening mechanism needed; `runCommand` is already engine-agnostic |
+| `ffprobe` (duration + resolution guard) | Same short-bound, separate-ctx-from-whole-attempt pattern as `audioProbeTimeout`/`ProbeDuration` | Resolution probe (Decision D) is a one-field extension of the exact same call shape |
 
-### Internal Boundaries (all pre-existing interfaces — audio is a pure addition of new implementations/cases, no interface redesign)
+### Internal Boundaries
 
 | Boundary | Communication | Notes |
 |----------|---------------|-------|
-| `internal/api` ↔ `internal/queue` | `Enqueuer` interface (`internal/api/api.go`) | Add `EnqueueAudioTranscribe(ctx, jobID) error` to the interface AND `handleCreateJob`'s routing switch — both must change together or the switch's `default:` fail-closed branch silently rejects every audio job with a 500 |
-| `internal/reconciler` ↔ `internal/queue` | `enqueuer` interface (`internal/reconciler/reconciler.go`) | Same shape, independent interface (interface segregation is deliberate here — do not merge with `api.Enqueuer`) |
-| `internal/worker` ↔ `internal/convert` | `registry.Lookup(source, target)` — engine-agnostic, ALREADY handles any registered `Converter` | No change needed — `process()` in `worker.go` is already engine-agnostic; only the per-engine `Handle*` wrapper and terminal-classifier are new |
-| `cmd/api` ↔ `internal/metrics` | `NewQueueDepthCollector(inspector, queues...)` variadic call site | Purely additive — add `queue.QueueAudio` to the existing call in `cmd/api/main.go`; the collector itself needs zero changes (already generic) |
-| Helm chart ↔ KEDA | `scaledobject-audio.yaml` → in-chart Prometheus → `octoconv_queue_depth{queue="audio",...}` | Gate on `and .Values.keda.enabled .Values.prometheus.enabled` exactly like the other three (co-dependency guard documented in `scaledobject-image.yaml`'s header comment) |
-
-## Hardening-Tail Mapping (v1.6 residual items → concrete files)
-
-The milestone bundles four v1.6 hardening-tail items with the new audio class. Mapped to files:
-
-| Item | File(s) | What changes | Independent of audio work? |
-|------|---------|---------------|------------------------------|
-| **WR-01** (empty-PromQL semantics) | `deploy/chart/octoconv/templates/scaledobject-image.yaml`, `scaledobject-document.yaml`, `scaledobject-html.yaml` (all three, `ignoreNullValues` line) | Flip `ignoreNullValues: "true"` → `"false"` (sustained api-outage now correctly trips KEDA's `fallback`), or add an `absent(octoconv_queue_depth)` alert as a documented compensating control instead. 27-REVIEW.md gives both options explicitly. | YES, fully independent — pure chart-template edit, zero Go code, zero audio dependency. **Should land BEFORE `scaledobject-audio.yaml` is authored** (Anti-Pattern 4) so the new file is correct from its first commit. |
-| **OPER-01** (compose `OPERATOR_CLIENT_IDS` passthrough + live gate) | `docker-compose.yml` (`api.environment` block, currently missing the key entirely — confirmed by direct read) | Add `OPERATOR_CLIENT_IDS: ${OPERATOR_CLIENT_IDS:-}` to the `api` service's `environment:` block (the exact fix 26-REVIEW.md's WR-03 specifies), then run the deferred live gate (set an operator UUID via compose env override, hit `/v1/system/presets`, confirm 200 for the operator / 404 for everyone else) | YES, fully independent — one-line compose edit + a live verification pass, zero audio dependency. Cheap, should land early (low risk, unblocks closing out v1.6's own audit). |
-| **Gate-tooling warnings** (28-REVIEW WR-01..WR-06) | `deploy/chart/octoconv/templates/scaledobject-document.yaml:38` (Go-template `0`-is-falsy truthiness bug on `scaleDownStabilizationSeconds`), `scripts/keda-load-proof.sh` (stale-Terminating-pod selection, S3-error-body-as-success download check, orphaned `kubectl -w` watcher), `scripts/fixtures/render_evidence.py` (unpinned Python≥3.11 requirement), `scripts/fixtures/gen_heavy_docx.py` (CWD-relative sample-image path) | Six independent, mechanical fixes — none touch `internal/` Go packages; all are chart-template or shell/Python tooling robustness fixes surfaced by the Phase 28 code review | YES, fully independent — these are load-proof GATE SCRIPT correctness fixes, not product code. No audio dependency. Lowest priority/risk of the four hardening items (tooling only, not shipped product behavior) but cheap to batch together since they're all in `28-REVIEW.md`'s Warnings section already. |
-| **K8S-02** (direct-dial recheck) | No file change — this is a LIVE VERIFICATION task against a running OrbStack cluster (confirm a presigned MinIO URL resolves via a direct host→cluster FQDN dial, without the `kubectl port-forward` workaround Phase 24's live gate had to use because of a wedged OrbStack proxy layer) | Re-run the specific `curl` against `minio.octoconv.svc.cluster.local:9000` from the bare host once OrbStack's proxy is healthy; update `24-VERIFICATION.md`'s human-verification item #2 from open to resolved | YES, fully independent — pure operational re-check, zero code change of any kind. Can be done any time the OrbStack daemon is healthy; not gated on any other hardening item. |
-
-**Can these four form one coherent phase?** Yes, with a caveat: they are independent of EACH OTHER and independent of the audio work, but they are NOT independent of the ORDER within themselves relative to audio's chart additions (WR-01 must precede `scaledobject-audio.yaml`, per Anti-Pattern 4). They share no code paths, so batching them into a single "hardening tail" phase carries no coupling risk — but there's little value in NOT batching them either, since they're all small, low-risk, single-file-or-script edits already fully specified by existing review documents (no new research needed — this is closing out already-diagnosed findings, not discovering new ones). Recommend one phase, ordered internally as: WR-01 chart fix → OPER-01 compose fix + live gate → gate-tooling script fixes (batch) → K8S-02 live recheck (can run any time, including in parallel/opportunistically).
+| `internal/api` ↔ `internal/convert` (av) | `EngineFor(detected,target)` at job-creation time; opts dispatch switch gains an `EngineAV` case parallel to the existing `EngineAudio`/`EngineHTML`/default cases | No new coupling mechanism — same pattern as document/html/audio |
+| `internal/worker` ↔ `internal/convert` (av) | `Registry.Lookup` inside the engine-agnostic `process()` — `HandleAVConvert` is a thin wrapper choosing `isAVTerminal` and `queue.QueueAV` labels, structurally identical to `HandleAudioConvert` | `process()` itself needs one addition: the `enforceAVGuardBeforeConvert` gate, parallel to the existing `enforceAudioGuardBeforeConvert` call, both invoked unconditionally but internally gated on `job.Engine` |
+| `internal/reconciler` ↔ `internal/queue`/`internal/convert` (av) | `enqueuer` interface gains `EnqueueAVConvert`; engine switch gains `case convert.EngineAV` | The switch's `default` branch already documents "av/cad/archive/probe are out of scope this milestone... a future engine must add its own case" — this is that future engine arriving |
+| `av-worker` ↔ `audio-worker` (shared audio-queue routing for video→transcript) | **No direct communication** — they are only related by both consuming from the registry; `av-worker` never touches `QueueAudio` and `audio-worker` never touches `QueueAV` | This is the one relationship worth stress-testing explicitly in the build-order's integration phase: confirm a video-source, transcript-target job never lands in `av-worker`'s queue by accident (pair-disjointness test, Decision B) |
 
 ## Suggested Build Order
 
-1. **Hardening tail (WR-01, OPER-01, gate-tooling, K8S-02)** — zero dependency on audio, all pre-diagnosed by existing review docs, cheap. Landing this FIRST means `scaledobject-audio.yaml` (step 9 below) is written correctly from its first commit instead of needing a follow-up patch (Anti-Pattern 4). K8S-02's live recheck can float independently/opportunistically since it blocks nothing.
-2. **`internal/convert` foundation** — `EngineAudio` const, `audiosniff.go` (mp3/wav/m4a/ogg signatures, including the mp3 ID3-vs-frame-sync dual path), `MIMEType` additions, `AudioConverter` skeleton (`Pairs()`/`Engine()` only, `Convert()` can initially be a thin wrapper while the exec pipeline is built next) — this is the layer every other touch point depends on (`EngineFor` lookups, `Registry.Classes()` for `/v1/formats`).
-3. **`AudioConverter.Convert()` — the ffmpeg+whisper-cli pipeline** — build and validate against a local whisper.cpp install BEFORE touching the queue/worker plumbing, since this is the one genuinely new piece of external-process integration (two sequential `runCommand` calls, a real model file, real output-format validation). Get this working as a standalone, testable unit first.
-4. **`internal/queue` — task/queue/retry/TTL** — `TypeAudioTranscribe`, `QueueAudio`, `NewAudioTranscribeTask`, `AudioRetryDelay`/`audioBackoffSum`/`AudioUniqueTTL`, `RetryDelayFunc` switch case, `Client.EnqueueAudioTranscribe`. Mechanical, mirrors `Document*`/`HTML*` blocks exactly — low risk once the pattern is followed.
-5. **`internal/worker` + `cmd/audio-worker`** — `HandleAudioTranscribe`, `isAudioTerminal` (Pattern 2 — get the timeout-is-terminal decision right here), terminal-signature slices, then the `cmd/audio-worker/main.go` binary itself (copy-adapt `cmd/document-worker/main.go`). This is where the pipeline built in step 3 gets wired into the real async job lifecycle.
-6. **`internal/api` + `internal/reconciler` routing** — add `EngineAudio` to both engine-routing switches (`handleCreateJob`, `reconciler.sweep()`) and both `Enqueuer`/`enqueuer` interfaces. Small, mechanical, but easy to forget one of the two switches (reconciler's fail-closed `default:` means a missed case degrades gracefully rather than crashing — but it IS a real gap until added).
-7. **`cmd/api/main.go` metrics registration** — add `queue.QueueAudio` to the `NewQueueDepthCollector` call. One line; do this alongside step 6 since both are "make the new engine class visible to the rest of the system" work.
-8. **`Dockerfile.audio-worker` + `docker-compose.yml` + CI bake matrix** — get the container building and runnable in compose before touching Kubernetes; this is also where the "bake the ggml model in at build time" decision gets made concrete and where local end-to-end testing becomes possible for the first time.
-9. **Helm chart (`values.yaml`, `configmap.yaml`, `deployment-audio-worker.yaml`, `scaledobject-audio.yaml`)** — last, because it depends on the compose service/env contract from step 8 being stable, and because `scaledobject-audio.yaml` should be written with the already-landed WR-01 fix in hand (step 1).
-10. **Live E2E verification** — a full audio job (upload mp3 → transcript in each of txt/srt/vtt/json → webhook/download) against the real compose stack, then (if in scope this milestone) against the Helm/KEDA chart mirroring Phase 27/28's live-gate discipline.
+Mirrors the audio engine's own four-phase shape (`Phase 30` standalone
+foundation → `Phase 31` async-contour wiring → `Phase 32` containerize +
+measure → `Phase 33` KEDA/helm parity), which is directly reusable as a
+template since av is architecturally the same kind of addition.
 
-This order front-loads the one genuinely novel piece of engineering (the ffmpeg+whisper.cpp pipeline, step 3) before investing in the surrounding plumbing, and defers all Kubernetes/KEDA work (step 9-10's chart half) until the simpler compose path has already proven the pipeline works — matching how document (Phase 10-11) and html (Phase 15) were built before their K8s/KEDA integration arrived three phases later (v1.6), not simultaneously with the engine class itself.
+**Phase 1 — AV foundation (standalone, NOT registered into `convert.Default`)**
+- `AVConverter` (`Pairs()`/`Convert()`/`Engine()==EngineAV`) for transcode,
+  audio-extract, thumbnail — three distinct ffmpeg argv builders, one
+  `Convert()` dispatching on target format (mirrors `whisperOutputFlag`'s
+  target-driven dispatch shape)
+- `AVOpts` closed-allowlist type (timecode for thumbnail; resolution/codec
+  preset for transcode) — mirrors `AudioOpts`/`HTMLOpts`
+- `matchMP4`/`matchMOV`/`matchAVI` added to `sniff.go`'s existing table
+- `avsniff.go`: bounded-peek EBML/DocType parser for mkv/webm (real parsing
+  work — budget it as such, not a one-line addition)
+- `AudioConverter.Pairs()` extended with video-container × transcript
+  targets; `ffmpegNormalizeArgs` gains explicit `-vn` for video sources
+- `ProbeDuration`-based `AV_MAX_DURATION_SECONDS` guard + new resolution
+  probe (Decision D) as standalone, unit-testable functions
+- Unit test: pair-disjointness between `AVConverter` and every other
+  registered converter (new test category, no prior precedent)
+- Fixture-based sniff tests against real ffmpeg-produced mp4/mov/mkv/webm/avi
+  samples (mirrors `30-01`'s audio-fixture test discipline)
+- **Registration deferred** — same scope-fence Phase 30 used for
+  `AudioConverter` (build and test in isolation before touching the live
+  registry/queue)
+
+**Phase 2 — Async contour integration**
+- `EngineAV` constant; `Default.Register(AVConverter{})`
+- `TypeAVConvert`/`QueueAV`/`NewAVConvertTask`/`avRetrySchedule`/
+  `AVRetryDelay`/`AVUniqueTTL` in `internal/queue/queue.go` (mirrors
+  `Audio*` symbols exactly; `jobs_engine_check` needs **no migration** —
+  `'av'` is already allow-listed)
+- `isAVTerminal` (stage-aware, mirrors `isAudioTerminal`'s shape minus the
+  two-binary complexity) and `HandleAVConvert` in `internal/worker/worker.go`
+- `enforceAVGuardBeforeConvert` spliced into `process()`, gated on
+  `job.Engine == convert.EngineAV`
+- API routing: `handleCreateJob`'s enqueue switch and opts-dispatch switch
+  both gain an `EngineAV` case
+- Reconciler: `enqueuer` interface + engine switch gain the av case
+- `EnqueueAVConvert` on `queue.Client`
+- IN-02-style env-parity sweep: `AV_MAX_RETRY`/`AV_ENGINE_TIMEOUT`/
+  `AV_MAX_DURATION_SECONDS` must be added to **every**
+  `queue.NewClient()`-constructing service's env (api, worker,
+  document-worker, chromium-worker, audio-worker, av-worker,
+  webhook-worker×2 — nine services total once av joins)
+- Explicit integration test: a video-source/transcript-target job lands on
+  `QueueAudio`, not `QueueAV` (verifies Decision A end-to-end, not just at
+  the unit level)
+
+**Phase 3 — Containerize + measure**
+- `Dockerfile.av-worker` (ffmpeg + ca-certificates only, no whisper stage —
+  should land far below `audio-worker`'s 682MB)
+- `cmd/av-worker/main.go` (mirrors `cmd/audio-worker/main.go` minus
+  whisper-specific env)
+- `scripts/av-transcode-measure.sh`: GO/NO-GO measurement against the
+  worst-case supported transcode (largest resolution/duration/codec
+  combination this milestone intends to support) — mirrors
+  `scripts/audio-rtf-measure.sh`'s methodology, but measuring wall-clock
+  vs. transcode parameters rather than whisper's RTF concept specifically
+- Separately measure/verify: does video-source→transcript (routed to the
+  *existing* audio-worker, Decision A) meaningfully change whisper's
+  measured RTF assumption? If video demux overhead is non-negligible
+  relative to `AUDIO_ENGINE_TIMEOUT`'s existing margin, this surfaces here,
+  not as an afterthought
+- `docker-compose.yml`: `av-worker` service, resource limits matching the
+  measurement container, `stop_grace_period` = `AV_ENGINE_TIMEOUT` + margin
+  (mirrors `audio-worker`'s 762s pattern)
+- E2E tests (`internal/e2e`): transcode, audio-extract, thumbnail (av
+  queue) + video→transcript (audio queue, confirms Decision A live, not
+  just via unit test)
+
+**Phase 4 — KEDA/Helm parity**
+- `deployment-av-worker.yaml`/`scaledobject-av.yaml` (mirrors audio's
+  templates; WR-01 triad verbatim: `ignoreNullValues:"false"`,
+  `fallback.replicas:1`, retry-inclusive PromQL)
+- `values.yaml` `avWorker` section; `terminationGracePeriodSeconds` =
+  `AV_ENGINE_TIMEOUT` + margin
+- `QueueAV` added to the api's `NewQueueDepthCollector` call (five engine
+  queues + webhook, once av joins)
+- `scripts/keda-av-loadproof.sh` (mirrors `keda-audio-loadproof.sh`,
+  frozen-script discipline once it passes)
+- **No new KEDA proof needed for video→transcript** specifically — it
+  inherits the audio queue's already-proven scale-from-zero coverage
+  (Phase 33 evidence); only the integration test from Phase 2 needs to
+  confirm routing, not autoscaling behavior
+
+**Dependency notes:**
+- Phase 1 must fully precede Phase 2 (mirrors the audio milestone's own
+  "standalone before registered" scope fence — reduces the blast radius of
+  a half-wired engine touching the live registry).
+- The EBML sniffer (mkv/webm) is the single highest-uncertainty item in
+  Phase 1 — real parsing code, not a lookup table — and should be started
+  first within the phase so any surprises (e.g. real-world encoders
+  emitting DocType further into the stream than expected) surface early
+  rather than blocking Phase 2's integration test at the end.
+- Phase 3's transcode-timeout measurement gates Phase 4 the same way
+  audio's RTF measurement gated its own KEDA phase (`AV_ENGINE_TIMEOUT`
+  feeds `terminationGracePeriodSeconds` and the scale-down stabilization
+  window, both of which would need a second pass if the measured value
+  changes after Phase 4's templates are written).
 
 ## Sources
 
-- Direct reads of `internal/convert/{convert,converters,libvips,libreoffice,chromium,exec,sniff,docsniff,htmlsniff,dimensions}.go`, `internal/queue/{queue,client}.go`, `internal/worker/worker.go`, `internal/api/{api,handlers}.go`, `internal/reconciler/reconciler.go`, `internal/metrics/queue_collector.go`, `internal/storage/keys.go`, `internal/jobs/jobs.go`, `cmd/{api,worker,document-worker}/main.go` — HIGH confidence, ground truth.
-- `docker-compose.yml`, `.github/workflows/ci.yml`, `Dockerfile.{worker,document-worker}`, `deploy/chart/octoconv/{values.yaml,templates/*}` — HIGH confidence, ground truth.
-- `.planning/milestones/v1.6-phases/{26-operator-presets-rest/26-REVIEW.md, 27-keda-autoscaling/27-REVIEW.md, 28-autoscale-load-proof/28-REVIEW.md, 24-helm-chart-core/24-VERIFICATION.md}` — HIGH confidence, ground truth for the hardening-tail mapping (WR-01, OPER-01/WR-03, gate-tooling WR-01..06, K8S-02's SC3 direct-dial item).
-- whisper.cpp CLI output-format flags (`--output-txt/srt/vtt/json`), input requirement (16kHz mono 16-bit PCM WAV), and lack of an apt package (build-from-source) — MEDIUM confidence, WebSearch-verified against `ggml-org/whisper.cpp` GitHub docs and multiple independent how-to sources (til.simonwillison.net, DeepWiki CLI reference); no in-repo precedent exists to cross-check against, unlike every other claim in this document.
-- ggml model size figures (tiny≈75MB, large-v3≈3.1GB) — MEDIUM confidence, WebSearch-verified, used only to inform the "pin one model, bake it in" recommendation, not as a hard requirement.
+- Codebase: `internal/convert/convert.go`, `internal/convert/whisper.go`,
+  `internal/convert/audiosniff.go`, `internal/convert/audioduration.go`,
+  `internal/convert/audioopts.go`, `internal/convert/sniff.go`,
+  `internal/convert/converters.go`, `internal/queue/queue.go`,
+  `internal/worker/worker.go`, `internal/api/handlers.go`,
+  `internal/reconciler/reconciler.go`, `internal/db/migrations/0006_audio_engine.sql`,
+  `cmd/audio-worker/main.go`, `Dockerfile.audio-worker`, `docker-compose.yml`,
+  `deploy/chart/octoconv/templates/deployment-audio-worker.yaml`,
+  `deploy/chart/octoconv/templates/scaledobject-audio.yaml`,
+  `deploy/chart/octoconv/values.yaml`, `.planning/PROJECT.md`
+- [EBML specification (ietf-wg-cellar)](https://github.com/ietf-wg-cellar/ebml-specification/blob/master/specification.markdown) — EBML magic `0x1A45DFA3`, DocType element mechanism
+- [RFC 8794: Extensible Binary Meta Language](https://www.rfc-editor.org/rfc/rfc8794.html) — authoritative EBML structure spec
+- [Matroska Basics](https://www.matroska.org/technical/basics.html) — DocType `"matroska"` requirement
+- [The WebM Project — Container Guidelines](https://www.webmproject.org/docs/container/) — DocType `"webm"` convention
+- [ISO base media file format — Wikipedia](https://en.wikipedia.org/wiki/ISO/IEC_base_media_file_format) — `ftyp` brand mechanism, `isom`/`mp41`/`mp42` generic brands
+- [Complete List of all known MP4/QT 'ftyp' designations (ftyps.com)](https://www.ftyps.com/) — authoritative brand-code reference including `"qt  "` (QuickTime)
 
 ---
-*Architecture research for: octoconv v1.7 (audio engine class + v1.6 hardening tail)*
-*Researched: 2026-07-17*
+*Architecture research for: OctoConv v1.8 AV Engine (video/ffmpeg)*
+*Researched: 2026-07-19*
