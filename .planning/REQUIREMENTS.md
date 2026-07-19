@@ -27,7 +27,7 @@ Requirements for milestone v1.8. Each maps to roadmap phases.
 
 ### Инфраструктура (AVE)
 
-- [ ] **AVE-01**: Fail-closed magic-bytes валидация видео-контейнеров до записи в S3: ISO-BMFF ftyp brands (mp4/mov), EBML DocType (mkv vs webm, bounded-peek парсер), RIFF/`AVI ` — с тестами непересечения с существующими снифферами (WAV/RIFF, m4aBrands/heicBrands)
+- [x] **AVE-01**: Fail-closed magic-bytes валидация видео-контейнеров до записи в S3: ISO-BMFF ftyp brands (mp4/mov), EBML DocType (mkv vs webm, bounded-peek парсер), RIFF/`AVI ` — с тестами непересечения с существующими снифферами (WAV/RIFF, m4aBrands/heicBrands)
 - [ ] **AVE-02**: Guards до дорогой стадии: ffprobe duration-гард (паттерн audioduration.go, свой `AV_MAX_DURATION_SECONDS`) + resolution-probe против decode-bomb; `-protocol_whitelist file,crypto` на каждом вызове ffmpeg/ffprobe (SSRF/LFI через HLS/concat/subtitle-контент внутри контейнера)
 - [ ] **AVE-03**: Отдельная av asynq-очередь + `cmd/av-worker` со своим retry schedule и unique-lock TTL из worst-case бюджета; stage-aware transient/terminal классификация выведена заново для видео (transcode-таймаут ≠ audio-прецедент «ffmpeg=terminal»); reconciler-роутинг по `jobs.engine='av'`
 - [ ] **AVE-04**: av-worker контейнеризован (Debian ffmpeg с CVE-backport, версия пиненная); `AV_ENGINE_TIMEOUT` измерен RTF-матрицей worst-case (max разрешение × самый дорогой кодек × max длительность) по методологии Phase 32, с NO-GO-рычагами
