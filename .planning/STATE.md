@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: planning
+status: executing
 stopped_at: Phase 35 planned (7 plans, 3 waves) — ready to execute
-last_updated: "2026-07-20T22:40:22.005Z"
-last_activity: 2026-07-20
+last_updated: "2026-07-20T22:56:21.501Z"
+last_activity: 2026-07-20 -- Phase 35 execution started
 progress:
   total_phases: 4
   completed_phases: 1
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 35 — queue, worker & routing integration
+**Current focus:** Phase 35 — queue-worker-routing-integration
 
 ## Current Position
 
-Phase: 35
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-07-20
+Phase: 35 (queue-worker-routing-integration) — EXECUTING
+Plan: 1 of 7
+Status: Executing Phase 35
+Last activity: 2026-07-20 -- Phase 35 execution started
 
 ## Performance Metrics
 
