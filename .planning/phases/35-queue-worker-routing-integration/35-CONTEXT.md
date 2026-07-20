@@ -38,7 +38,7 @@ Video jobs become reachable from outside for the first time. This phase wires th
 
 ### Detection chain and upload limits
 
-- **D-07: Two-tier upload ceiling.** Raise the global hard cap (`MAX_UPLOAD_BYTES`, currently 100 MiB) to a video-appropriate value — it protects memory/disk and is enforced by `http.MaxBytesReader` at `handlers.go:93`, *before* parsing and therefore before the engine class is known. Then add a **second, per-engine check after format detection**: a non-video upload exceeding its own class ceiling gets 413 before any S3 write. This keeps video uploadable without weakening the DoS posture of the four existing engine classes.
+- **D-07: Two-tier upload ceiling. Global cap = 2 GiB (operator-confirmed 2026-07-21).** Raise the global hard cap (`MAX_UPLOAD_BYTES`) from 100 MiB to **2 GiB (2147483648)**, and set the AV per-engine ceiling to the same 2 GiB; image/document/html/audio per-engine ceilings stay at 100 MiB. This closes research Assumption A3 — it is a **decided value, not an assumption**, and satisfies STATE.md's standing requirement that the video upload ceiling be an explicit named decision. The two-tier shape is what makes it safe — it protects memory/disk and is enforced by `http.MaxBytesReader` at `handlers.go:93`, *before* parsing and therefore before the engine class is known. Then add a **second, per-engine check after format detection**: a non-video upload exceeding its own class ceiling gets 413 before any S3 write. This keeps video uploadable without weakening the DoS posture of the four existing engine classes.
 
 - **D-08: Wire `SniffVideo` into the detection chain in the same change that registers `AVConverter`.** Carried forward from the Phase 34 code review (WR-02, deliberately deferred). Today mp4/mov/avi are detectable via the `signatures` table but mkv/webm are not detectable at all, and `SniffVideo` has zero non-test callers. Registering the converter without wiring the sniffer would ship an engine for formats the service cannot recognize.
 
@@ -51,11 +51,33 @@ Video jobs become reachable from outside for the first time. This phase wires th
 - The shape of the completeness test (table-driven over engine constants vs. reflection over the switch).
 - Where exactly `SniffVideo` slots into the existing detection chain order (`handlers.go:188` `Sniff` → `:202` `SniffContainer` → `:228` html → `:280` `SniffAudio`).
 
-### Open questions for research (raised, not decided)
+### Corrections from research (2026-07-21) — these supersede guesses made during discussion
 
-- **Video with no audio track submitted for transcription** — whisper would receive an empty input. Needs a defined behavior (fail-closed 422 at detection? terminal engine error? empty transcript?). Raised during discussion; deliberately not decided here.
-- **Multiple audio tracks in one container** — which track feeds whisper. Same class of question.
-- **`HasDimensionLimit` vs video** — appears to be a non-issue (it is scoped to image formats, so video skips the block, and the video resolution guard correctly lives in the worker via `EnforceMaxResolution`). Planner should confirm rather than assume.
+Two claims recorded during discussion were checked against HEAD by the researcher and turned out wrong. Trust the corrections, not the original wording elsewhere in this file:
+
+- **`worker.process()` does NOT need a sibling AV guard branch.** This file's `<code_context>` speculated it would, by analogy to `enforceAudioGuardBeforeConvert` (`worker.go:844-858`). It does not: AV's duration/resolution guard is already self-contained inside `AVConverter.Convert()`. Audio's guard is spliced into `process()` only because audio's converter does not own it.
+- **The D-01 sentinel refactor has a much smaller test blast radius than assumed.** Grep-verified: **zero** existing assertions in `av_test.go` pin the literal `"av: ffmpeg:"` string. The refactor is additive in practice.
+
+### Open questions for research — ALL RESOLVED (2026-07-21)
+
+Resolved by live execution against ffmpeg 8.1.2 / whisper-cli on the dev machine, not by inference. Kept here because the *answers* are load-bearing for planning:
+
+- **Video with no audio track → already fails closed today, no code change needed.** ffmpeg exits 234, the error wraps to `"audio: ffmpeg:"`, and the existing `isAudioTerminal` classifies it terminal. Do not invent a new sentinel for this.
+- **Silent/tone audio track → produces an *empty* whisper transcript, not hallucinated garbage**, and the existing `"audio: output is empty"` terminal check already catches it. STATE.md's accepted hallucination risk is narrower than feared but is NOT fully retired — do not treat it as closed.
+- **Multiple audio tracks → pin explicitly with `-map 0:a:0`**, mirroring `AVConverter`'s own convention, rather than depending on ffmpeg's default-track heuristic.
+- **`HasDimensionLimit` vs video → confirmed non-issue.** `dimensionParsers` is keyed only to the five image formats.
+
+### New pitfall surfaced by research (not known at discussion time)
+
+- **`RECONCILER_ACTIVE_STALE_AFTER` (global, 900s default) constrains `AV_ENGINE_TIMEOUT`.** This nearly broke the audio engine once already — the incident is documented in `docker-compose.yml`. A provisional `AV_ENGINE_TIMEOUT` in the 400–800s range is safe; anything approaching 900s makes the reconciler treat live jobs as stranded and requires raising the reconciler threshold as a coupled, explicit decision.
+
+### Superseded — historical
+
+These were the open questions as phrased during discussion, before research answered them. Retained only for provenance; **use the resolved answers above**, not these framings.
+
+- ~~Video with no audio track submitted for transcription — needs a defined behavior (fail-closed 422? terminal engine error? empty transcript?)~~ → already fails closed today, no change needed.
+- ~~Multiple audio tracks in one container — which track feeds whisper~~ → pin `-map 0:a:0`.
+- ~~`HasDimensionLimit` vs video — planner should confirm rather than assume~~ → confirmed non-issue.
 
 </decisions>
 
