@@ -32,9 +32,20 @@ type signature struct {
 	match  func(buf []byte) bool
 }
 
-// signatures is the hardcoded, closed detection table (D-03) scoped to
-// exactly the formats registered in convert.Default (imageFormats in
-// libvips.go): png, jpg, webp, heic, tiff.
+// signatures is the hardcoded, closed detection table (D-03). It covers the
+// image formats registered in convert.Default (imageFormats in libvips.go:
+// png, jpg, webp, heic, tiff) PLUS the fixed-offset video containers mp4,
+// mov and avi.
+//
+// The video entries are deliberately live AHEAD of engine registration
+// (WR-11, 34-REVIEW.md): AVConverter is built and tested in Phase 34 but not
+// registered into convert.Default until Phase 35, so an mp4 upload is
+// detected here and then rejected one step later at pair validation. mkv and
+// webm are NOT in this table -- they need a variable-offset EBML walk
+// (SniffVideo, avsniff.go) rather than a fixed 12-byte window, and that
+// matcher is likewise not wired into the upload path until Phase 35. Both
+// halves are fail-closed in the interim; keep this comment in sync when
+// Phase 35 registers the engine.
 var signatures = []signature{
 	{"png", matchPNG},
 	{"jpg", matchJPEG},
