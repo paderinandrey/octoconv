@@ -107,7 +107,14 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 
 ### Pending Todos
 
-- Plan Phase 34 (AV Engine Foundation): AVC-01..05, AVO-01..03, AVE-01, AVE-02. Zero async/queue dependency (standalone, unregistered like Phase 30's AudioConverter) — start with the EBML/DocType mkv/webm sniffer first (highest-uncertainty item, no prior codebase precedent, ARCHITECTURE.md-flagged).
+- ~~Plan Phase 34 (AV Engine Foundation)~~ — done; all 3 plans executed and code-reviewed (2026-07-20).
+
+**Hard inputs to Phase 35 planning, all originating in 34-REVIEW.md / 34-REVIEW-FIX.md:**
+
+- **Wire `SniffVideo` into the handlers chain in the SAME change that registers `AVConverter`.** WR-02 was deliberately skipped in Phase 34 as a scope fence: mp4/mov/avi went live via the `signatures` table, but `SniffVideo` (the mkv/webm EBML path) has zero production callers, so mkv/webm are currently undetectable. Registering the converter without wiring the sniffer ships a converter for formats the service cannot recognize.
+- **Map `ErrAVTimecodeOutOfRange` to 4xx, not 5xx.** Operator-accepted contract decision (2026-07-20): an explicit out-of-range thumbnail timecode is a hard client error, deliberately NOT clamped (silently retargeting a client request is the CR-01/CR-02 defect class). No API-layer mapping exists yet — without it a client typo surfaces as an internal error.
+- **`AVOpts.Timecode` is `*float64`, accepted as-is (2026-07-20).** nil = unset → default `min(1.0, dur/2)`; explicit `0` = honored as frame 0; explicit out-of-range = hard error; `NaN`/`±Inf` rejected at parse. Note the default is duration-relative, not a fixed 1.0s — two sources with the same request yield frames at different positions. Accepted knowingly; revisit only if API docs need a deterministic rule.
+- **IN-01 (Info tier, unfixed) composes cleanly with the `probeVideoStreams` refactor** — fold it into the Phase 35 plan rather than leaving it loose.
 
 ### Blockers/Concerns
 
