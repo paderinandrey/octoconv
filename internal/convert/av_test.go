@@ -754,6 +754,128 @@ func TestValidateAVOutput_SniffMismatch(t *testing.T) {
 	}
 }
 
+// TestAVStageSentinels_Distinguishable proves each of the three ffmpeg-stage
+// call sites (D-01, 35-CONTEXT.md) wraps with its OWN sentinel, so
+// errors.Is can tell transcode/audio-extract/thumbnail failures apart
+// without string matching -- before this refactor all three sites emitted
+// the identical "av: ffmpeg: %w" prefix. Runs against real ffmpeg with a
+// nonexistent input path so each stage's ffmpeg invocation fails fast and
+// deterministically -- no live fixture needed, and calling the unexported
+// stage methods directly (same-package test) means the guard stage's own
+// probe is never invoked, isolating exactly the ffmpeg-wrap behavior under
+// test.
+func TestAVStageSentinels_Distinguishable(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.mp4")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	c := AVConverter{}
+	src := avSourceProbe{
+		duration:   2 * time.Second,
+		primary:    avVideoStream{Index: 0, CodecName: "h264"},
+		audioCodec: "aac",
+	}
+
+	t.Run("transcode", func(t *testing.T) {
+		err := c.convertTranscode(ctx, missing, filepath.Join(dir, "out.mp4"), "mp4", AVOpts{}, src)
+		if err == nil {
+			t.Fatal("convertTranscode(missing input) = nil, want error")
+		}
+		if !errors.Is(err, ErrAVTranscodeFailed) {
+			t.Errorf("convertTranscode error = %v, want errors.Is ErrAVTranscodeFailed", err)
+		}
+		if errors.Is(err, ErrAVAudioExtractFailed) || errors.Is(err, ErrAVThumbnailFailed) {
+			t.Errorf("convertTranscode error = %v, want it NOT to match the other two stage sentinels", err)
+		}
+	})
+
+	t.Run("audio-extract", func(t *testing.T) {
+		err := c.convertAudioExtract(ctx, missing, filepath.Join(dir, "out.mp3"), "mp3")
+		if err == nil {
+			t.Fatal("convertAudioExtract(missing input) = nil, want error")
+		}
+		if !errors.Is(err, ErrAVAudioExtractFailed) {
+			t.Errorf("convertAudioExtract error = %v, want errors.Is ErrAVAudioExtractFailed", err)
+		}
+		if errors.Is(err, ErrAVTranscodeFailed) || errors.Is(err, ErrAVThumbnailFailed) {
+			t.Errorf("convertAudioExtract error = %v, want it NOT to match the other two stage sentinels", err)
+		}
+	})
+
+	t.Run("thumbnail", func(t *testing.T) {
+		err := c.convertThumbnail(ctx, missing, filepath.Join(dir, "thumb.jpg"), "jpg", AVOpts{}, src)
+		if err == nil {
+			t.Fatal("convertThumbnail(missing input) = nil, want error")
+		}
+		if !errors.Is(err, ErrAVThumbnailFailed) {
+			t.Errorf("convertThumbnail error = %v, want errors.Is ErrAVThumbnailFailed", err)
+		}
+		if errors.Is(err, ErrAVTranscodeFailed) || errors.Is(err, ErrAVAudioExtractFailed) {
+			t.Errorf("convertThumbnail error = %v, want it NOT to match the other two stage sentinels", err)
+		}
+	})
+}
+
+// TestAVTranscodeFailed_PreservesDeadlineExceeded proves the multi-%w wrap
+// (fmt.Errorf("%w: %w", ErrAVTranscodeFailed, err)) keeps runCommand's
+// underlying context.DeadlineExceeded reachable via errors.Is -- Go 1.20+
+// multi-%w unwraps every wrapped error, not just the first, so
+// errors.Is(err, context.DeadlineExceeded) must still hold on a transcode
+// timeout for isAVTerminal (worker.go, Phase 35 Plan 03) to tell a
+// transient timeout apart from a deterministic ffmpeg failure.
+func TestAVTranscodeFailed_PreservesDeadlineExceeded(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mov", "-c:v", "libx264", "-c:a", "aac")
+
+	// A ctx whose deadline is already in the past: runCommand's Start()/Wait()
+	// select races ctx.Done() (already closed) against the process's own
+	// completion channel (not yet ready at select time), so it deterministically
+	// takes the "killed: context deadline exceeded" branch.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	c := AVConverter{}
+	srcProbe := avSourceProbe{duration: 2 * time.Second, primary: avVideoStream{Index: 0, CodecName: "h264"}, audioCodec: "aac"}
+	err := c.convertTranscode(ctx, src, filepath.Join(dir, "out.mp4"), "mp4", AVOpts{}, srcProbe)
+	if err == nil {
+		t.Fatal("convertTranscode(expired ctx) = nil, want error")
+	}
+	if !errors.Is(err, ErrAVTranscodeFailed) {
+		t.Errorf("convertTranscode(expired ctx) error = %v, want errors.Is ErrAVTranscodeFailed", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("convertTranscode(expired ctx) error = %v, want errors.Is context.DeadlineExceeded (multi-%%w must preserve the underlying runCommand error)", err)
+	}
+}
+
+// TestAVProbeSource_NoVideoStream proves an audio-only source (zero video
+// streams) yields an error satisfying errors.Is(err, ErrAVNoVideoStream) --
+// IN-01 fold-in. Runs against a real ffmpeg-generated audio-only mp4.
+func TestAVProbeSource_NoVideoStream(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audio-only.mp4")
+	out, err := exec.Command("ffmpeg", "-y", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=duration=1",
+		"-c:a", "aac", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate audio-only fixture: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, probeErr := avProbeSource(ctx, path)
+	if probeErr == nil {
+		t.Fatal("avProbeSource(audio-only source) = nil error, want ErrAVNoVideoStream")
+	}
+	if !errors.Is(probeErr, ErrAVNoVideoStream) {
+		t.Errorf("avProbeSource(audio-only source) error = %v, want errors.Is ErrAVNoVideoStream", probeErr)
+	}
+}
+
 // TestProtocolWhitelist_BlocksHTTP_Canary is AVE-02's required offline canary
 // (34-RESEARCH.md "Protocol-whitelist offline canary"): a crafted HLS m3u8
 // referencing an http:// segment must be rejected, with zero outbound

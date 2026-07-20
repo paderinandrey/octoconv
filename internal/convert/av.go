@@ -275,6 +275,32 @@ var ErrAVOutputMissingOrEmpty = errors.New("av: output missing or empty")
 // (asynq.SkipRetry discipline, CLAUDE.md "Error Handling").
 var ErrAVTimecodeOutOfRange = errors.New("av: timecode exceeds source duration")
 
+// ErrAVTranscodeFailed classifies a failed ffmpeg invocation in the
+// transcode stage (convertTranscode, AVC-01/AVC-02/AVC-05) -- D-01
+// (35-CONTEXT.md): before this sentinel, all three ffmpeg call sites in this
+// file wrapped identically with the same "av" + "ffmpeg" prefix, so a caller
+// could not tell which stage failed without string matching. The
+// worker-layer classifier
+// (isAVTerminal, internal/worker/worker.go) matches this with errors.Is and
+// treats a TIMEOUT on this sentinel as TRANSIENT (D-02): transcode is the
+// expensive operation, so a timeout may simply mean the retry budget ran out
+// under load, not that the input is malformed. Any non-timeout transcode
+// failure is still terminal.
+var ErrAVTranscodeFailed = errors.New("av: transcode failed")
+
+// ErrAVAudioExtractFailed classifies a failed ffmpeg invocation in the
+// audio-extract stage (convertAudioExtract, AVC-03) -- D-01. Unlike
+// ErrAVTranscodeFailed, isAVTerminal treats ANY failure on this sentinel
+// (timeout or not) as TERMINAL (D-02): audio-extract is a cheap operation,
+// so a timeout here indicates a pathological input, not budget exhaustion.
+var ErrAVAudioExtractFailed = errors.New("av: audio-extract failed")
+
+// ErrAVThumbnailFailed classifies a failed ffmpeg invocation in the
+// thumbnail stage (convertThumbnail, AVC-04) -- D-01. Same TERMINAL-on-any-
+// failure policy as ErrAVAudioExtractFailed (D-02): thumbnail extraction is
+// cheap, so a timeout signals a pathological input.
+var ErrAVThumbnailFailed = errors.New("av: thumbnail failed")
+
 // avStreamCopyLegal reports whether srcVideoCodec/srcAudioCodec are already
 // legal in targetContainer per THIS PROJECT's own AVC-01/AVC-02 codec
 // contract -- NEVER derived from what ffmpeg's muxer happens to accept
@@ -440,7 +466,7 @@ func avProbeSource(ctx context.Context, inPath string) (avSourceProbe, error) {
 	}
 	primary, ok := avPrimaryVideoStream(streams)
 	if !ok {
-		return avSourceProbe{}, fmt.Errorf("ffprobe: no video stream found")
+		return avSourceProbe{}, fmt.Errorf("%w", ErrAVNoVideoStream)
 	}
 	// An absent audio stream is not an error: ffprobe reports empty output
 	// and the conversion paths handle a video-only source (the transcode
@@ -478,7 +504,7 @@ func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, targ
 	}
 
 	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
-		return fmt.Errorf("av: ffmpeg: %w", err)
+		return fmt.Errorf("%w: %w", ErrAVTranscodeFailed, err)
 	}
 	return validateAVOutput(outPath, target)
 }
@@ -525,7 +551,7 @@ func (c AVConverter) convertAudioExtract(ctx context.Context, inPath, outPath, t
 		return fmt.Errorf("av: unsupported audio-extract target %q", target)
 	}
 	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
-		return fmt.Errorf("av: ffmpeg: %w", err)
+		return fmt.Errorf("%w: %w", ErrAVAudioExtractFailed, err)
 	}
 	return validateAVOutput(outPath, target)
 }
@@ -563,7 +589,7 @@ func (c AVConverter) convertThumbnail(ctx context.Context, inPath, outPath, targ
 		return fmt.Errorf("av: unsupported thumbnail target %q", target)
 	}
 	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
-		return fmt.Errorf("av: ffmpeg: %w", err)
+		return fmt.Errorf("%w: %w", ErrAVThumbnailFailed, err)
 	}
 	return validateAVOutput(outPath, target)
 }
