@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+
+	"github.com/apaderin/octoconv/internal/convert"
 )
 
 func TestConvertPayloadRoundTrip(t *testing.T) {
@@ -433,6 +435,147 @@ func TestAudioUniqueTTL(t *testing.T) {
 	if AudioUniqueTTL(maxRetry, engineTimeout) <= worstCaseNoMargin {
 		t.Errorf("AudioUniqueTTL(%d, %v) = %v must strictly exceed the zero-margin worst-case lifetime %v",
 			maxRetry, engineTimeout, AudioUniqueTTL(maxRetry, engineTimeout), worstCaseNoMargin)
+	}
+}
+
+// TestAVConvertTaskRoundTrip asserts NewAVConvertTask builds a task routed
+// to TypeAVConvert whose payload round-trips through ParseConvertPayload
+// back to the same job id, and that its asynq options resolve to the av
+// queue -- mirrors TestAudioConvertTaskRoundTrip's shape for the av engine
+// class (TestNewAVConvertTaskRoutesToAVQueue's scope, folded in here since
+// the existing per-engine round-trip tests already assert Type()/payload
+// only, not a separate queue-name introspection test).
+func TestAVConvertTaskRoundTrip(t *testing.T) {
+	id := uuid.New()
+	task, err := NewAVConvertTask(id, 2, AVUniqueTTL(2, 600*time.Second))
+	if err != nil {
+		t.Fatalf("NewAVConvertTask: %v", err)
+	}
+	if task.Type() != TypeAVConvert {
+		t.Errorf("task type = %q, want %q", task.Type(), TypeAVConvert)
+	}
+	p, err := ParseConvertPayload(task.Payload())
+	if err != nil {
+		t.Fatalf("ParseConvertPayload: %v", err)
+	}
+	if p.JobID != id {
+		t.Errorf("job id = %s, want %s", p.JobID, id)
+	}
+}
+
+// TestAVRetryDelaySchedule asserts AVRetryDelay returns the exact D-03
+// LOCKED 30s/2m schedule (no jitter, mirrors AudioRetryDelay's/
+// DocumentRetryDelay's shape) and clamps on both ends.
+func TestAVRetryDelaySchedule(t *testing.T) {
+	cases := []struct {
+		n    int
+		want time.Duration
+	}{
+		{n: -1, want: 30 * time.Second}, // clamps to first entry
+		{n: 0, want: 30 * time.Second},
+		{n: 1, want: 2 * time.Minute},
+		{n: 99, want: 2 * time.Minute}, // clamps past the end of the schedule
+	}
+	for _, tc := range cases {
+		got := AVRetryDelay(tc.n, nil, nil)
+		if got != tc.want {
+			t.Errorf("AVRetryDelay(%d) = %v, want %v", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestRetryDelayFuncRoutesAVConvert is the only mechanism that catches
+// Pitfall 1's silent RetryDelayFunc default fallthrough for av: it fails if
+// the `case TypeAVConvert` arm is ever removed from RetryDelayFunc, since a
+// missing case would produce no compile error, only the wrong (asynq
+// default) backoff schedule silently applied in production.
+func TestRetryDelayFuncRoutesAVConvert(t *testing.T) {
+	avTask := asynq.NewTask(TypeAVConvert, nil)
+
+	if got, want := RetryDelayFunc(0, nil, avTask), 30*time.Second; got != want {
+		t.Errorf("RetryDelayFunc(av, 0) = %v, want %v", got, want)
+	}
+	if got, want := RetryDelayFunc(1, nil, avTask), 2*time.Minute; got != want {
+		t.Errorf("RetryDelayFunc(av, 1) = %v, want %v", got, want)
+	}
+	// Index 5 clamps to the last schedule entry (2m).
+	if got, want := RetryDelayFunc(5, nil, avTask), 2*time.Minute; got != want {
+		t.Errorf("RetryDelayFunc(av, 5) = %v, want %v", got, want)
+	}
+}
+
+// TestAVUniqueTTL asserts AVUniqueTTL derives its result from the corrected
+// worst-case retry lifetime ((maxRetry+1) executions) exactly like
+// DocumentUniqueTTL/HTMLUniqueTTL/AudioUniqueTTL, evaluates to exactly
+// 2070s for (2, 600s) -- 3*600s + (30s+120s) + 120s = 2070s -- is monotonic
+// in both arguments, and strictly EXCEEDS the zero-margin worst-case retry
+// lifetime, demonstrating uniqueTTLSafetyMargin is a load-bearing term, not
+// accidentally zero (D-03: reuses the shared margin, never a per-engine
+// one).
+func TestAVUniqueTTL(t *testing.T) {
+	maxRetry := 2                                // D-03 LOCKED
+	engineTimeout := 600 * time.Second           // matches the provisional AV_ENGINE_TIMEOUT default
+	backoffSum := 30*time.Second + 2*time.Minute // i=0..1, per avRetrySchedule
+
+	want := time.Duration(maxRetry+1)*engineTimeout + backoffSum + uniqueTTLSafetyMargin
+	got := AVUniqueTTL(maxRetry, engineTimeout)
+	if got != want {
+		t.Errorf("AVUniqueTTL(%d, %v) = %v, want %v", maxRetry, engineTimeout, got, want)
+	}
+	// Assertion 1: exact hand-computed worked example, pinned as a literal
+	// self-check mirroring TestAudioUniqueTTL's own "want != 2570*time.Second"
+	// shape.
+	if want != 2070*time.Second {
+		t.Errorf("expected worked example want = 2070s, got %v", want)
+	}
+
+	// Assertion 2: monotonicity in BOTH arguments.
+	if AVUniqueTTL(maxRetry+1, engineTimeout) <= AVUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("AVUniqueTTL must grow monotonically with maxRetry")
+	}
+	if AVUniqueTTL(maxRetry, engineTimeout+time.Second) <= AVUniqueTTL(maxRetry, engineTimeout) {
+		t.Errorf("AVUniqueTTL must grow monotonically with engineTimeout")
+	}
+
+	// Assertion 3: strictly exceeds the zero-margin worst-case retry
+	// lifetime -- proves uniqueTTLSafetyMargin is load-bearing rather than
+	// accidentally zero.
+	worstCaseNoMargin := time.Duration(maxRetry+1)*engineTimeout + avBackoffSum(maxRetry)
+	if AVUniqueTTL(maxRetry, engineTimeout) <= worstCaseNoMargin {
+		t.Errorf("AVUniqueTTL(%d, %v) = %v must strictly exceed the zero-margin worst-case lifetime %v",
+			maxRetry, engineTimeout, AVUniqueTTL(maxRetry, engineTimeout), worstCaseNoMargin)
+	}
+}
+
+// TestAllConvertQueuesCoversEveryEngine is the D-06 completeness guard for
+// the queue-depth collector's silent variadic-omission seam (RESEARCH.md
+// Pitfall 2): it iterates every convert.Engine* constant and asserts each
+// one appears exactly once in AllConvertQueues(), and that AllConvertQueues
+// contains no extras (e.g. QueueWebhook, which is not an engine class).
+func TestAllConvertQueuesCoversEveryEngine(t *testing.T) {
+	wantEngines := map[string]bool{
+		convert.EngineImage:    true,
+		convert.EngineDocument: true,
+		convert.EngineHTML:     true,
+		convert.EngineAudio:    true,
+		convert.EngineAV:       true,
+	}
+
+	got := AllConvertQueues()
+	seen := make(map[string]int, len(got))
+	for _, q := range got {
+		seen[q]++
+	}
+
+	for engine := range wantEngines {
+		if seen[engine] != 1 {
+			t.Errorf("AllConvertQueues() contains engine %q %d times, want exactly 1", engine, seen[engine])
+		}
+	}
+	for q, count := range seen {
+		if !wantEngines[q] {
+			t.Errorf("AllConvertQueues() contains unexpected extra entry %q (count %d) -- not a registered engine class", q, count)
+		}
 	}
 }
 

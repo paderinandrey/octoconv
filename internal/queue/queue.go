@@ -592,6 +592,21 @@ func AVUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + avBackoffSum(maxRetry) + uniqueTTLSafetyMargin
 }
 
+// AllConvertQueues returns the queue name for every conversion engine class
+// (image/document/html/audio/av), deliberately excluding QueueWebhook
+// (webhook is not an engine class and is never KEDA-scaled per-conversion).
+// This is the single source of truth for cmd/api/main.go's queue-depth
+// collector arg list: metrics.NewQueueDepthCollector is VARIADIC, so a
+// hand-maintained call-site list can silently omit a queue with no compile
+// error, dropping the Prometheus series KEDA scales the worker on (D-06,
+// RESEARCH.md Pitfall 2). See TestAllConvertQueuesCoversEveryEngine for the
+// completeness guard against a future engine class being added here without
+// also being added to convert.go's Engine* constants (or vice versa). Plan
+// 04 rewires cmd/api/main.go to spread this helper.
+func AllConvertQueues() []string {
+	return []string{QueueImage, QueueDocument, QueueHTML, QueueAudio, QueueAV}
+}
+
 // webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter
 // bound. webhookBackoffSum uses this to compute a genuine worst-case backoff
 // sum rather than a random sample.
