@@ -336,6 +336,56 @@ func isAudioTerminal(err error) bool {
 	return isTerminal(err)
 }
 
+// isAVTerminal is the av engine's engine-scoped terminal classifier — D-02
+// (35-CONTEXT.md, BINDING): a stage-aware split derived FRESH for video, not
+// a copy of isAudioTerminal's blanket "any 'audio: ffmpeg:' failure or
+// timeout is terminal" rule. That rule is correct for audio because ffmpeg
+// is audio's CHEAP normalize stage — a timeout there is a strong
+// malformed-input signal. It would be WRONG for av: av's transcode stage
+// (ErrAVTranscodeFailed) is the EXPENSIVE operation this whole class
+// exists to run, so a timeout there may simply mean the retry budget ran
+// out under load, not that the input is malformed — porting audio's rule
+// verbatim would make every transcode timeout terminal and silently
+// destroy the transient-retry behavior this classifier exists to provide.
+// ErrAudioDurationExceeded is reused here on purpose (not a bug): AV's
+// duration guard calls the same enforceMaxDurationOf helper audio uses
+// (av.go:395), so the same sentinel — and the same always-terminal
+// treatment — keeps the two engines' client-facing contracts symmetric.
+func isAVTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Deterministic guard/output-validation rejections: always terminal,
+	// regardless of which stage produced them — a rejected declared
+	// resolution, an out-of-range timecode, a missing/empty output, or a
+	// missing video stream can never succeed on retry.
+	if errors.Is(err, convert.ErrAVOutputMissingOrEmpty) ||
+		errors.Is(err, convert.ErrAVTimecodeOutOfRange) ||
+		errors.Is(err, convert.ErrAVResolutionExceeded) ||
+		errors.Is(err, convert.ErrAudioDurationExceeded) ||
+		errors.Is(err, convert.ErrAVNoVideoStream) {
+		return true
+	}
+	isTimeout := errors.Is(err, context.DeadlineExceeded)
+	switch {
+	case errors.Is(err, convert.ErrAVTranscodeFailed):
+		// D-02: transcode is the expensive stage — a timeout stays
+		// TRANSIENT (this is the single assertion that distinguishes this
+		// classifier from isAudioTerminal); a non-timeout ffmpeg failure
+		// (malformed/adversarial input) stays terminal.
+		return !isTimeout
+	case errors.Is(err, convert.ErrAVAudioExtractFailed), errors.Is(err, convert.ErrAVThumbnailFailed):
+		// D-02: audio-extract and thumbnail are the cheap stages — ANY
+		// failure (timeout or not) is TERMINAL, mirroring audio's own
+		// cheap-stage rule.
+		return true
+	}
+	// No substring-based fallback here: after Plan 01's D-01 sentinel
+	// refactor, every av ffmpeg stage has a typed sentinel, so matching on
+	// error text would only reintroduce the exact fragility D-01 removed.
+	return isTerminal(err) // no-converter / minio.NoSuchKey / shared fallthrough
+}
+
 // Handler processes image conversion tasks end to end.
 type Handler struct {
 	repo          *jobs.Repo
