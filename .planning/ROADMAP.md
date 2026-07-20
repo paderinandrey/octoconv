@@ -119,7 +119,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 
 ### v1.8 AV Engine (video/ffmpeg) (Phases 34-37) — IN PROGRESS
 
-- [ ] **Phase 34: AV Engine Foundation** - Standalone AVConverter (transcode/audio-extract/thumbnail via ffmpeg), video container sniffers (mp4/mov ftyp, RIFF AVI, EBML mkv/webm), validated AVOpts, duration/resolution guards + protocol-whitelist hardening
+- [x] **Phase 34: AV Engine Foundation** - Standalone AVConverter (transcode/audio-extract/thumbnail via ffmpeg), video container sniffers (mp4/mov ftyp, RIFF AVI, EBML mkv/webm), validated AVOpts, duration/resolution guards + protocol-whitelist hardening (completed 2026-07-20)
 - [ ] **Phase 35: Queue, Worker & Routing Integration** - av queue + cmd/av-worker, stage-aware retry classification, API/reconciler engine routing, video→transcript pairs routed onto the existing audio queue/worker with a pair-disjointness test
 - [ ] **Phase 36: Containerization & RTF-Measured Timeout** - Dockerfile.av-worker (pinned ffmpeg), compose service, RTF-matrix measured AV_ENGINE_TIMEOUT, disk-space guard, CI bake
 - [ ] **Phase 37: KEDA/Helm Chart Integration** - av-worker Deployment + ScaledObject (WR-01 triad), QueueAV collector, scale-from-zero load-proof
@@ -149,7 +149,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 **Plans**: 3 plans
 - [x] 34-01-PLAN.md — Video container magic-bytes sniffers (mp4/mov/avi fixed-offset + EBML mkv/webm bounded-peek), disjointness test (AVE-01)
 - [x] 34-02-PLAN.md — Closed AVOpts allowlist (timecode/resolution/HEVC), video resolution guard, EngineAV const (AVO-01/02/03, AVE-02)
-- [ ] 34-03-PLAN.md — Standalone AVConverter (transcode/audio-extract/thumbnail, stream-copy fast path, protocol-whitelist canary) (AVC-01..05, AVE-02)
+- [x] 34-03-PLAN.md — Standalone AVConverter (transcode/audio-extract/thumbnail, stream-copy fast path, protocol-whitelist canary) (AVC-01..05, AVE-02)
 
 ### Phase 35: Queue, Worker & Routing Integration
 **Goal**: av-engine jobs (transcode/audio-extract/thumbnail) and video→transcript jobs both flow end-to-end through the async pipeline with correct queue routing, retry classification, and reconciler recovery.
@@ -221,7 +221,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 31. Queue, Worker & Routing Integration | v1.7 | 4/4 | Complete    | 2026-07-18 |
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
-| 34. AV Engine Foundation | v1.8 | 2/3 | In Progress|  |
+| 34. AV Engine Foundation | v1.8 | 3/3 | Complete   | 2026-07-20 |
 | 35. Queue, Worker & Routing Integration | v1.8 | 0/TBD | Not started | - |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
