@@ -81,6 +81,7 @@ type fakeQueue struct {
 	enqueuedDocument uuid.UUID
 	enqueuedHTML     uuid.UUID
 	enqueuedAudio    uuid.UUID
+	enqueuedAV       uuid.UUID
 }
 
 func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
@@ -100,6 +101,11 @@ func (f *fakeQueue) EnqueueHTMLConvert(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeQueue) EnqueueAudioConvert(_ context.Context, id uuid.UUID) error {
 	f.enqueuedAudio = id
+	return nil
+}
+
+func (f *fakeQueue) EnqueueAVConvert(_ context.Context, id uuid.UUID) error {
+	f.enqueuedAV = id
 	return nil
 }
 

@@ -80,16 +80,22 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: redisOpt.Addr})
 	defer rdb.Close()
 
-	// KEDA-01/D-01/D-02: the queue-depth collector now lives solely on the
-	// always-on api process, registered for ALL FOUR engine-class queues (not
-	// just image) — a worker Deployment scaled to genuine 0 replicas by KEDA
-	// would otherwise have no pod exposing the metric KEDA needs to scale it
-	// back up. webhook is included even though webhook-worker is never
-	// KEDA-scaled (D-01 in PROJECT.md), so its depth stays observable.
-	// Matching every worker's existing precedent, the Inspector is never
-	// closed — Collect() is pull-based/lazy, invoked once per scrape.
+	// KEDA-01/D-01/D-02/D-06 (Phase 35): the queue-depth collector now lives
+	// solely on the always-on api process, registered for EVERY engine-class
+	// queue — a worker Deployment scaled to genuine 0 replicas by KEDA would
+	// otherwise have no pod exposing the metric KEDA needs to scale it back
+	// up. The queue list is DERIVED from queue.AllConvertQueues() rather than
+	// hand-listed: this call is variadic, so a hand-maintained list can
+	// silently drop an engine class with no compile error (RESEARCH.md
+	// Pitfall 2) -- queue.TestAllConvertQueuesCoversEveryEngine guards the
+	// derivation itself. webhook is not an engine class and is therefore not
+	// covered by AllConvertQueues(), so it is appended explicitly here; it is
+	// included even though webhook-worker is never KEDA-scaled (D-01 in
+	// PROJECT.md), so its depth stays observable. Matching every worker's
+	// existing precedent, the Inspector is never closed — Collect() is
+	// pull-based/lazy, invoked once per scrape.
 	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt),
-		queue.QueueImage, queue.QueueDocument, queue.QueueHTML, queue.QueueAudio, queue.QueueWebhook))
+		append(queue.AllConvertQueues(), queue.QueueWebhook)...))
 
 	salt := []byte(os.Getenv("API_KEY_SALT"))
 	if len(salt) == 0 {
