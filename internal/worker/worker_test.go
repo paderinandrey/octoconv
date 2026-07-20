@@ -352,6 +352,93 @@ func TestIsAudioTerminalOutputSignatures(t *testing.T) {
 	}
 }
 
+// TestIsAVTerminal pins D-02 (35-CONTEXT.md, BINDING): a stage-aware
+// transient/terminal split derived FRESH for video, NOT a copy of
+// isAudioTerminal's blanket "any ffmpeg-stage failure/timeout is terminal"
+// rule. The distinguishing case is the transcode-timeout row: audio's rule
+// would classify it terminal (ffmpeg is audio's cheap stage), but av's
+// transcode is the expensive stage, so a timeout there must stay transient.
+func TestIsAVTerminal(t *testing.T) {
+	if isAVTerminal(nil) {
+		t.Fatal("expected isAVTerminal(nil) = false")
+	}
+
+	// D-02's single most important row: ErrAVTranscodeFailed wrapping
+	// context.DeadlineExceeded -> transient. This is the one assertion that
+	// distinguishes isAVTerminal from isAudioTerminal.
+	transcodeTimeout := fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVTranscodeFailed, fmt.Errorf("ffmpeg killed: %w", context.DeadlineExceeded)))
+	if isAVTerminal(transcodeTimeout) {
+		t.Fatal("D-02: expected isAVTerminal(transcode timeout) = false (transient — transcode is the expensive stage)")
+	}
+
+	// ErrAVTranscodeFailed wrapping a non-timeout ffmpeg exit error ->
+	// terminal.
+	transcodeFailure := fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVTranscodeFailed, errors.New("exit status 1: Invalid data found when processing input")))
+	if !isAVTerminal(transcodeFailure) {
+		t.Fatal("D-02: expected isAVTerminal(transcode non-timeout failure) = true")
+	}
+
+	// ErrAVAudioExtractFailed and ErrAVThumbnailFailed -> terminal, both
+	// with and without a wrapped context.DeadlineExceeded (cheap stages,
+	// ANY failure is terminal).
+	cheapStageCases := []error{
+		fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVAudioExtractFailed, fmt.Errorf("ffmpeg killed: %w", context.DeadlineExceeded))),
+		fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVAudioExtractFailed, errors.New("exit status 1"))),
+		fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVThumbnailFailed, fmt.Errorf("ffmpeg killed: %w", context.DeadlineExceeded))),
+		fmt.Errorf("convert: %w", fmt.Errorf("%w: %w", convert.ErrAVThumbnailFailed, errors.New("exit status 1"))),
+	}
+	for _, err := range cheapStageCases {
+		if !isAVTerminal(err) {
+			t.Fatalf("D-02: expected isAVTerminal(%v) = true (cheap stage, timeout or not)", err)
+		}
+	}
+
+	// Deterministic guard/output-validation rejections -> terminal
+	// regardless of stage or timeout.
+	deterministicCases := []error{
+		fmt.Errorf("convert: %w", convert.ErrAVOutputMissingOrEmpty),
+		fmt.Errorf("convert: %w", convert.ErrAVTimecodeOutOfRange),
+		fmt.Errorf("convert: %w", convert.ErrAVResolutionExceeded),
+		fmt.Errorf("convert: %w", convert.ErrAudioDurationExceeded),
+		fmt.Errorf("convert: %w", convert.ErrAVNoVideoStream),
+	}
+	for _, err := range deterministicCases {
+		if !isAVTerminal(err) {
+			t.Fatalf("D-02: expected isAVTerminal(%v) = true (deterministic rejection, always terminal)", err)
+		}
+	}
+
+	// Unrecognized S3/Postgres blip errors fall through to isTerminal(err)
+	// and match its verdict.
+	sharedCases := []error{
+		fmt.Errorf("no converter for %s -> %s", "mkv", "mp4"),
+		fmt.Errorf("download %q: %w", "uploads/x/0-in.mp4", minio.ErrorResponse{Code: minio.NoSuchKey}),
+	}
+	for _, err := range sharedCases {
+		if !isAVTerminal(err) {
+			t.Fatalf("expected isAVTerminal(%v) = true (shared isTerminal fallthrough)", err)
+		}
+	}
+	if isAVTerminal(errors.New("dial tcp: connection refused")) {
+		t.Fatal("expected isAVTerminal(transient network error) = false")
+	}
+
+	// Contrast row: isAudioTerminal and isAVTerminal must DISAGREE on a
+	// transcode-timeout-shaped error, so a future refactor that collapses
+	// the two classifiers fails loudly. isAudioTerminal keys on the literal
+	// "audio: ffmpeg:" prefix, so this row is constructed with that exact
+	// shape wrapping the same underlying context.DeadlineExceeded, to prove
+	// the two rules are genuinely independent, not just differently-typed
+	// spellings of the same behavior.
+	audioShapedTimeout := fmt.Errorf("convert: %w", fmt.Errorf("audio: ffmpeg: %w", fmt.Errorf("ffmpeg killed: %w", context.DeadlineExceeded)))
+	if !isAudioTerminal(audioShapedTimeout) {
+		t.Fatal("contrast setup: expected isAudioTerminal(audio-shaped ffmpeg timeout) = true")
+	}
+	if isAVTerminal(transcodeTimeout) == isAudioTerminal(audioShapedTimeout) {
+		t.Fatal("D-02 contrast: isAVTerminal(transcode timeout) and isAudioTerminal(ffmpeg-stage timeout) must DISAGREE — isAVTerminal must not become a copy of isAudioTerminal")
+	}
+}
+
 // TestEnforceAudioGuardBeforeConvert_IN02 pins T-30-08/IN-02: an audio job
 // whose downloaded file exceeds the configured ceiling is rejected BEFORE
 // Convert runs (the guard runs strictly before conv.Convert, not merely
@@ -439,5 +526,52 @@ func TestEnforceAudioGuardProbeExpiryTransient_WR02(t *testing.T) {
 	}
 	if isAudioTerminal(err) {
 		t.Fatalf("isAudioTerminal(%v) = true, want false (probe-ctx expiry stays transient, WR-01/WR-02)", err)
+	}
+}
+
+// TestAVFailureCode pins HandleAVConvert's terminal-path error_code mapping
+// (D-09/IN-01) without requiring a live Postgres/S3 Handler: avFailureCode
+// is the pure function HandleAVConvert delegates to, so this test exercises
+// the mapping directly.
+func TestAVFailureCode(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{
+			name:     "timecode out of range",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVTimecodeOutOfRange),
+			wantCode: "timecode_out_of_range",
+		},
+		{
+			name:     "duration exceeded",
+			err:      fmt.Errorf("convert: %w", convert.ErrAudioDurationExceeded),
+			wantCode: "duration_exceeded",
+		},
+		{
+			name:     "resolution exceeded",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVResolutionExceeded),
+			wantCode: "resolution_exceeded",
+		},
+		{
+			name:     "no video stream",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVNoVideoStream),
+			wantCode: "no_video_stream",
+		},
+		{
+			name:     "generic engine failure",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVTranscodeFailed),
+			wantCode: "engine_error",
+		},
+	}
+	for _, tc := range cases {
+		code, message := avFailureCode(tc.err)
+		if code != tc.wantCode {
+			t.Errorf("%s: avFailureCode(%v) code = %q, want %q", tc.name, tc.err, code, tc.wantCode)
+		}
+		if message == "" {
+			t.Errorf("%s: avFailureCode(%v) message is empty, want a fixed client-facing message", tc.name, tc.err)
+		}
 	}
 }

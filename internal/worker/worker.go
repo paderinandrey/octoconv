@@ -336,6 +336,56 @@ func isAudioTerminal(err error) bool {
 	return isTerminal(err)
 }
 
+// isAVTerminal is the av engine's engine-scoped terminal classifier — D-02
+// (35-CONTEXT.md, BINDING): a stage-aware split derived FRESH for video, not
+// a copy of isAudioTerminal's blanket "any 'audio: ffmpeg:' failure or
+// timeout is terminal" rule. That rule is correct for audio because ffmpeg
+// is audio's CHEAP normalize stage — a timeout there is a strong
+// malformed-input signal. It would be WRONG for av: av's transcode stage
+// (ErrAVTranscodeFailed) is the EXPENSIVE operation this whole class
+// exists to run, so a timeout there may simply mean the retry budget ran
+// out under load, not that the input is malformed — porting audio's rule
+// verbatim would make every transcode timeout terminal and silently
+// destroy the transient-retry behavior this classifier exists to provide.
+// ErrAudioDurationExceeded is reused here on purpose (not a bug): AV's
+// duration guard calls the same enforceMaxDurationOf helper audio uses
+// (av.go:395), so the same sentinel — and the same always-terminal
+// treatment — keeps the two engines' client-facing contracts symmetric.
+func isAVTerminal(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Deterministic guard/output-validation rejections: always terminal,
+	// regardless of which stage produced them — a rejected declared
+	// resolution, an out-of-range timecode, a missing/empty output, or a
+	// missing video stream can never succeed on retry.
+	if errors.Is(err, convert.ErrAVOutputMissingOrEmpty) ||
+		errors.Is(err, convert.ErrAVTimecodeOutOfRange) ||
+		errors.Is(err, convert.ErrAVResolutionExceeded) ||
+		errors.Is(err, convert.ErrAudioDurationExceeded) ||
+		errors.Is(err, convert.ErrAVNoVideoStream) {
+		return true
+	}
+	isTimeout := errors.Is(err, context.DeadlineExceeded)
+	switch {
+	case errors.Is(err, convert.ErrAVTranscodeFailed):
+		// D-02: transcode is the expensive stage — a timeout stays
+		// TRANSIENT (this is the single assertion that distinguishes this
+		// classifier from isAudioTerminal); a non-timeout ffmpeg failure
+		// (malformed/adversarial input) stays terminal.
+		return !isTimeout
+	case errors.Is(err, convert.ErrAVAudioExtractFailed), errors.Is(err, convert.ErrAVThumbnailFailed):
+		// D-02: audio-extract and thumbnail are the cheap stages — ANY
+		// failure (timeout or not) is TERMINAL, mirroring audio's own
+		// cheap-stage rule.
+		return true
+	}
+	// No substring-based fallback here: after Plan 01's D-01 sentinel
+	// refactor, every av ffmpeg stage has a typed sentinel, so matching on
+	// error text would only reintroduce the exact fragility D-01 removed.
+	return isTerminal(err) // no-converter / minio.NoSuchKey / shared fallthrough
+}
+
 // Handler processes image conversion tasks end to end.
 type Handler struct {
 	repo          *jobs.Repo
@@ -722,6 +772,137 @@ func (h *Handler) HandleAudioConvert(ctx context.Context, t *asynq.Task) error {
 		return err
 	}
 	metrics.RecordJobOutcome(queue.QueueAudio, jobs.StatusDone, time.Since(start))
+	// Postgres-first: MarkDone already committed inside process(), so a
+	// failed enqueue must not fail the conversion — best-effort only.
+	if job.CallbackURL != "" {
+		_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+	}
+	return nil
+}
+
+// avFailureCode maps a terminal process() error for an av job to the
+// distinguishable client-facing (error_code, message) pair MarkFailed
+// records. Factored out as a small pure function so the mapping itself is
+// unit-testable without a live Postgres/S3 Handler (HandleAVConvert's own
+// db plumbing cannot run without them). Order matters: the more specific
+// sentinels are checked before the generic default.
+//   - ErrAVTimecodeOutOfRange -> "timecode_out_of_range" (D-09): an explicit
+//     out-of-range thumbnail timecode is a CLIENT fault, deliberately not
+//     clamped, and must not be indistinguishable from a corrupted-input
+//     engine failure.
+//   - ErrAudioDurationExceeded -> "duration_exceeded", the same code
+//     HandleAudioConvert already emits for its own duration guard (AV's
+//     guard reuses the identical sentinel, av.go:395) — keeps the two
+//     engines' client-facing contracts symmetric.
+//   - ErrAVResolutionExceeded -> "resolution_exceeded".
+//   - ErrAVNoVideoStream -> "no_video_stream" (IN-01): a generic-brand
+//     ISOBMFF audio-only file misrouted to the av engine must say so rather
+//     than reporting a generic engine error.
+//   - default -> "engine_error", mirroring every other engine's fallback.
+func avFailureCode(err error) (code, message string) {
+	switch {
+	case errors.Is(err, convert.ErrAVTimecodeOutOfRange):
+		return "timecode_out_of_range", "requested thumbnail timecode exceeds source duration"
+	case errors.Is(err, convert.ErrAudioDurationExceeded):
+		return "duration_exceeded", "declared video duration exceeds the configured maximum"
+	case errors.Is(err, convert.ErrAVResolutionExceeded):
+		return "resolution_exceeded", "declared video resolution exceeds the configured maximum"
+	case errors.Is(err, convert.ErrAVNoVideoStream):
+		return "no_video_stream", "no video stream found in source"
+	default:
+		return "engine_error", "unsupported or corrupted input format"
+	}
+}
+
+// HandleAVConvert runs one video conversion (transcode / audio-extract /
+// thumbnail): load job -> mark active -> download input -> run ffmpeg (via
+// the engine-agnostic process(), which reuses registry.Lookup — the
+// AVConverter registered in convert.Default handles the actual conversion)
+// -> upload output -> record output -> mark done. Mirrors
+// HandleDocumentConvert's/HandleHTMLConvert's SIMPLE shape (no guard
+// splice), NOT HandleAudioConvert's: AVConverter.Convert already
+// self-contains its own duration/resolution guard (av.go:388-400,
+// 35-RESEARCH.md Pattern 2), so process() needs no av-specific branch and
+// this handler calls it exactly as document/html do. Diverges from
+// HandleDocumentConvert in two ways (AVE-03): (1) the terminal-
+// classification branch calls isAVTerminal instead of isDocumentTerminal —
+// D-02's stage-aware split, NOT a blanket timeout-is-terminal copy; (2) a
+// terminal failure's error_code is selected via avFailureCode instead of
+// always "engine_error", so a client can distinguish a timecode/duration/
+// resolution/no-video-stream rejection from a generic corrupted-input
+// failure (mirrors HandleAudioConvert's own "duration_exceeded"
+// special-case, D-09/IN-01).
+func (h *Handler) HandleAVConvert(ctx context.Context, t *asynq.Task) error {
+	payload, err := queue.ParseConvertPayload(t.Payload())
+	if err != nil {
+		// Unparseable payload: nothing we can retry into success.
+		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+	}
+	jobID := payload.JobID
+
+	job, err := h.repo.Get(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("load job %s: %w", jobID, err)
+	}
+
+	// Strict re-parse of the persisted opts (D-10): garbage in jobs.options
+	// is a terminal, not transient, failure -- a corrupt column value can
+	// never fix itself on retry. This is a strictness check only; the
+	// applicability/enum business rules already ran once, at the API layer
+	// (single source of validation truth), and are deliberately not
+	// duplicated here.
+	if _, err := convert.AVOptsFromMap(job.Opts); err != nil {
+		// Mark failed BEFORE SkipRetry: without this the job would stay
+		// queued forever (no webhook, client polls a dead job) while the
+		// reconciler requeues it into the same failure until MaxRecoveries
+		// is exhausted (T-14-02b). Sanitized message only; the parse error
+		// is kept in job_events.detail for internal diagnostics.
+		ferr := h.repo.MarkFailed(ctx, jobID, "invalid_options", "stored conversion options are invalid", map[string]any{"opts_error": err.Error()})
+		// Postgres-first: enqueue the webhook ONLY once the failed status is
+		// actually committed — if MarkFailed itself failed, a webhook now
+		// would report the non-terminal status "queued" (WR-04). A failed
+		// enqueue after a successful MarkFailed must not fail the job —
+		// best-effort only.
+		if ferr == nil && job.CallbackURL != "" {
+			_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+		}
+		return fmt.Errorf("%w: opts: %v", asynq.SkipRetry, err)
+	}
+
+	if err := h.repo.MarkActive(ctx, jobID); err != nil {
+		// Already active/done/canceled — let asynq drop it rather than loop.
+		return fmt.Errorf("%w: mark active: %v", asynq.SkipRetry, err)
+	}
+
+	start := time.Now()
+	if err := h.process(ctx, job); err != nil {
+		if isAVTerminal(err) {
+			// Sanitized message only in error_message (exposed via GET
+			// /jobs/{id} and webhook payloads, T-03-03); the raw stderr
+			// (which contains local temp paths) is kept in job_events.detail
+			// for internal diagnostics only.
+			code, message := avFailureCode(err)
+			ferr := h.repo.MarkFailed(ctx, jobID, code, message, map[string]any{"engine_stderr": err.Error()})
+			metrics.RecordJobOutcome(queue.QueueAV, jobs.StatusFailed, time.Since(start))
+			// Postgres-first: enqueue the webhook ONLY once the failed status
+			// is actually committed. If MarkFailed itself failed (Postgres
+			// blip), the job is still active — a webhook now would re-read the
+			// row and deliver the non-terminal status "active", which the
+			// contract never defines (WR-04); the reconciler will requeue the
+			// still-active job instead. A failed enqueue after a successful
+			// MarkFailed must not fail the conversion — best-effort only.
+			if ferr == nil && job.CallbackURL != "" {
+				_ = h.enqueuer.EnqueueWebhookDeliver(ctx, jobID)
+			}
+			return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		}
+		// Transient: do NOT mark failed — the job stays active so asynq's own
+		// retry/backoff (AVRetryDelay/AV_MAX_RETRY) applies. Not a terminal
+		// outcome, so it is NOT recorded in the job-outcome metric (one asynq
+		// retry must not double-count).
+		return err
+	}
+	metrics.RecordJobOutcome(queue.QueueAV, jobs.StatusDone, time.Since(start))
 	// Postgres-first: MarkDone already committed inside process(), so a
 	// failed enqueue must not fail the conversion — best-effort only.
 	if job.CallbackURL != "" {
