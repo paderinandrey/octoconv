@@ -109,6 +109,17 @@ None - no external service configuration required. `AV_MAX_RETRY`/`AV_ENGINE_TIM
 - Plans 03 (worker), 04 (API routing), and 05 (reconciler routing) can now depend on `queue.TypeAVConvert`, `queue.QueueAV`, `queue.AllConvertQueues()`, and `(*queue.Client).EnqueueAVConvert` existing and compiling.
 - No blockers. The one thing downstream plans must remember: `AllConvertQueues()` exists but `cmd/api/main.go`'s collector call site has NOT been rewired to use it yet — that rewiring is explicitly Plan 04's task, not done here.
 
+## Self-Check: PASSED
+
+- FOUND: internal/queue/queue.go
+- FOUND: internal/queue/queue_test.go
+- FOUND: internal/queue/client.go
+- FOUND: .planning/phases/35-queue-worker-routing-integration/35-02-SUMMARY.md
+- FOUND commit: 8b0ba41 (Task 1)
+- FOUND commit: fc8faeb (Task 2)
+- FOUND commit: f9d60eb (Task 3)
+- FOUND commit: 54baeba (this SUMMARY)
+
 ---
 *Phase: 35-queue-worker-routing-integration*
 *Completed: 2026-07-21*
