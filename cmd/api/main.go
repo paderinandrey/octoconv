@@ -128,7 +128,15 @@ func main() {
 		S3:       store,
 	}
 	srv := api.NewServer(jobs.NewRepo(pool), store, qc, presetRepo, presetRepo, resolver, health, api.Config{
-		MaxUploadBytes:               envInt64("MAX_UPLOAD_BYTES", 100<<20),
+		// D-07 (Phase 35, operator-confirmed 2026-07-21): raised from 100
+		// MiB to 2 GiB so video uploads are admissible -- this is a pre-
+		// parse http.MaxBytesReader bound, enforced BEFORE the engine class
+		// is known. MaxEngineBytes is left unset (nil) here deliberately:
+		// NewServer's own D-07 defaulting is the single source of truth for
+		// the per-engine ceilings that restore image/document/html/audio to
+		// their prior 100 MiB effective bound, so that map is not
+		// duplicated at this call site.
+		MaxUploadBytes:               envInt64("MAX_UPLOAD_BYTES", 2<<30),
 		MaxImagePixels:               uint64(envInt64("MAX_IMAGE_PIXELS", 100_000_000)),            // D-05: 100 megapixels default
 		MaxDocumentUncompressedBytes: uint64(envInt64("MAX_DOCUMENT_UNCOMPRESSED_BYTES", 500<<20)), // D-04: 500 MiB default
 		IPRateLimitRPM:               int(envInt64("RATE_LIMIT_IP_RPM", 60)),

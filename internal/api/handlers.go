@@ -311,6 +311,23 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// D-07 (Phase 35): per-engine post-detection ceiling, checked immediately
+	// after the engine class is known and strictly before s.storage.Upload
+	// below -- an oversized non-video upload must never reach S3. This is
+	// the SECOND tier: s.maxUploadByte (checked pre-parse, above) bounds
+	// every request at 2 GiB before the engine class is even knowable;
+	// this tier restores image/document/html/audio to their prior 100 MiB
+	// effective ceiling so raising the global cap for video does not weaken
+	// their DoS posture. s.maxEngineBytes gates known engines only -- an
+	// engine absent from the map is never rejected here (the map gates, it
+	// does not allowlist).
+	if limit, ok := s.maxEngineBytes[engine]; ok && header.Size > limit {
+		log.Printf("content validation rejected: client_id=%s filename=%q reason=engine_size_limit engine=%s size=%d limit=%d", client.ID, filename, engine, header.Size, limit)
+		writeError(w, http.StatusRequestEntityTooLarge,
+			"file exceeds size limit for this conversion type")
+		return
+	}
+
 	// VALID-03: reject a decompression-bomb-shaped upload (declared pixel
 	// dimensions exceeding the configured limit) before any storage write.
 	// convert.Dimensions re-stitches its own bounded peek onto rest, so the

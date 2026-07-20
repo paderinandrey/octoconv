@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/apaderin/octoconv/internal/auth"
+	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/presets"
 )
@@ -84,6 +85,19 @@ type Server struct {
 	resolver      auth.ClientResolver
 	health        HealthDeps
 	maxUploadByte int64
+	// maxEngineBytes is the D-07 (Phase 35) per-engine post-detection upload
+	// ceiling, checked in handleCreateJob immediately after
+	// convert.Default.EngineFor -- unlike maxUploadByte (a pre-parse bound
+	// enforced by http.MaxBytesReader BEFORE the engine class is even
+	// knowable), this gate runs once the detected format and engine are
+	// known, and it MUST precede s.storage.Upload. Never nil after
+	// NewServer: holding image/document/html/audio at their pre-Phase-35
+	// effective 100 MiB ceiling here is what makes raising the GLOBAL
+	// maxUploadByte to 2 GiB (to admit large video uploads) a zero-
+	// behavior-change event for the four existing engine classes -- only the
+	// av engine class gains the larger allowance. A key absent from this map
+	// is NOT rejected: the map gates known engines, it does not allowlist.
+	maxEngineBytes map[string]int64
 	// maxImagePixels is intentionally uint64 — WIDER than maxUploadByte's
 	// int64 — because it is compared against a product of two uint32
 	// declared dimensions (Pitfall 1); an adversarial max-uint32 x max-uint32
@@ -110,9 +124,15 @@ type Config struct {
 	MaxUploadBytes               int64
 	MaxImagePixels               uint64
 	MaxDocumentUncompressedBytes uint64
-	PresignTTL                   time.Duration
-	IPRateLimitRPM               int
-	ClientRateLimitRPM           int
+	// MaxEngineBytes is the D-07 (Phase 35) per-engine post-detection
+	// ceiling: a nil map triggers NewServer's five-engine default
+	// (image/document/html/audio at 100 MiB, av at 2 GiB); a non-nil map is
+	// used as-is -- an engine key you omit from it is simply never gated by
+	// this check.
+	MaxEngineBytes     map[string]int64
+	PresignTTL         time.Duration
+	IPRateLimitRPM     int
+	ClientRateLimitRPM int
 	// OperatorClientIDs is the parsed OPERATOR_CLIENT_IDS allowlist (D-01).
 	// A nil or empty map means zero operators (fail-closed) -- every caller,
 	// including an otherwise-valid resolved client, is denied the
@@ -140,6 +160,18 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, p
 	if cfg.MaxDocumentUncompressedBytes == 0 {
 		cfg.MaxDocumentUncompressedBytes = 500 << 20 // D-04: 500 MiB default
 	}
+	if cfg.MaxEngineBytes == nil {
+		// D-07: image/document/html/audio hold their pre-Phase-35 effective
+		// 100 MiB ceiling; av alone gets the raised 2 GiB allowance video
+		// legitimately needs.
+		cfg.MaxEngineBytes = map[string]int64{
+			convert.EngineImage:    100 << 20,
+			convert.EngineDocument: 100 << 20,
+			convert.EngineHTML:     100 << 20,
+			convert.EngineAudio:    100 << 20,
+			convert.EngineAV:       2 << 30,
+		}
+	}
 	if cfg.IPRateLimitRPM == 0 {
 		cfg.IPRateLimitRPM = 60 // coarse pre-auth flood guard, conservative default
 	}
@@ -159,6 +191,7 @@ func NewServer(repo Repo, storage Storage, queue Enqueuer, presets PresetRepo, p
 		resolver:                     resolver,
 		health:                       health,
 		maxUploadByte:                cfg.MaxUploadBytes,
+		maxEngineBytes:               cfg.MaxEngineBytes,
 		maxImagePixels:               cfg.MaxImagePixels,
 		maxDocumentUncompressedBytes: cfg.MaxDocumentUncompressedBytes,
 		presignTTL:                   cfg.PresignTTL,
