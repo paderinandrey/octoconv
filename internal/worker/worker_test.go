@@ -528,3 +528,50 @@ func TestEnforceAudioGuardProbeExpiryTransient_WR02(t *testing.T) {
 		t.Fatalf("isAudioTerminal(%v) = true, want false (probe-ctx expiry stays transient, WR-01/WR-02)", err)
 	}
 }
+
+// TestAVFailureCode pins HandleAVConvert's terminal-path error_code mapping
+// (D-09/IN-01) without requiring a live Postgres/S3 Handler: avFailureCode
+// is the pure function HandleAVConvert delegates to, so this test exercises
+// the mapping directly.
+func TestAVFailureCode(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{
+			name:     "timecode out of range",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVTimecodeOutOfRange),
+			wantCode: "timecode_out_of_range",
+		},
+		{
+			name:     "duration exceeded",
+			err:      fmt.Errorf("convert: %w", convert.ErrAudioDurationExceeded),
+			wantCode: "duration_exceeded",
+		},
+		{
+			name:     "resolution exceeded",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVResolutionExceeded),
+			wantCode: "resolution_exceeded",
+		},
+		{
+			name:     "no video stream",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVNoVideoStream),
+			wantCode: "no_video_stream",
+		},
+		{
+			name:     "generic engine failure",
+			err:      fmt.Errorf("convert: %w", convert.ErrAVTranscodeFailed),
+			wantCode: "engine_error",
+		},
+	}
+	for _, tc := range cases {
+		code, message := avFailureCode(tc.err)
+		if code != tc.wantCode {
+			t.Errorf("%s: avFailureCode(%v) code = %q, want %q", tc.name, tc.err, code, tc.wantCode)
+		}
+		if message == "" {
+			t.Errorf("%s: avFailureCode(%v) message is empty, want a fixed client-facing message", tc.name, tc.err)
+		}
+	}
+}
