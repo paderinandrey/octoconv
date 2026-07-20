@@ -2,10 +2,13 @@ package convert
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireLiveAVBinaries skips the calling test unless ffmpeg and ffprobe are
@@ -312,5 +315,252 @@ func TestAVConverter_GarbageOpts(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "av:") {
 		t.Errorf("Convert(garbage opts) error = %q, want prefix \"av:\"", err.Error())
+	}
+}
+
+// mustGenerateAVFixture creates a tiny lavfi-synthesized ~2s video fixture
+// with explicit video/audio codecs -- mirrors 34-RESEARCH.md's
+// live-verification methodology (testsrc+sine), never a committed binary
+// fixture.
+func mustGenerateAVFixture(t *testing.T, dir, filename string, codecArgs ...string) string {
+	t.Helper()
+	path := filepath.Join(dir, filename)
+	args := append([]string{
+		"-y",
+		"-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",
+		"-f", "lavfi", "-i", "sine=duration=2",
+		"-shortest",
+	}, codecArgs...)
+	args = append(args, path)
+	out, err := exec.Command("ffmpeg", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate fixture %s: %v\n%s", filename, err, out)
+	}
+	return path
+}
+
+// TestAVConverter_Transcode_LiveBinary proves the mov -> mp4 transcode path
+// (AVC-01) produces an ffprobe-confirmed h264 output against a real ffmpeg
+// binary.
+func TestAVConverter_Transcode_LiveBinary(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mov", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "out.mp4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+		t.Fatalf("Convert(mov->mp4) = %v, want nil", err)
+	}
+	codec, _, _, err := probeVideoStream(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("probeVideoStream(out): %v", err)
+	}
+	if codec != "h264" {
+		t.Errorf("output video codec = %q, want h264", codec)
+	}
+}
+
+// TestAVConverter_MP4ToWebM_LiveBinary proves the mp4 -> webm transcode path
+// (AVC-02) always produces a VP9/Opus output against a real ffmpeg binary.
+func TestAVConverter_MP4ToWebM_LiveBinary(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "out.webm")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+		t.Fatalf("Convert(mp4->webm) = %v, want nil", err)
+	}
+	videoCodec, _, _, err := probeVideoStream(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("probeVideoStream(out): %v", err)
+	}
+	if videoCodec != "vp9" {
+		t.Errorf("output video codec = %q, want vp9", videoCodec)
+	}
+	audioCodec, err := probeAudioCodec(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("probeAudioCodec(out): %v", err)
+	}
+	if audioCodec != "opus" {
+		t.Errorf("output audio codec = %q, want opus", audioCodec)
+	}
+}
+
+// TestAVConverter_VP9SourceToMP4_ReEncodes is the AVC-05/T-34-11 load-bearing
+// contract test: a VP9/Opus source targeting mp4 must NOT be silently
+// remuxed (ffmpeg's mp4 muxer would happily accept it, 34-RESEARCH.md
+// Anti-Pattern 2) -- avStreamCopyLegal forces a full re-encode to h264/aac
+// instead.
+func TestAVConverter_VP9SourceToMP4_ReEncodes(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.webm", "-c:v", "libvpx-vp9", "-c:a", "libopus")
+	outPath := filepath.Join(dir, "out.mp4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+		t.Fatalf("Convert(webm/vp9/opus->mp4) = %v, want nil", err)
+	}
+	videoCodec, _, _, err := probeVideoStream(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("probeVideoStream(out): %v", err)
+	}
+	if videoCodec != "h264" {
+		t.Errorf("output video codec = %q, want h264 (re-encode, not a silent VP9 remux into mp4)", videoCodec)
+	}
+	audioCodec, err := probeAudioCodec(context.Background(), outPath)
+	if err != nil {
+		t.Fatalf("probeAudioCodec(out): %v", err)
+	}
+	if audioCodec != "aac" {
+		t.Errorf("output audio codec = %q, want aac (re-encode, not a silent Opus remux into mp4)", audioCodec)
+	}
+}
+
+// TestAVConverter_AudioExtract_LiveBinary proves the video -> mp3/wav/m4a
+// audio-extract path (AVC-03) against a real ffmpeg binary, including the
+// AAC-source->m4a stream-copy case.
+func TestAVConverter_AudioExtract_LiveBinary(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+
+	for _, target := range []string{"mp3", "wav", "m4a"} {
+		t.Run(target, func(t *testing.T) {
+			outPath := filepath.Join(dir, "out."+target)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+				t.Fatalf("Convert(mp4->%s) = %v, want nil", target, err)
+			}
+			fi, err := os.Stat(outPath)
+			if err != nil || fi.Size() == 0 {
+				t.Fatalf("stat output failed or empty: err=%v", err)
+			}
+		})
+	}
+
+	// AAC source -> m4a target: must use -c:a copy (stream unchanged, still aac).
+	t.Run("m4a AAC stream-copy", func(t *testing.T) {
+		outPath := filepath.Join(dir, "out_copy.m4a")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+			t.Fatalf("Convert(mp4->m4a, aac source) = %v, want nil", err)
+		}
+		codec, err := probeAudioCodec(context.Background(), outPath)
+		if err != nil {
+			t.Fatalf("probeAudioCodec(out): %v", err)
+		}
+		if codec != "aac" {
+			t.Errorf("output audio codec = %q, want aac", codec)
+		}
+	})
+}
+
+// TestAVConverter_Thumbnail_LiveBinary proves the video -> jpg/png/webp
+// thumbnail path (AVC-04) against a real ffmpeg binary; the webp subtest
+// skips when the local ffmpeg build lacks the libwebp encoder.
+func TestAVConverter_Thumbnail_LiveBinary(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+
+	for _, target := range []string{"jpg", "png", "webp"} {
+		t.Run(target, func(t *testing.T) {
+			if target == "webp" {
+				requireLibwebpEncoder(t)
+			}
+			outPath := filepath.Join(dir, "thumb."+target)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+				t.Fatalf("Convert(mp4->%s) = %v, want nil", target, err)
+			}
+			f, err := os.Open(outPath)
+			if err != nil {
+				t.Fatalf("open output: %v", err)
+			}
+			defer f.Close()
+			detected, _, err := Sniff(f)
+			if err != nil {
+				t.Fatalf("Sniff(output): %v", err)
+			}
+			if detected != target {
+				t.Errorf("Sniff(output) = %q, want %q", detected, target)
+			}
+		})
+	}
+}
+
+// TestAVConverter_Thumbnail_OutOfRangeSS proves an out-of-range timecode
+// fails closed (Pitfall 2): no output file is created, and the error is of
+// the ErrAVOutputMissingOrEmpty class.
+func TestAVConverter_Thumbnail_OutOfRangeSS(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac") // ~2s
+	outPath := filepath.Join(dir, "thumb.jpg")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := (AVConverter{}).Convert(ctx, src, outPath, map[string]any{"timecode": float64(100)})
+	if err == nil {
+		t.Fatal("Convert(out-of-range timecode) = nil, want a fail-closed error")
+	}
+	if !errors.Is(err, ErrAVOutputMissingOrEmpty) {
+		t.Errorf("Convert(out-of-range timecode) error = %v, want errors.Is ErrAVOutputMissingOrEmpty", err)
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("Convert(out-of-range timecode) created an output file; want none (Pitfall 2)")
+	}
+}
+
+// TestValidateAVOutput_SniffMismatch proves a non-image thumbnail output
+// (bytes that do not decode as the requested target) is rejected.
+func TestValidateAVOutput_SniffMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "thumb.jpg")
+	if err := os.WriteFile(path, []byte("not an image, just plain text bytes"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	err := validateAVOutput(path, "jpg")
+	if err == nil {
+		t.Fatal("validateAVOutput(non-image bytes, jpg) = nil, want a Sniff-mismatch error")
+	}
+	if !strings.Contains(err.Error(), "thumbnail not a valid") {
+		t.Errorf("validateAVOutput error = %q, want it to mention \"thumbnail not a valid\"", err.Error())
+	}
+}
+
+// TestProtocolWhitelist_BlocksHTTP_Canary is AVE-02's required offline
+// canary (34-RESEARCH.md "Protocol-whitelist offline canary"): a crafted
+// HLS m3u8 referencing an http:// segment must be rejected by
+// -protocol_whitelist file,crypto, with zero outbound connection attempted
+// and no output file produced.
+func TestProtocolWhitelist_BlocksHTTP_Canary(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	evilPath := filepath.Join(dir, "evil.m3u8")
+	playlist := "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nhttp://169.254.169.254/latest/meta-data/evil.ts\n#EXT-X-ENDLIST\n"
+	if err := os.WriteFile(evilPath, []byte(playlist), 0o644); err != nil {
+		t.Fatalf("write evil.m3u8: %v", err)
+	}
+	outPath := filepath.Join(dir, "out.mp4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := runCommand(ctx, "ffmpeg", "-y", "-nostdin", "-protocol_whitelist", "file,crypto", "-i", "file:"+evilPath, "-c", "copy", outPath)
+	if err == nil {
+		t.Fatal("ffmpeg with -protocol_whitelist file,crypto against an http:// HLS segment reference = nil error, want a protocol-whitelist rejection")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		t.Error("ffmpeg produced out.mp4 despite protocol-whitelist rejection; want no output file, no outbound connection succeeded")
 	}
 }

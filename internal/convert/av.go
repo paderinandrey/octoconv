@@ -242,16 +242,33 @@ func avThreadCount() int {
 
 // validateAVOutput guards against ffmpeg's "exit 0 but produced nothing
 // usable" failure mode (Pitfall 2): a missing file (os.Stat error) and a
-// zero-byte file map to the SAME ErrAVOutputMissingOrEmpty class. This is
-// the minimal (non-thumbnail-aware) form -- Task 3 hardens it to also
-// re-Sniff() a thumbnail's bytes.
-func validateAVOutput(path string) error {
+// zero-byte file map to the SAME ErrAVOutputMissingOrEmpty class. For
+// thumbnail targets (jpg/png/webp) it additionally re-Sniff()s the output
+// bytes to confirm they actually decode as the requested image format --
+// no existing validateXOutput sibling does this second check, it is new for
+// AV (34-PATTERNS.md).
+func validateAVOutput(path, target string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAVOutputMissingOrEmpty, err)
 	}
 	if fi.Size() == 0 {
 		return ErrAVOutputMissingOrEmpty
+	}
+	switch target {
+	case "jpg", "png", "webp":
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrAVOutputMissingOrEmpty, err)
+		}
+		defer f.Close()
+		detected, _, sniffErr := Sniff(f)
+		if sniffErr != nil {
+			return fmt.Errorf("av: thumbnail not a valid %s: %w", target, sniffErr)
+		}
+		if detected != target {
+			return fmt.Errorf("av: thumbnail not a valid %s (detected %q)", target, detected)
+		}
 	}
 	return nil
 }
@@ -336,7 +353,7 @@ func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, targ
 	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
-	return validateAVOutput(outPath)
+	return validateAVOutput(outPath, target)
 }
 
 // convertAudioExtract implements AVC-03: extract the audio track only
@@ -354,7 +371,7 @@ func (c AVConverter) convertAudioExtract(ctx context.Context, inPath, outPath, t
 	if _, err := runCommand(ctx, "ffmpeg", extractAudioArgs(inPath, outPath, target, streamCopy)...); err != nil {
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
-	return validateAVOutput(outPath)
+	return validateAVOutput(outPath, target)
 }
 
 // convertThumbnail implements AVC-04: default timecode 1.0s when unset,
@@ -376,5 +393,5 @@ func (c AVConverter) convertThumbnail(ctx context.Context, inPath, outPath, targ
 	if _, err := runCommand(ctx, "ffmpeg", thumbnailArgs(inPath, outPath, target, timecode)...); err != nil {
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
-	return validateAVOutput(outPath)
+	return validateAVOutput(outPath, target)
 }
