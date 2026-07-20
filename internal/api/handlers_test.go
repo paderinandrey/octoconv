@@ -2242,6 +2242,114 @@ func TestCreateJob_MP4StillDetectedBySniffPrefixTable(t *testing.T) {
 	}
 }
 
+// --- av opts-dispatch tests (Plan 06: EngineAV case, AVE-03) ---
+
+// TestCreateJob_AVOptsAccepted proves a valid AV opts payload (a thumbnail
+// timecode on a thumbnail target) is accepted via the dedicated EngineAV
+// opts case (ParseAVOpts/ValidateAVApplicability), normalized, and persisted
+// -- mirrors TestCreateJob_AudioOptsAccepted's discipline for the av engine.
+func TestCreateJob_AVOptsAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBodyWithOpts(t, "in.mp4", "jpg", mp4BytesFixture(), `{"timecode":2.5}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (valid av opts must be accepted via ParseAVOpts, not rejected as DocOpts); body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.Opts["timecode"] != 2.5 {
+		t.Errorf("CreateParams.Opts = %+v, want timecode=2.5", repo.created)
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_AVOptsAbsentAccepted proves an av-engine conversion with no
+// opts field at all is accepted -- the fourth opts-dispatch behavior bullet
+// (opts absent -> accepted), same discipline as every other engine's opts
+// being entirely optional (D-02, opts.go doc comment mirrored across
+// engines).
+func TestCreateJob_AVOptsAbsentAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBody(t, "in.mp4", "jpg", mp4BytesFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (absent opts must be accepted for the av engine); body=%s", rec.Code, rec.Body.String())
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_AVOptsRejectedForMalformedJSON proves ParseAVOpts's strict
+// decode (checkStrictObject, opts.go) actually runs on the API path: a
+// value of the wrong type for a known field is rejected with 422, not
+// silently coerced or passed through to the converter.
+func TestCreateJob_AVOptsRejectedForMalformedJSON(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.mp4", "jpg", mp4BytesFixture(), `{"timecode":"not-a-number"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must never run for malformed av opts JSON")
+	}
+}
+
+// TestCreateJob_AVOptsRejectedForInapplicablePair proves
+// ValidateAVApplicability's engine/target gating is actually enforced
+// through the API path: a Timecode (thumbnail-only) requested against a
+// transcode target is rejected with 422, mirroring the D-09/CR-01 "never
+// silently retarget a client's request" discipline the plan calls out.
+func TestCreateJob_AVOptsRejectedForInapplicablePair(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.mkv", "mp4", mkvBytesFixture(), `{"timecode":2.5}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (timecode is thumbnail-only, mkv->mp4 is a transcode target); body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must never run for opts inapplicable to the requested conversion")
+	}
+}
+
 // --- D-07 two-tier upload ceiling tests (35-04) ---
 
 // TestNewServer_MaxEngineBytesDefaults proves NewServer's zero-value

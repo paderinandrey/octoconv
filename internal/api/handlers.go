@@ -463,6 +463,43 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
 				return
 			}
+		case convert.EngineAV:
+			// AVE-03/AVT-01 (Phase 35): ParseAVOpts and ValidateAVApplicability
+			// already exist and were ASVS-audited in Phase 34 (avopts.go:99,
+			// :145) -- this branch is registration of that existing closed-
+			// allowlist validation into the API's opts-dispatch switch, not
+			// new validation logic, mirroring the EngineAudio branch above
+			// exactly.
+			avOpts, err := convert.ParseAVOpts([]byte(rawOpts))
+			if err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+				return
+			}
+			if err := convert.ValidateAVApplicability(engine, detected, target, avOpts); err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+				return
+			}
+			// D-08: persist the normalized struct, never the raw client
+			// bytes -- round-trip through json.Marshal so only the
+			// validated enum value ever reaches storage.
+			//
+			// Deliberately NOT clamped here: an out-of-range thumbnail
+			// Timecode is not rejected at this layer -- the source duration
+			// is unknown until ffprobe runs in the worker, so ParseAVOpts
+			// only range-checks Timecode >= 0. It surfaces later as
+			// convert.ErrAVTimecodeOutOfRange and is mapped by
+			// HandleAVConvert (internal/worker/worker.go, plan 03) to the
+			// distinguishable "timecode_out_of_range" failure code (D-09).
+			// Silently retargeting a client's request to the nearest valid
+			// timecode is the exact defect class CR-01/CR-02 already closed
+			// once (34-REVIEW-FIX.md) -- it must not be reintroduced here.
+			normalizedRaw, err = json.Marshal(avOpts)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
 		case convert.EngineHTML:
 			htmlOpts, err := convert.ParseHTMLOpts([]byte(rawOpts))
 			if err != nil {
