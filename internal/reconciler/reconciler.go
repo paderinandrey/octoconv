@@ -62,6 +62,7 @@ type enqueuer interface {
 	EnqueueDocumentConvert(ctx context.Context, id uuid.UUID) error
 	EnqueueHTMLConvert(ctx context.Context, id uuid.UUID) error
 	EnqueueAudioConvert(ctx context.Context, id uuid.UUID) error
+	EnqueueAVConvert(ctx context.Context, id uuid.UUID) error
 }
 
 // Sweeper periodically scans for stale jobs and recovers or exhausts them.
@@ -290,13 +291,15 @@ func (s *Sweeper) sweep(ctx context.Context) {
 			enqueueErr = s.enq.EnqueueHTMLConvert(ctx, j.ID)
 		case convert.EngineAudio:
 			enqueueErr = s.enq.EnqueueAudioConvert(ctx, j.ID)
+		case convert.EngineAV:
+			enqueueErr = s.enq.EnqueueAVConvert(ctx, j.ID)
 		default:
-			// Fail closed (T-10-03): av/cad/archive/probe are out of scope
-			// this milestone and a corrupted/unrecognized engine value must
-			// never be guessed at. Do NOT enqueue and do NOT RequeueStale —
-			// either would risk running the job through the wrong engine's
-			// worker or silently losing it from the recovery cap accounting.
-			// A future engine must add its own case here rather than fall
+			// Fail closed (T-10-03): cad/archive/probe are out of scope this
+			// milestone and a corrupted/unrecognized engine value must never
+			// be guessed at. Do NOT enqueue and do NOT RequeueStale — either
+			// would risk running the job through the wrong engine's worker
+			// or silently losing it from the recovery cap accounting. A
+			// future engine must add its own case here rather than fall
 			// through to a default route. This is a clear, non-fatal,
 			// metric-visible skip, not a crash — the job stays stranded and
 			// is re-evaluated (unrecovered) on the next sweep tick.

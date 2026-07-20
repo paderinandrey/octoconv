@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 
+	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 )
 
@@ -99,6 +100,8 @@ type fakeEnqueuer struct {
 	htmlCalls          []uuid.UUID
 	enqueueAudioErr    error
 	audioCalls         []uuid.UUID
+	enqueueAVErr       error
+	avCalls            []uuid.UUID
 }
 
 func (f *fakeEnqueuer) EnqueueImageConvert(ctx context.Context, id uuid.UUID) error {
@@ -134,6 +137,13 @@ func (f *fakeEnqueuer) EnqueueAudioConvert(ctx context.Context, id uuid.UUID) er
 	defer f.mu.Unlock()
 	f.audioCalls = append(f.audioCalls, id)
 	return f.enqueueAudioErr
+}
+
+func (f *fakeEnqueuer) EnqueueAVConvert(ctx context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.avCalls = append(f.avCalls, id)
+	return f.enqueueAVErr
 }
 
 // imageCallIDs returns a locked snapshot copy of imageCalls — used by the
@@ -180,6 +190,15 @@ func (f *fakeEnqueuer) audioCallIDs() []uuid.UUID {
 	defer f.mu.Unlock()
 	out := make([]uuid.UUID, len(f.audioCalls))
 	copy(out, f.audioCalls)
+	return out
+}
+
+// avCallIDs returns a locked snapshot copy of avCalls.
+func (f *fakeEnqueuer) avCallIDs() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uuid.UUID, len(f.avCalls))
+	copy(out, f.avCalls)
 	return out
 }
 
@@ -304,6 +323,106 @@ func TestSweepRoutesAudioJobsToAudioQueue(t *testing.T) {
 	}
 }
 
+// TestSweepRoutesAVJobsToAVQueue proves a stranded engine="av" job routes to
+// EnqueueAVConvert and NONE of the other four Enqueue* methods (AVE-03:
+// sweep() must no longer fail-closed-default an av job). Mirrors
+// TestSweepRoutesAudioJobsToAudioQueue exactly.
+func TestSweepRoutesAVJobsToAVQueue(t *testing.T) {
+	id := uuid.New()
+	store := &fakeStore{
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "av"}},
+		recoveryCount: map[uuid.UUID]int{id: 0},
+	}
+	enq := &fakeEnqueuer{}
+	s := NewSweeper(store, enq, testConfig())
+
+	s.sweep(context.Background())
+
+	if len(enq.avCalls) != 1 || enq.avCalls[0] != id {
+		t.Fatalf("EnqueueAVConvert calls = %+v, want [%s]", enq.avCalls, id)
+	}
+	if len(enq.imageCalls) != 0 {
+		t.Fatalf("EnqueueImageConvert should not be called for an av job, got %d calls", len(enq.imageCalls))
+	}
+	if len(enq.documentCalls) != 0 {
+		t.Fatalf("EnqueueDocumentConvert should not be called for an av job, got %d calls", len(enq.documentCalls))
+	}
+	if len(enq.htmlCalls) != 0 {
+		t.Fatalf("EnqueueHTMLConvert should not be called for an av job, got %d calls", len(enq.htmlCalls))
+	}
+	if len(enq.audioCalls) != 0 {
+		t.Fatalf("EnqueueAudioConvert should not be called for an av job, got %d calls", len(enq.audioCalls))
+	}
+	if store.requeueStaleCalls != 1 {
+		t.Fatalf("RequeueStale calls = %d, want 1", store.requeueStaleCalls)
+	}
+	if len(store.markFailedCalls) != 0 {
+		t.Fatalf("MarkFailed should not be called, got %d calls", len(store.markFailedCalls))
+	}
+}
+
+// TestSweepRoutesEveryEngineConstant is the D-06 completeness guard for the
+// reconciler routing seam (35-CONTEXT.md): D-06 explicitly declined
+// refactoring the reconciler's (and the API's) routing switch into a shared
+// queueForEngine helper for this phase, so the risk of a future engine
+// constant silently missing a routing case is closed by this test instead of
+// by a structural refactor. The table below is driven directly off the
+// convert.Engine* constants -- if a sixth engine class is ever added to
+// convert.go without a matching case in sweep()'s switch, adding its
+// constant/accessor here (the only change required to extend coverage) makes
+// this test fail with "RequeueStale calls = 0, want 1" instead of the
+// omission staying invisible except for a metrics-only unroutable_engine
+// bump in production.
+func TestSweepRoutesEveryEngineConstant(t *testing.T) {
+	cases := []struct {
+		engine  string
+		callIDs func(*fakeEnqueuer) []uuid.UUID
+	}{
+		{convert.EngineImage, (*fakeEnqueuer).imageCallIDs},
+		{convert.EngineDocument, (*fakeEnqueuer).documentCallIDs},
+		{convert.EngineHTML, (*fakeEnqueuer).htmlCallIDs},
+		{convert.EngineAudio, (*fakeEnqueuer).audioCallIDs},
+		{convert.EngineAV, (*fakeEnqueuer).avCallIDs},
+	}
+
+	for _, want := range cases {
+		t.Run(want.engine, func(t *testing.T) {
+			id := uuid.New()
+			store := &fakeStore{
+				stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: want.engine}},
+				recoveryCount: map[uuid.UUID]int{id: 0},
+			}
+			enq := &fakeEnqueuer{}
+			s := NewSweeper(store, enq, testConfig())
+
+			s.sweep(context.Background())
+
+			got := want.callIDs(enq)
+			if len(got) != 1 || got[0] != id {
+				t.Fatalf("engine %q: matching Enqueue* calls = %+v, want [%s]", want.engine, got, id)
+			}
+			// RequeueStale only runs after a successful, non-duplicate
+			// enqueue (sweep()'s enqueue-first ordering) -- a job whose
+			// engine fell through to the fail-closed default never reaches
+			// RequeueStale, so this is the indirect proof that the switch
+			// routed rather than defaulted (equivalent to asserting zero
+			// unroutable_engine outcomes without needing a metrics reader).
+			if store.requeueStaleCalls != 1 {
+				t.Fatalf("engine %q: RequeueStale calls = %d, want 1 (proves the switch did not fall through to the fail-closed default)", want.engine, store.requeueStaleCalls)
+			}
+
+			for _, other := range cases {
+				if other.engine == want.engine {
+					continue
+				}
+				if got := other.callIDs(enq); len(got) != 0 {
+					t.Fatalf("engine %q: unexpected Enqueue* call recorded on %q's accessor: %+v", want.engine, other.engine, got)
+				}
+			}
+		})
+	}
+}
+
 // TestSweepAudioZeroSpuriousRecoveryUnderRepeatedTicks is the SC4 proof: with
 // enqueueAudioErr = asynq.ErrDuplicateTask (the AudioUniqueTTL lock still
 // live for a long in-flight audio job), repeated sweep ticks against the SAME
@@ -339,10 +458,16 @@ func TestSweepAudioZeroSpuriousRecoveryUnderRepeatedTicks(t *testing.T) {
 	}
 }
 
+// TestSweepSkipsUnknownEngine uses "cad" as its unrecognized-engine fixture
+// (not "av" -- av gained its own routing case in this plan, per D-06/T-35-17,
+// and is now covered separately by TestSweepRoutesAVJobsToAVQueue). cad
+// remains genuinely out of scope (see the fail-closed default's comment in
+// reconciler.go), so it is still a valid fixture for the "never guess"
+// behavior this test guards.
 func TestSweepSkipsUnknownEngine(t *testing.T) {
 	id := uuid.New()
 	store := &fakeStore{
-		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "av"}},
+		stale:         []jobs.StaleJob{{ID: id, Status: jobs.StatusActive, Engine: "cad"}},
 		recoveryCount: map[uuid.UUID]int{id: 0},
 	}
 	enq := &fakeEnqueuer{}
@@ -355,6 +480,9 @@ func TestSweepSkipsUnknownEngine(t *testing.T) {
 	}
 	if len(enq.documentCalls) != 0 {
 		t.Fatalf("EnqueueDocumentConvert should not be called for an unrecognized engine, got %d calls", len(enq.documentCalls))
+	}
+	if len(enq.avCalls) != 0 {
+		t.Fatalf("EnqueueAVConvert should not be called for an unrecognized engine, got %d calls", len(enq.avCalls))
 	}
 	if store.requeueStaleCalls != 0 {
 		t.Fatalf("RequeueStale should not be called for an unrecognized engine, got %d calls", store.requeueStaleCalls)
