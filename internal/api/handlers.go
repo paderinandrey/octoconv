@@ -265,6 +265,42 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if detected == "" {
+		// D-08 (Phase 35): mkv/webm EBML-container detection, placed after the
+		// OLE-CFB check and before SniffAudio below. mp4/mov/avi are ALREADY
+		// caught by Sniff()'s fixed-12-byte-window signatures table earlier in
+		// this chain (matchMP4/matchMOV/matchAVI, avsniff.go) -- SniffVideo
+		// exists here only to close the mkv/webm gap that has had zero
+		// non-test callers since Phase 34 (WR-02: registering AVConverter
+		// without wiring this would ship an engine for formats the service
+		// cannot recognize). Placed before SniffAudio, not after, because
+		// SniffAudio's mp3PeekLen=512KiB peek is the single most expensive
+		// buffer in this chain -- ordering video first keeps that cost paid
+		// only when video detection has already declined.
+		//
+		// CRITICAL deviation from SniffAudio's exact reassignment shape
+		// (auto-fixed, Rule 1): SniffAudio only reassigns `rest` when it gets
+		// a non-empty match because it is the LAST detector in this chain --
+		// on a miss, `detected` stays "" and the handler returns the
+		// unrecognized-content 422 immediately after, so a stale `rest` is
+		// never read again. SniffVideo is NOT last (SniffAudio still runs
+		// after it): SniffVideo's io.ReadFull(rest, ...) call ALWAYS drains
+		// up to avPeekLen bytes from the underlying stream `rest` refers to,
+		// whether or not it finds a match. If `rest` were only reassigned on
+		// a match, a miss would silently leave `rest` pointing at a reader
+		// that has already lost its first bytes to this drain, and
+		// SniffAudio's subsequent read (or, on a genuine unrecognized upload
+		// with no further sniffer, s.storage.Upload) would receive a
+		// truncated stream (the exact T-31-02 class of bug). `rest` is
+		// therefore ALWAYS rebound to SniffVideo's returned reader on
+		// verr == nil, regardless of match; only `detected` is conditional.
+		if videoDetected, videoRest, verr := convert.SniffVideo(rest); verr == nil {
+			rest = videoRest
+			if videoDetected != "" {
+				detected = videoDetected
+			}
+		}
+	}
+	if detected == "" {
 		// AUD-05: mp3/wav/m4a/ogg content detection, placed LAST (after the
 		// OLE-CFB check, before the final fail-closed 422 below) because
 		// mp3PeekLen=512KiB is the most expensive buffer of the whole chain --
@@ -423,6 +459,43 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			// bytes -- round-trip through json.Marshal so only the
 			// validated enum value ever reaches storage.
 			normalizedRaw, err = json.Marshal(audioOpts)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
+				return
+			}
+		case convert.EngineAV:
+			// AVE-03/AVT-01 (Phase 35): ParseAVOpts and ValidateAVApplicability
+			// already exist and were ASVS-audited in Phase 34 (avopts.go:99,
+			// :145) -- this branch is registration of that existing closed-
+			// allowlist validation into the API's opts-dispatch switch, not
+			// new validation logic, mirroring the EngineAudio branch above
+			// exactly.
+			avOpts, err := convert.ParseAVOpts([]byte(rawOpts))
+			if err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=invalid_opts", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "invalid opts")
+				return
+			}
+			if err := convert.ValidateAVApplicability(engine, detected, target, avOpts); err != nil {
+				log.Printf("content validation rejected: client_id=%s filename=%q reason=opts_not_applicable", client.ID, filename)
+				writeError(w, http.StatusUnprocessableEntity, "opts not applicable to this conversion")
+				return
+			}
+			// D-08: persist the normalized struct, never the raw client
+			// bytes -- round-trip through json.Marshal so only the
+			// validated enum value ever reaches storage.
+			//
+			// Deliberately NOT clamped here: an out-of-range thumbnail
+			// Timecode is not rejected at this layer -- the source duration
+			// is unknown until ffprobe runs in the worker, so ParseAVOpts
+			// only range-checks Timecode >= 0. It surfaces later as
+			// convert.ErrAVTimecodeOutOfRange and is mapped by
+			// HandleAVConvert (internal/worker/worker.go, plan 03) to the
+			// distinguishable "timecode_out_of_range" failure code (D-09).
+			// Silently retargeting a client's request to the nearest valid
+			// timecode is the exact defect class CR-01/CR-02 already closed
+			// once (34-REVIEW-FIX.md) -- it must not be reintroduced here.
+			normalizedRaw, err = json.Marshal(avOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to normalize opts")
 				return

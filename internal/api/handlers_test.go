@@ -328,19 +328,55 @@ func paddedMP4Fixture(size int) []byte {
 	return out
 }
 
+// buildEBMLFixture constructs a byte-exact EBML header fixture for docType
+// ("matroska" or "webm"), matching convert.SniffVideo's matchEBML parser
+// exactly -- mirrors internal/convert/avsniff_test.go's own buildEBMLHeader
+// helper (unexported to that package, so duplicated here rather than
+// imported) so mkv/webm detection can be exercised end-to-end through
+// handleCreateJob with a committed byte-slice literal, no binary fixture
+// dependency (per the plan's stated preference). docType must be shorter
+// than 16 bytes so its SIZE vint fits in a single byte (0x80|len).
+func buildEBMLFixture(docType string) []byte {
+	body := []byte{}
+	body = append(body, 0x42, 0x86, 0x81, 0x01) // EBMLVersion = 1
+	body = append(body, 0x42, 0xf7, 0x81, 0x01) // EBMLReadVersion = 1
+	body = append(body, 0x42, 0xf2, 0x81, 0x04) // EBMLMaxIDLength = 4
+	body = append(body, 0x42, 0xf3, 0x81, 0x08) // EBMLMaxSizeLength = 8
+	body = append(body, 0x42, 0x82, byte(0x80|len(docType)))
+	body = append(body, []byte(docType)...)
+	body = append(body, 0x42, 0x87, 0x81, 0x04) // DocTypeVersion = 4
+	body = append(body, 0x42, 0x85, 0x81, 0x02) // DocTypeReadVersion = 2
+
+	header := []byte{0x1A, 0x45, 0xDF, 0xA3} // ebmlMagic (avsniff.go)
+	header = append(header, byte(0x80|len(body)))
+	header = append(header, body...)
+	return header
+}
+
+// mkvBytesFixture returns a minimal, valid EBML header with DocType
+// "matroska" -- convert.SniffVideo detects this as "mkv".
+func mkvBytesFixture() []byte {
+	return buildEBMLFixture("matroska")
+}
+
+// webmBytesFixture returns a minimal, valid EBML header with DocType
+// "webm" -- convert.SniffVideo detects this as "webm".
+func webmBytesFixture() []byte {
+	return buildEBMLFixture("webm")
+}
+
 // avTestTarget is a synthetic, never-real target format string. It exists
 // solely so fakeAVConverter's (mp4, avTestTarget) pair cannot collide with
 // any real registration -- not AudioConverter's video-to-transcript pairs
-// (D-04, mp4 -> txt/srt/vtt/json), and not the real AVConverter, which is
-// deliberately still unregistered at this point in the phase (D-08; wired in
-// a later Phase 35 plan).
+// (D-04, mp4 -> txt/srt/vtt/json), and not the real AVConverter's own pairs
+// (av.go), which is now registered into convert.Default (D-08, 35-06).
 const avTestTarget = "avtestout"
 
 // fakeAVConverter is a minimal convert.Converter registered ONLY so D-07
 // ceiling/enqueue-switch tests (35-04) can exercise engine=="av" end-to-end
-// through handleCreateJob, without depending on internal/convert's real,
-// not-yet-registered AVConverter and without modifying internal/convert
-// itself (out of this plan's file scope).
+// through handleCreateJob via a collision-free synthetic pair, independent
+// of whichever real (source, target) pairs the actual AVConverter happens to
+// support.
 type fakeAVConverter struct{}
 
 func (fakeAVConverter) Pairs() []convert.Pair {
@@ -2085,6 +2121,377 @@ func TestCreateJob_AudioOptsRejectedForWrongLanguage(t *testing.T) {
 	}
 }
 
+// --- av engine detection/routing tests (Plan 06: D-08 SniffVideo wiring, AVE-03/AVT-01) ---
+
+// TestCreateJob_MKVDetectedAndAccepted proves an mkv upload (undetectable
+// before this plan, since SniffVideo had zero non-test callers) is now
+// detected via the D-08 SniffVideo chain link, routed to the REAL
+// convert.Default-registered AVConverter's "av" engine (transcode mkv->mp4
+// is one of AVConverter's locked Pairs, av.go), enqueued via
+// EnqueueAVConvert, and -- proving the rest-rebinding fix did not truncate
+// the upload -- the object handed to storage.Upload is byte-identical to the
+// uploaded file.
+func TestCreateJob_MKVDetectedAndAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	data := mkvBytesFixture()
+	body, ct := multipartBody(t, "in.mkv", "mp4", data)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (mkv must be detected via SniffVideo, not rejected as unrecognized content); body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(store.uploadedBytes, data) {
+		t.Fatalf("stored object (%d bytes) != uploaded bytes (%d bytes) -- SniffVideo's rest must be rebound even on empty video-detection lookahead by SniffAudio, and preserved on a genuine mkv match", len(store.uploadedBytes), len(data))
+	}
+	if repo.created == nil {
+		t.Fatal("must create job for a valid mkv -> mp4 conversion")
+	}
+	if repo.created.SourceFormat != "mkv" || repo.created.TargetFormat != "mp4" {
+		t.Errorf("job format = %s -> %s, want mkv -> mp4", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+	if queue.enqueuedAudio != uuid.Nil {
+		t.Errorf("enqueuedAudio = %s, want uuid.Nil (mkv->mp4 transcode must never touch the audio queue)", queue.enqueuedAudio)
+	}
+}
+
+// TestCreateJob_WebMDetectedAndAccepted mirrors
+// TestCreateJob_MKVDetectedAndAccepted for the webm DocType -- both mkv and
+// webm share the identical EBML magic and can only be disambiguated by the
+// DocType element matchEBML walks to (avsniff.go).
+func TestCreateJob_WebMDetectedAndAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	data := webmBytesFixture()
+	body, ct := multipartBody(t, "in.webm", "mp4", data)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (webm must be detected via SniffVideo, not rejected as unrecognized content); body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(store.uploadedBytes, data) {
+		t.Fatalf("stored object (%d bytes) != uploaded bytes (%d bytes)", len(store.uploadedBytes), len(data))
+	}
+	if repo.created == nil {
+		t.Fatal("must create job for a valid webm -> mp4 conversion")
+	}
+	if repo.created.SourceFormat != "webm" || repo.created.TargetFormat != "mp4" {
+		t.Errorf("job format = %s -> %s, want webm -> mp4", repo.created.SourceFormat, repo.created.TargetFormat)
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_MP4StillDetectedBySniffPrefixTable proves the D-08 SniffVideo
+// wiring does not disturb mp4 detection: mp4 is caught by Sniff()'s
+// fixed-12-byte-window signatures table (matchMP4, avsniff.go) earlier in
+// the chain, so the `detected == ""` gate guarding the new SniffVideo call
+// is already false by the time execution reaches it -- SniffVideo never
+// runs for mp4. Routed through the audio-extract pair (mp4 -> mp3, one of
+// AVConverter's locked Pairs) so this exercises the REAL registered
+// converter, not the test-only fakeAVConverter's synthetic pair.
+func TestCreateJob_MP4StillDetectedBySniffPrefixTable(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	data := mp4BytesFixture()
+	body, ct := multipartBody(t, "in.mp4", "mp3", data)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.SourceFormat != "mp4" {
+		t.Fatalf("job SourceFormat = %+v, want mp4 (Sniff's prefix table must still win, not SniffVideo)", repo.created)
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// --- av opts-dispatch tests (Plan 06: EngineAV case, AVE-03) ---
+
+// TestCreateJob_AVOptsAccepted proves a valid AV opts payload (a thumbnail
+// timecode on a thumbnail target) is accepted via the dedicated EngineAV
+// opts case (ParseAVOpts/ValidateAVApplicability), normalized, and persisted
+// -- mirrors TestCreateJob_AudioOptsAccepted's discipline for the av engine.
+func TestCreateJob_AVOptsAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBodyWithOpts(t, "in.mp4", "jpg", mp4BytesFixture(), `{"timecode":2.5}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (valid av opts must be accepted via ParseAVOpts, not rejected as DocOpts); body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created == nil || repo.created.Opts["timecode"] != 2.5 {
+		t.Errorf("CreateParams.Opts = %+v, want timecode=2.5", repo.created)
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_AVOptsAbsentAccepted proves an av-engine conversion with no
+// opts field at all is accepted -- the fourth opts-dispatch behavior bullet
+// (opts absent -> accepted), same discipline as every other engine's opts
+// being entirely optional (D-02, opts.go doc comment mirrored across
+// engines).
+func TestCreateJob_AVOptsAbsentAccepted(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	srv, _ := newTestServer(repo, store, queue)
+
+	body, ct := multipartBody(t, "in.mp4", "jpg", mp4BytesFixture())
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (absent opts must be accepted for the av engine); body=%s", rec.Code, rec.Body.String())
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_AVOptsRejectedForMalformedJSON proves ParseAVOpts's strict
+// decode (checkStrictObject, opts.go) actually runs on the API path: a
+// value of the wrong type for a known field is rejected with 422, not
+// silently coerced or passed through to the converter.
+func TestCreateJob_AVOptsRejectedForMalformedJSON(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.mp4", "jpg", mp4BytesFixture(), `{"timecode":"not-a-number"}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must never run for malformed av opts JSON")
+	}
+}
+
+// TestCreateJob_AVOptsRejectedForInapplicablePair proves
+// ValidateAVApplicability's engine/target gating is actually enforced
+// through the API path: a Timecode (thumbnail-only) requested against a
+// transcode target is rejected with 422, mirroring the D-09/CR-01 "never
+// silently retarget a client's request" discipline the plan calls out.
+func TestCreateJob_AVOptsRejectedForInapplicablePair(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	srv, _ := newTestServer(repo, store, &fakeQueue{})
+
+	body, ct := multipartBodyWithOpts(t, "in.mkv", "mp4", mkvBytesFixture(), `{"timecode":2.5}`)
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (timecode is thumbnail-only, mkv->mp4 is a transcode target); body=%s", rec.Code, rec.Body.String())
+	}
+	if repo.created != nil {
+		t.Error("repo.Create must never run for opts inapplicable to the requested conversion")
+	}
+}
+
+// --- D-06 API enqueue-switch completeness guard (Plan 06, third and final seam) ---
+
+// TestCreateJobRoutesEveryEngineToItsQueue is the D-06 completeness guard for
+// the API's enqueue switch (35-CONTEXT.md): D-06 explicitly declined
+// refactoring the API's (and the reconciler's) routing switch into a shared
+// queueForEngine helper for this phase, so the risk of a future engine
+// constant silently missing an enqueue case is closed by this test instead
+// of a structural refactor -- the sanctioned structural replacement for that
+// declined refactor, and the THIRD and final D-06 seam this phase closes
+// (the queue-depth collector list was closed in plan 04's derived-collector
+// wiring, the reconciler routing switch in plan 05's
+// TestSweepRoutesEveryEngineConstant). The API switch at least fails closed
+// at runtime already (a missing case returns 500, never silently drops the
+// job) -- the queue-depth collector's variadic call site did NOT fail closed
+// (Pitfall 2, 35-RESEARCH.md), which is why all three seams get their own
+// test rather than relying on any one switch's fail-closed default to stand
+// in for the others.
+//
+// The table is driven directly off the convert.Engine* constants: a future
+// sixth engine class added to convert.go without a matching case in
+// handleCreateJob's enqueue switch fails this test (via the missing table
+// row/accessor) rather than staying invisible except for a 500 in
+// production.
+func TestCreateJobRoutesEveryEngineToItsQueue(t *testing.T) {
+	type fixture struct {
+		filename string
+		target   string
+		data     func(t *testing.T) []byte
+	}
+	cases := []struct {
+		engine string
+		fx     fixture
+		callID func(*fakeQueue) uuid.UUID
+	}{
+		{convert.EngineImage, fixture{"in.png", "webp", func(*testing.T) []byte { return pngBytesFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedImage }},
+		{convert.EngineDocument, fixture{"in.docx", "pdf", docxFixture}, func(q *fakeQueue) uuid.UUID { return q.enqueuedDocument }},
+		{convert.EngineHTML, fixture{"in.html", "pdf", func(*testing.T) []byte { return htmlFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedHTML }},
+		{convert.EngineAudio, fixture{"in.mp3", "txt", audioMP3Fixture}, func(q *fakeQueue) uuid.UUID { return q.enqueuedAudio }},
+		{convert.EngineAV, fixture{"in.mp4", "mp3", func(*testing.T) []byte { return mp4BytesFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedAV }},
+	}
+
+	allAccessors := make(map[string]func(*fakeQueue) uuid.UUID, len(cases))
+	for _, c := range cases {
+		allAccessors[c.engine] = c.callID
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.engine, func(t *testing.T) {
+			repo := &fakeRepo{}
+			store := &fakeStorage{}
+			queue := &fakeQueue{}
+			srv, _ := newTestServer(repo, store, queue)
+
+			body, ct := multipartBody(t, tc.fx.filename, tc.fx.target, tc.fx.data(t))
+			req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+			req.Header.Set("Content-Type", ct)
+			rec := httptest.NewRecorder()
+
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("engine %q: status = %d, want 202; body=%s", tc.engine, rec.Code, rec.Body.String())
+			}
+			if repo.created == nil || repo.created.Engine != tc.engine {
+				t.Fatalf("engine %q: job Engine = %+v, want %q", tc.engine, repo.created, tc.engine)
+			}
+			if got := tc.callID(queue); got != repo.createdID {
+				t.Fatalf("engine %q: matching Enqueue call id = %s, want %s (repo.createdID)", tc.engine, got, repo.createdID)
+			}
+			for otherEngine, accessor := range allAccessors {
+				if otherEngine == tc.engine {
+					continue
+				}
+				if got := accessor(queue); got != uuid.Nil {
+					t.Fatalf("engine %q: unexpected enqueue call recorded on %q's accessor: %s, want uuid.Nil", tc.engine, otherEngine, got)
+				}
+			}
+		})
+	}
+
+	// AVT-01 routing split (ROADMAP success criterion 2): the SAME source
+	// format (mp4) resolves to two DIFFERENT engines depending on target --
+	// mp4 -> srt (transcript) rides the existing audio queue/worker
+	// (video-to-transcript, D-04), while mp4 -> webm (transcode) is the real
+	// AVConverter's own pair. Reuses the "one queue and NONE of the others"
+	// negative-assertion style already established by
+	// TestCreateJob_AudioDetectedAndAccepted (handlers_test.go).
+	t.Run("mp4_to_srt_routes_audio_not_av", func(t *testing.T) {
+		repo := &fakeRepo{}
+		store := &fakeStorage{}
+		queue := &fakeQueue{}
+		srv, _ := newTestServer(repo, store, queue)
+
+		body, ct := multipartBody(t, "in.mp4", "srt", mp4BytesFixture())
+		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
+		if repo.created == nil || repo.created.Engine != convert.EngineAudio {
+			t.Fatalf("job Engine = %+v, want audio", repo.created)
+		}
+		if queue.enqueuedAudio != repo.createdID {
+			t.Errorf("enqueuedAudio = %s, want %s", queue.enqueuedAudio, repo.createdID)
+		}
+		if queue.enqueuedAV != uuid.Nil {
+			t.Errorf("enqueuedAV = %s, want uuid.Nil (mp4 -> srt must never touch the av queue)", queue.enqueuedAV)
+		}
+	})
+
+	t.Run("mp4_to_webm_routes_av_not_audio", func(t *testing.T) {
+		repo := &fakeRepo{}
+		store := &fakeStorage{}
+		queue := &fakeQueue{}
+		srv, _ := newTestServer(repo, store, queue)
+
+		body, ct := multipartBody(t, "in.mp4", "webm", mp4BytesFixture())
+		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
+		if repo.created == nil || repo.created.Engine != convert.EngineAV {
+			t.Fatalf("job Engine = %+v, want av", repo.created)
+		}
+		if queue.enqueuedAV != repo.createdID {
+			t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+		}
+		if queue.enqueuedAudio != uuid.Nil {
+			t.Errorf("enqueuedAudio = %s, want uuid.Nil (mp4 -> webm must never touch the audio queue)", queue.enqueuedAudio)
+		}
+	})
+}
+
 // --- D-07 two-tier upload ceiling tests (35-04) ---
 
 // TestNewServer_MaxEngineBytesDefaults proves NewServer's zero-value
@@ -2146,8 +2553,9 @@ func TestCreateJob_EngineSizeLimitRejectsOversizedImage(t *testing.T) {
 // existing engine classes' 100 MiB ceiling is accepted, routed with
 // Engine="av", and enqueued via EnqueueAVConvert -- because av gets its own,
 // much larger per-engine ceiling. Exercises engine=="av" through the fake
-// (mp4, avTestTarget) pair registered above (the real AVConverter is not yet
-// registered in this phase, D-08).
+// (mp4, avTestTarget) collision-free synthetic pair registered above, kept
+// independent of the real AVConverter's own pair set (now also registered,
+// D-08, 35-06) so this test does not need to track it.
 func TestCreateJob_EngineSizeLimitAcceptsLargeAVUpload(t *testing.T) {
 	repo := &fakeRepo{}
 	store := &fakeStorage{}
