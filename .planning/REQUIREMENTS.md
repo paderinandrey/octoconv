@@ -9,17 +9,17 @@ Requirements for milestone v1.8. Each maps to roadmap phases.
 
 ### Конвертации (AVC)
 
-- [ ] **AVC-01**: Клиент может транскодировать видео (mov/avi/mkv/webm) → mp4 (H.264 video + AAC audio, `-movflags +faststart`) через тот же async-пайплайн, что и остальные классы
-- [ ] **AVC-02**: Клиент может транскодировать mp4 → webm (VP9/Opus) — всегда полный re-encode, входит в worst-case RTF-гейта
-- [ ] **AVC-03**: Клиент может извлечь аудиодорожку из видео → mp3/wav/m4a; при AAC-источнике и m4a-таргете используется stream-copy (`-c:a copy`) вместо re-encode
-- [ ] **AVC-04**: Клиент может получить кадр-превью из видео → jpg/png/webp; быстрый input-side `-ss` seek; дефолтный таймкод 1.0s (clamped к длительности) при отсутствии opts
-- [ ] **AVC-05**: Транскод использует авто stream-copy fast path: ffprobe-проверка кодека источника → remux вместо re-encode, когда кодек уже легален в target-контейнере
+- [x] **AVC-01**: Клиент может транскодировать видео (mov/avi/mkv/webm) → mp4 (H.264 video + AAC audio, `-movflags +faststart`) через тот же async-пайплайн, что и остальные классы
+- [x] **AVC-02**: Клиент может транскодировать mp4 → webm (VP9/Opus) — всегда полный re-encode, входит в worst-case RTF-гейта
+- [x] **AVC-03**: Клиент может извлечь аудиодорожку из видео → mp3/wav/m4a; при AAC-источнике и m4a-таргете используется stream-copy (`-c:a copy`) вместо re-encode
+- [x] **AVC-04**: Клиент может получить кадр-превью из видео → jpg/png/webp; быстрый input-side `-ss` seek; дефолтный таймкод 1.0s (clamped к длительности) при отсутствии opts
+- [x] **AVC-05**: Транскод использует авто stream-copy fast path: ffprobe-проверка кодека источника → remux вместо re-encode, когда кодек уже легален в target-контейнере
 
 ### Opts (AVO)
 
-- [ ] **AVO-01**: Клиент может задать таймкод превью через типизированный закрытый AVOpts allowlist (checkStrictObject-паттерн; клиентские байты никогда не попадают в argv движка — OPTS-01/02 прецедент)
-- [ ] **AVO-02**: Клиент может ограничить разрешение выхода транскода закрытым enum высот (480/720/1080) — никаких произвольных WxH-строк
-- [ ] **AVO-03**: Клиент может выбрать H.265/HEVC кодек для mp4-таргета через тот же закрытый allowlist (свой CRF-дефолт x265, не копия x264)
+- [x] **AVO-01**: Клиент может задать таймкод превью через типизированный закрытый AVOpts allowlist (checkStrictObject-паттерн; клиентские байты никогда не попадают в argv движка — OPTS-01/02 прецедент)
+- [x] **AVO-02**: Клиент может ограничить разрешение выхода транскода закрытым enum высот (480/720/1080) — никаких произвольных WxH-строк
+- [x] **AVO-03**: Клиент может выбрать H.265/HEVC кодек для mp4-таргета через тот же закрытый allowlist (свой CRF-дефолт x265, не копия x264)
 
 ### Транскрипт (AVT)
 
@@ -28,7 +28,7 @@ Requirements for milestone v1.8. Each maps to roadmap phases.
 ### Инфраструктура (AVE)
 
 - [x] **AVE-01**: Fail-closed magic-bytes валидация видео-контейнеров до записи в S3: ISO-BMFF ftyp brands (mp4/mov), EBML DocType (mkv vs webm, bounded-peek парсер), RIFF/`AVI ` — с тестами непересечения с существующими снифферами (WAV/RIFF, m4aBrands/heicBrands)
-- [ ] **AVE-02**: Guards до дорогой стадии: ffprobe duration-гард (паттерн audioduration.go, свой `AV_MAX_DURATION_SECONDS`) + resolution-probe против decode-bomb; `-protocol_whitelist file,crypto` на каждом вызове ffmpeg/ffprobe (SSRF/LFI через HLS/concat/subtitle-контент внутри контейнера)
+- [x] **AVE-02**: Guards до дорогой стадии: ffprobe duration-гард (паттерн audioduration.go, свой `AV_MAX_DURATION_SECONDS`) + resolution-probe против decode-bomb; `-protocol_whitelist file,crypto` на каждом вызове ffmpeg/ffprobe (SSRF/LFI через HLS/concat/subtitle-контент внутри контейнера)
 - [ ] **AVE-03**: Отдельная av asynq-очередь + `cmd/av-worker` со своим retry schedule и unique-lock TTL из worst-case бюджета; stage-aware transient/terminal классификация выведена заново для видео (transcode-таймаут ≠ audio-прецедент «ffmpeg=terminal»); reconciler-роутинг по `jobs.engine='av'`
 - [ ] **AVE-04**: av-worker контейнеризован (Debian ffmpeg с CVE-backport, версия пиненная); `AV_ENGINE_TIMEOUT` измерен RTF-матрицей worst-case (max разрешение × самый дорогой кодек × max длительность) по методологии Phase 32, с NO-GO-рычагами
 - [ ] **AVE-05**: compose-сервис + Helm chart (Deployment с grace-периодами от измеренного таймаута) + KEDA ScaledObject с production-паритетом (WR-01 триада verbatim), env-parity (IN-02 паттерн), scale-from-zero live-proof
