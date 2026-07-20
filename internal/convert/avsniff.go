@@ -147,9 +147,16 @@ func matchEBML(buf []byte) (format string, ok bool) {
 		return "", false
 	}
 	pos := 4 + sizeLen
-	end := pos + int(headerSize)
-	if end > len(buf) {
-		end = len(buf) // bounded peek: never trust a declared size past what we actually have
+	// WR-03: compare in uint64 space BEFORE any narrowing. readSizeVint can
+	// return values up to 2^56-1; on a 32-bit build `int(headerSize)` is
+	// implementation-defined truncation, which can yield 0 (bounds check
+	// passes against an empty slice) or a NEGATIVE int (bounds check passes,
+	// then the slice expression panics on attacker-controlled input).
+	// audioduration.go:21-31 documents this same class of platform-dependent
+	// numeric-conversion hazard.
+	end := len(buf) // bounded peek: never trust a declared size past what we actually have
+	if uint64(pos)+headerSize < uint64(len(buf)) {
+		end = pos + int(headerSize)
 	}
 	for pos < end {
 		id, idLen, ok := readIDVint(buf, pos)
@@ -162,7 +169,10 @@ func matchEBML(buf []byte) (format string, ok bool) {
 			return "", false
 		}
 		pos += sizeLen
-		if pos+int(size) > len(buf) {
+		// WR-03: same uint64-space comparison as above -- narrowing `size` to
+		// int before the bounds check is exactly what makes the check
+		// bypassable on a 32-bit build.
+		if uint64(pos)+size > uint64(len(buf)) {
 			return "", false // declared element size runs past bounded window: fail closed
 		}
 		if id == ebmlDocTypeID {

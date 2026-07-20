@@ -278,6 +278,52 @@ func TestMatchEBML_RejectsOversizedElementSize(t *testing.T) {
 	}
 }
 
+// TestMatchEBML_RejectsHugeSizeVint is WR-03's regression pin: an 8-byte SIZE
+// vint declaring a value >= 2^31 must fail closed and must never panic. The
+// bounds checks compare in uint64 space precisely because narrowing to int
+// first is implementation-defined truncation on a 32-bit build -- 0x100000000
+// truncates to 0 (the check passes against an empty slice) and 0x80000000
+// truncates to a NEGATIVE int (the check passes, then the slice expression
+// panics on attacker-controlled input). On a 64-bit build these already
+// failed closed; this pins the intent so a future edit cannot quietly
+// reinstate the narrowing. audioduration.go:21-31 documents the same
+// platform-dependent numeric-conversion hazard class.
+func TestMatchEBML_RejectsHugeSizeVint(t *testing.T) {
+	for _, size := range []uint64{0x80000000, 0x100000000, 0x00FFFFFFFFFFFFFF} {
+		// 8-byte SIZE vint: length marker 0x01, then 7 value bytes.
+		sizeVint := []byte{0x01}
+		for shift := 48; shift >= 0; shift -= 8 {
+			sizeVint = append(sizeVint, byte(size>>uint(shift)))
+		}
+
+		// A DocType element declaring the huge size.
+		buf := append([]byte{}, ebmlMagic...)
+		buf = append(buf, 0x80|0x20) // master SIZE = 32
+		buf = append(buf, 0x42, 0x82)
+		buf = append(buf, sizeVint...)
+		buf = append(buf, []byte("matroska")...)
+		if format, ok := matchEBML(buf); ok {
+			t.Errorf("matchEBML(element size 0x%X) = (%q, true), want (_, false)", size, format)
+		}
+
+		// The master HEADER element declaring the huge size is a different
+		// case: an over-large header size is clamped to the peeked window
+		// (bounded scan) rather than rejected, so a DocType that genuinely
+		// sits inside the peeked bytes must still be found. What must never
+		// happen is a truncated `int(headerSize)` producing a zero or
+		// negative scan end, which would silently abandon the walk and
+		// misreport a real mkv as unrecognized.
+		hdr := append([]byte{}, ebmlMagic...)
+		hdr = append(hdr, sizeVint...)
+		hdr = append(hdr, 0x42, 0x82, 0x88)
+		hdr = append(hdr, []byte("matroska")...)
+		format, ok := matchEBML(hdr)
+		if !ok || format != "mkv" {
+			t.Errorf("matchEBML(header size 0x%X) = (%q, %v), want (\"mkv\", true) via a clamped bounded scan", size, format, ok)
+		}
+	}
+}
+
 func TestVintLen(t *testing.T) {
 	cases := []struct {
 		first byte
