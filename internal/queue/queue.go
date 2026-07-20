@@ -22,12 +22,13 @@ const (
 	TypeDocumentConvert = "document:convert"
 	TypeHTMLConvert     = "html:convert"
 	TypeAudioConvert    = "audio:convert"
+	TypeAVConvert       = "av:convert"
 )
 
 // Queue names. asynq routes tasks to a queue per engine class so workers and
 // autoscaling can be scoped to a single class. QueueImage/QueueDocument/
-// QueueHTML/QueueAudio are tied to convert.EngineImage/EngineDocument/
-// EngineHTML/EngineAudio (the single source of truth for engine-class
+// QueueHTML/QueueAudio/QueueAV are tied to convert.EngineImage/EngineDocument/
+// EngineHTML/EngineAudio/EngineAV (the single source of truth for engine-class
 // literals, DEBT-02) so queue names cannot drift from the engine-class
 // identifiers.
 const (
@@ -36,6 +37,7 @@ const (
 	QueueDocument = convert.EngineDocument
 	QueueHTML     = convert.EngineHTML
 	QueueAudio    = convert.EngineAudio
+	QueueAV       = convert.EngineAV
 )
 
 // ConvertPayload is the task payload. It carries only the job id — all task
@@ -138,6 +140,28 @@ func NewAudioConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration)
 	}
 	return asynq.NewTask(TypeAudioConvert, b,
 		asynq.Queue(QueueAudio),
+		asynq.MaxRetry(maxRetry),
+		asynq.Unique(uniqueTTL),
+	), nil
+}
+
+// NewAVConvertTask builds an asynq task for a video conversion job, routed
+// to the av queue, bounded to maxRetry (AV_MAX_RETRY, D-03 LOCKED default
+// 2 -- fewer attempts than audio's 3, since each av attempt costs
+// materially more), and carrying a per-job asynq.Unique lock (uniqueTTL,
+// see AVUniqueTTL) so a second enqueue for the same jobID while the first
+// task/lock is still live collides on the same uniqueness key and returns
+// asynq.ErrDuplicateTask instead of creating a second concurrent task --
+// mirrors NewAudioConvertTask exactly; reuses ConvertPayload/
+// ParseConvertPayload (no new payload type needed, all job detail is
+// re-read from Postgres).
+func NewAVConvertTask(jobID uuid.UUID, maxRetry int, uniqueTTL time.Duration) (*asynq.Task, error) {
+	b, err := json.Marshal(ConvertPayload{JobID: jobID})
+	if err != nil {
+		return nil, fmt.Errorf("marshal convert payload: %w", err)
+	}
+	return asynq.NewTask(TypeAVConvert, b,
+		asynq.Queue(QueueAV),
 		asynq.MaxRetry(maxRetry),
 		asynq.Unique(uniqueTTL),
 	), nil
@@ -320,6 +344,33 @@ func AudioRetryDelay(n int, e error, t *asynq.Task) time.Duration {
 	return audioRetrySchedule[idx]
 }
 
+// avRetrySchedule is the backoff schedule for av conversion retries: 30s,
+// 2m -- LOCKED by D-03 (CONTEXT.md): fewer attempts, longer pauses than
+// audio's 5s/15s/30s. Each av attempt (ffmpeg transcode/extract/thumbnail)
+// costs materially more than audio's normalize+transcribe pass, so the long
+// first backoff lets load drain rather than hammering a busy worker 5
+// seconds later.
+var avRetrySchedule = []time.Duration{
+	30 * time.Second,
+	2 * time.Minute,
+}
+
+// AVRetryDelay is an asynq RetryDelayFunc for the av queue. Mirrors
+// AudioRetryDelay's/DocumentRetryDelay's clamp-index-to-schedule-length
+// shape exactly -- NOT WebhookRetryDelay's jittered shape -- since
+// avBackoffSum must be able to call AVRetryDelay directly and
+// deterministically.
+func AVRetryDelay(n int, e error, t *asynq.Task) time.Duration {
+	idx := n
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(avRetrySchedule) {
+		idx = len(avRetrySchedule) - 1
+	}
+	return avRetrySchedule[idx]
+}
+
 // RetryDelayFunc dispatches to a per-queue retry delay function based on the
 // task type. It fixes the confirmed defect where every queue silently
 // inherited WebhookRetryDelay via a single server-wide
@@ -339,6 +390,8 @@ func RetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 		return HTMLRetryDelay(n, e, t)
 	case TypeAudioConvert:
 		return AudioRetryDelay(n, e, t)
+	case TypeAVConvert:
+		return AVRetryDelay(n, e, t)
 	default:
 		return asynq.DefaultRetryDelayFunc(n, e, t)
 	}
@@ -502,6 +555,56 @@ func audioBackoffSum(maxRetry int) time.Duration {
 // retry lifetime.
 func AudioUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
 	return time.Duration(maxRetry+1)*engineTimeout + audioBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
+// avBackoffSum sums AVRetryDelay(i) for i in [0, maxRetry) -- the total
+// backoff time asynq spends waiting before each of maxRetry retries, clamped
+// to the last schedule entry once i reaches len(avRetrySchedule). Mirrors
+// audioBackoffSum; safe to call AVRetryDelay directly since it has no jitter
+// (same reasoning as documentBackoffSum's doc comment).
+func avBackoffSum(maxRetry int) time.Duration {
+	var sum time.Duration
+	for i := 0; i < maxRetry; i++ {
+		sum += AVRetryDelay(i, nil, nil)
+	}
+	return sum
+}
+
+// AVUniqueTTL derives the per-job asynq.Unique lock TTL for av conversion
+// tasks from the actual retry budget (maxRetry, normally AV_MAX_RETRY) and
+// the per-attempt bound (engineTimeout, normally AV_ENGINE_TIMEOUT),
+// mirroring AudioUniqueTTL's derivation exactly so the lock can never
+// silently drift under asynq's true worst-case retry lifetime if either env
+// var changes later.
+//
+// SEQUENCING NOTE (D-03/CONTEXT.md): AV_ENGINE_TIMEOUT is only [ASSUMED]
+// (provisional) in this phase -- Phase 36 measures it for real from an RTF
+// matrix and supersedes the input value entirely. The formula below is
+// unaffected by that; only the engineTimeout argument changes.
+//
+// Worst-case formula: (maxRetry+1) * engineTimeout + avBackoffSum(maxRetry) + margin.
+// Same "(maxRetry+1) executions, not maxRetry" correction as
+// ImageUniqueTTL/DocumentUniqueTTL/HTMLUniqueTTL/AudioUniqueTTL applies here
+// (asynq's archive condition msg.Retried >= msg.Retry is checked AFTER each
+// failed attempt). REUSES the shared uniqueTTLSafetyMargin const verbatim --
+// no av-specific margin constant (D-03, locked).
+func AVUniqueTTL(maxRetry int, engineTimeout time.Duration) time.Duration {
+	return time.Duration(maxRetry+1)*engineTimeout + avBackoffSum(maxRetry) + uniqueTTLSafetyMargin
+}
+
+// AllConvertQueues returns the queue name for every conversion engine class
+// (image/document/html/audio/av), deliberately excluding QueueWebhook
+// (webhook is not an engine class and is never KEDA-scaled per-conversion).
+// This is the single source of truth for cmd/api/main.go's queue-depth
+// collector arg list: metrics.NewQueueDepthCollector is VARIADIC, so a
+// hand-maintained call-site list can silently omit a queue with no compile
+// error, dropping the Prometheus series KEDA scales the worker on (D-06,
+// RESEARCH.md Pitfall 2). See TestAllConvertQueuesCoversEveryEngine for the
+// completeness guard against a future engine class being added here without
+// also being added to convert.go's Engine* constants (or vice versa). Plan
+// 04 rewires cmd/api/main.go to spread this helper.
+func AllConvertQueues() []string {
+	return []string{QueueImage, QueueDocument, QueueHTML, QueueAudio, QueueAV}
 }
 
 // webhookJitterCeiling is WebhookRetryDelay's documented maximum +25% jitter
