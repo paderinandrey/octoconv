@@ -163,9 +163,9 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 **Plans**: 7 plans
 - [x] 35-01-PLAN.md — AV stage sentinels (D-01), video→transcript pairs + video budget floor + `-map 0:a:0` (D-04/D-05), pair-disjointness test (AVE-03, AVT-01)
 - [x] 35-02-PLAN.md — av queue: task type, D-03 retry schedule, AVUniqueTTL, EnqueueAVConvert, AllConvertQueues (AVE-03)
-- [ ] 35-03-PLAN.md — worker: stage-aware `isAVTerminal` (D-02) + `HandleAVConvert` with distinguishable error codes (D-09) (AVE-03)
-- [ ] 35-04-PLAN.md — API: two-tier upload ceiling (D-07), Enqueuer seam, derived queue-depth collector list (AVE-03)
-- [ ] 35-05-PLAN.md — reconciler av routing + engine-routing completeness test (D-06) (AVE-03)
+- [x] 35-03-PLAN.md — worker: stage-aware `isAVTerminal` (D-02) + `HandleAVConvert` with distinguishable error codes (D-09) (AVE-03)
+- [x] 35-04-PLAN.md — API: two-tier upload ceiling (D-07), Enqueuer seam, derived queue-depth collector list (AVE-03)
+- [x] 35-05-PLAN.md — reconciler av routing + engine-routing completeness test (D-06) (AVE-03)
 - [ ] 35-06-PLAN.md — register AVConverter + wire SniffVideo (D-08), AV opts dispatch, enqueue-switch completeness test (AVE-03, AVT-01)
 - [ ] 35-07-PLAN.md — `cmd/av-worker` binary + live end-to-end checkpoint (AVE-03)
 
@@ -229,7 +229,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
-| 35. Queue, Worker & Routing Integration | v1.8 | 2/7 | In Progress|  |
+| 35. Queue, Worker & Routing Integration | v1.8 | 5/7 | In Progress|  |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
 
