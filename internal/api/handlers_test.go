@@ -19,6 +19,7 @@ import (
 
 	"github.com/apaderin/octoconv/internal/auth"
 	"github.com/apaderin/octoconv/internal/clients"
+	"github.com/apaderin/octoconv/internal/convert"
 	"github.com/apaderin/octoconv/internal/jobs"
 	"github.com/apaderin/octoconv/internal/presets"
 )
@@ -81,6 +82,7 @@ type fakeQueue struct {
 	enqueuedDocument uuid.UUID
 	enqueuedHTML     uuid.UUID
 	enqueuedAudio    uuid.UUID
+	enqueuedAV       uuid.UUID
 }
 
 func (f *fakeQueue) EnqueueImageConvert(_ context.Context, id uuid.UUID) error {
@@ -100,6 +102,11 @@ func (f *fakeQueue) EnqueueHTMLConvert(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeQueue) EnqueueAudioConvert(_ context.Context, id uuid.UUID) error {
 	f.enqueuedAudio = id
+	return nil
+}
+
+func (f *fakeQueue) EnqueueAVConvert(_ context.Context, id uuid.UUID) error {
+	f.enqueuedAV = id
 	return nil
 }
 
@@ -280,6 +287,74 @@ func truncatedIHDRPNGFixture() []byte {
 // detects as "jpg".
 func jpegBytesFixture() []byte {
 	return []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01}
+}
+
+// paddedPNGFixture returns pngBytesFixture() followed by size-24 zero bytes,
+// giving D-07 ceiling tests (35-04) control over the PHYSICAL upload size
+// (header.Size) independent of the small declared IHDR dimensions
+// convert.Dimensions reads from the front of the stream -- padding never
+// disturbs Sniff (fixed 12-byte window) or Dimensions (stops after the
+// width/height fields). Returns pngBytesFixture() unchanged if size is not
+// larger than it already is.
+func paddedPNGFixture(size int) []byte {
+	base := pngBytesFixture()
+	if size <= len(base) {
+		return base
+	}
+	out := make([]byte, size)
+	copy(out, base)
+	return out
+}
+
+// mp4BytesFixture returns the minimal ftyp+brand box matchMP4 (avsniff.go)
+// detects as "mp4": a 4-byte box-size field (value unused by the matcher)
+// followed by "ftyp" and the allowlisted major brand "isom".
+func mp4BytesFixture() []byte {
+	return []byte{
+		0x00, 0x00, 0x00, 0x18, // box size (declared, ignored by matchMP4)
+		0x66, 0x74, 0x79, 0x70, // "ftyp"
+		0x69, 0x73, 0x6F, 0x6D, // "isom" -- mp4VideoBrands entry
+	}
+}
+
+// paddedMP4Fixture mirrors paddedPNGFixture for the mp4 magic-byte prefix.
+func paddedMP4Fixture(size int) []byte {
+	base := mp4BytesFixture()
+	if size <= len(base) {
+		return base
+	}
+	out := make([]byte, size)
+	copy(out, base)
+	return out
+}
+
+// avTestTarget is a synthetic, never-real target format string. It exists
+// solely so fakeAVConverter's (mp4, avTestTarget) pair cannot collide with
+// any real registration -- not AudioConverter's video-to-transcript pairs
+// (D-04, mp4 -> txt/srt/vtt/json), and not the real AVConverter, which is
+// deliberately still unregistered at this point in the phase (D-08; wired in
+// a later Phase 35 plan).
+const avTestTarget = "avtestout"
+
+// fakeAVConverter is a minimal convert.Converter registered ONLY so D-07
+// ceiling/enqueue-switch tests (35-04) can exercise engine=="av" end-to-end
+// through handleCreateJob, without depending on internal/convert's real,
+// not-yet-registered AVConverter and without modifying internal/convert
+// itself (out of this plan's file scope).
+type fakeAVConverter struct{}
+
+func (fakeAVConverter) Pairs() []convert.Pair {
+	return []convert.Pair{{From: "mp4", To: avTestTarget}}
+}
+
+func (fakeAVConverter) Convert(context.Context, string, string, map[string]any) error {
+	return nil
+}
+
+func (fakeAVConverter) Engine() string { return convert.EngineAV }
+
+func init() {
+	convert.Default.Register(fakeAVConverter{})
 }
 
 // --- document container fixture helpers (mirror internal/convert/docsniff_test.go) ---
@@ -2007,5 +2082,132 @@ func TestCreateJob_AudioOptsRejectedForWrongLanguage(t *testing.T) {
 	}
 	if repo.created != nil {
 		t.Error("repo.Create must never run for an unsupported language")
+	}
+}
+
+// --- D-07 two-tier upload ceiling tests (35-04) ---
+
+// TestNewServer_MaxEngineBytesDefaults proves NewServer's zero-value
+// Config.MaxEngineBytes defaulting yields a non-nil map covering all five
+// engines: image/document/html/audio at their pre-Phase-35 effective 100 MiB
+// ceiling, av at the raised 2 GiB allowance.
+func TestNewServer_MaxEngineBytesDefaults(t *testing.T) {
+	srv := NewServer(&fakeRepo{}, &fakeStorage{}, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), newFakeResolver(), healthyDeps(), Config{})
+
+	if srv.maxEngineBytes == nil {
+		t.Fatal("maxEngineBytes must be non-nil after NewServer")
+	}
+	for _, engine := range []string{convert.EngineImage, convert.EngineDocument, convert.EngineHTML, convert.EngineAudio} {
+		if got := srv.maxEngineBytes[engine]; got != 100<<20 {
+			t.Errorf("maxEngineBytes[%s] = %d, want 100 MiB (100<<20)", engine, got)
+		}
+	}
+	if got := srv.maxEngineBytes[convert.EngineAV]; got != 2<<30 {
+		t.Errorf("maxEngineBytes[av] = %d, want 2 GiB (2<<30)", got)
+	}
+}
+
+// TestCreateJob_EngineSizeLimitRejectsOversizedImage verifies D-07's second
+// tier: an image upload whose physical size exceeds ITS engine's ceiling is
+// rejected 413 -- before any storage.Upload call and before repo.Create --
+// even though it is comfortably under the (much larger) global
+// MaxUploadBytes pre-parse bound. Uses a scaled-down MaxEngineBytes value
+// (mirrors TestCreateJob_DimensionLimitExceeded's scaled-down MaxImagePixels)
+// rather than an actual 200 MiB payload.
+func TestCreateJob_EngineSizeLimitRejectsOversizedImage(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{
+		MaxUploadBytes: 10 << 20,
+		MaxEngineBytes: map[string]int64{convert.EngineImage: 100},
+	})
+
+	body, ct := multipartBody(t, "in.png", "webp", paddedPNGFixture(500))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+	}
+	if store.uploaded {
+		t.Error("must not call storage.Upload for an upload exceeding its engine's size ceiling")
+	}
+	if repo.created != nil {
+		t.Error("must not create a job for an upload exceeding its engine's size ceiling")
+	}
+}
+
+// TestCreateJob_EngineSizeLimitAcceptsLargeAVUpload proves the OTHER half of
+// D-07's two-tier design: an av-engine upload that would exceed the four
+// existing engine classes' 100 MiB ceiling is accepted, routed with
+// Engine="av", and enqueued via EnqueueAVConvert -- because av gets its own,
+// much larger per-engine ceiling. Exercises engine=="av" through the fake
+// (mp4, avTestTarget) pair registered above (the real AVConverter is not yet
+// registered in this phase, D-08).
+func TestCreateJob_EngineSizeLimitAcceptsLargeAVUpload(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	queue := &fakeQueue{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, queue, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{
+		MaxUploadBytes: 10 << 20,
+		MaxEngineBytes: map[string]int64{convert.EngineImage: 1, convert.EngineAV: 5 << 20},
+	})
+
+	body, ct := multipartBody(t, "in.mp4", avTestTarget, paddedMP4Fixture(1<<20))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if !store.uploaded {
+		t.Error("must upload an av upload within the av engine's ceiling")
+	}
+	if repo.created == nil {
+		t.Fatal("must create a job for an av upload within the av engine's ceiling")
+	}
+	if repo.created.Engine != convert.EngineAV {
+		t.Errorf("job Engine = %q, want av", repo.created.Engine)
+	}
+	if queue.enqueuedAV != repo.createdID {
+		t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+	}
+}
+
+// TestCreateJob_EngineAbsentFromSizeMapNotRejected verifies the fifth D-07
+// behavior bullet: s.maxEngineBytes GATES known engines, it does not
+// ALLOWLIST them. An engine deliberately omitted from a custom
+// MaxEngineBytes map must never be rejected on size grounds, regardless of
+// how large its upload is (bounded here only by MaxUploadBytes).
+func TestCreateJob_EngineAbsentFromSizeMapNotRejected(t *testing.T) {
+	repo := &fakeRepo{}
+	store := &fakeStorage{}
+	resolver := newFakeResolver()
+	srv := NewServer(repo, store, &fakeQueue{}, defaultFakePresetRepo(), defaultFakePresetAdmin(), resolver, healthyDeps(), Config{
+		MaxUploadBytes: 10 << 20,
+		// EngineImage is deliberately absent -- it must not be gated.
+		MaxEngineBytes: map[string]int64{convert.EngineDocument: 1},
+	})
+
+	body, ct := multipartBody(t, "in.png", "webp", paddedPNGFixture(500))
+	req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+	req.Header.Set("Content-Type", ct)
+	rec := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (engine absent from MaxEngineBytes must not be rejected); body=%s", rec.Code, rec.Body.String())
+	}
+	if !store.uploaded {
+		t.Error("must upload when the detected engine has no configured size ceiling")
 	}
 }

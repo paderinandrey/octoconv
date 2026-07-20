@@ -80,16 +80,22 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: redisOpt.Addr})
 	defer rdb.Close()
 
-	// KEDA-01/D-01/D-02: the queue-depth collector now lives solely on the
-	// always-on api process, registered for ALL FOUR engine-class queues (not
-	// just image) — a worker Deployment scaled to genuine 0 replicas by KEDA
-	// would otherwise have no pod exposing the metric KEDA needs to scale it
-	// back up. webhook is included even though webhook-worker is never
-	// KEDA-scaled (D-01 in PROJECT.md), so its depth stays observable.
-	// Matching every worker's existing precedent, the Inspector is never
-	// closed — Collect() is pull-based/lazy, invoked once per scrape.
+	// KEDA-01/D-01/D-02/D-06 (Phase 35): the queue-depth collector now lives
+	// solely on the always-on api process, registered for EVERY engine-class
+	// queue — a worker Deployment scaled to genuine 0 replicas by KEDA would
+	// otherwise have no pod exposing the metric KEDA needs to scale it back
+	// up. The queue list is DERIVED from queue.AllConvertQueues() rather than
+	// hand-listed: this call is variadic, so a hand-maintained list can
+	// silently drop an engine class with no compile error (RESEARCH.md
+	// Pitfall 2) -- queue.TestAllConvertQueuesCoversEveryEngine guards the
+	// derivation itself. webhook is not an engine class and is therefore not
+	// covered by AllConvertQueues(), so it is appended explicitly here; it is
+	// included even though webhook-worker is never KEDA-scaled (D-01 in
+	// PROJECT.md), so its depth stays observable. Matching every worker's
+	// existing precedent, the Inspector is never closed — Collect() is
+	// pull-based/lazy, invoked once per scrape.
 	prometheus.MustRegister(metrics.NewQueueDepthCollector(asynq.NewInspector(redisOpt),
-		queue.QueueImage, queue.QueueDocument, queue.QueueHTML, queue.QueueAudio, queue.QueueWebhook))
+		append(queue.AllConvertQueues(), queue.QueueWebhook)...))
 
 	salt := []byte(os.Getenv("API_KEY_SALT"))
 	if len(salt) == 0 {
@@ -122,7 +128,15 @@ func main() {
 		S3:       store,
 	}
 	srv := api.NewServer(jobs.NewRepo(pool), store, qc, presetRepo, presetRepo, resolver, health, api.Config{
-		MaxUploadBytes:               envInt64("MAX_UPLOAD_BYTES", 100<<20),
+		// D-07 (Phase 35, operator-confirmed 2026-07-21): raised from 100
+		// MiB to 2 GiB so video uploads are admissible -- this is a pre-
+		// parse http.MaxBytesReader bound, enforced BEFORE the engine class
+		// is known. MaxEngineBytes is left unset (nil) here deliberately:
+		// NewServer's own D-07 defaulting is the single source of truth for
+		// the per-engine ceilings that restore image/document/html/audio to
+		// their prior 100 MiB effective bound, so that map is not
+		// duplicated at this call site.
+		MaxUploadBytes:               envInt64("MAX_UPLOAD_BYTES", 2<<30),
 		MaxImagePixels:               uint64(envInt64("MAX_IMAGE_PIXELS", 100_000_000)),            // D-05: 100 megapixels default
 		MaxDocumentUncompressedBytes: uint64(envInt64("MAX_DOCUMENT_UNCOMPRESSED_BYTES", 500<<20)), // D-04: 500 MiB default
 		IPRateLimitRPM:               int(envInt64("RATE_LIMIT_IP_RPM", 60)),
