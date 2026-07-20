@@ -129,6 +129,65 @@ func TestEnforceMaxResolution_Rejects(t *testing.T) {
 	}
 }
 
+// generateAudioOnlyFixture builds a real, audio-only mp4 (no video stream at
+// all) -- the fixture shape TestProbeVideoStreams_NoVideoStream and
+// TestProbeVideoStream_NoVideoStream need to prove ErrAVNoVideoStream (IN-01
+// fold-in) is what probeVideoStreams/probeVideoStream return when ffprobe's
+// "-select_streams v" reports zero streams.
+func generateAudioOnlyFixture(t *testing.T, dir, name string) string {
+	t.Helper()
+	requireFFmpeg(t)
+	path := filepath.Join(dir, name)
+	out, err := exec.Command("ffmpeg", "-y", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=duration=1",
+		"-c:a", "aac", path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate audio-only fixture: %v\n%s", err, out)
+	}
+	return path
+}
+
+// TestProbeVideoStreams_NoVideoStream proves probeVideoStreams returns an
+// error satisfying errors.Is(err, ErrAVNoVideoStream) for a real audio-only
+// container -- IN-01 fold-in (34-REVIEW-FIX.md).
+func TestProbeVideoStreams_NoVideoStream(t *testing.T) {
+	requireFFmpeg(t)
+	requireFFprobe(t)
+	dir := t.TempDir()
+	path := generateAudioOnlyFixture(t, dir, "audio-only.mp4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := probeVideoStreams(ctx, path)
+	if err == nil {
+		t.Fatal("probeVideoStreams(audio-only) = nil, want ErrAVNoVideoStream")
+	}
+	if !errors.Is(err, ErrAVNoVideoStream) {
+		t.Errorf("probeVideoStreams(audio-only) error = %v, want errors.Is ErrAVNoVideoStream", err)
+	}
+}
+
+// TestProbeVideoStream_NoVideoStream proves the singular probeVideoStream
+// accessor (layered over probeVideoStreams) propagates the same sentinel.
+func TestProbeVideoStream_NoVideoStream(t *testing.T) {
+	requireFFmpeg(t)
+	requireFFprobe(t)
+	dir := t.TempDir()
+	path := generateAudioOnlyFixture(t, dir, "audio-only.mp4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, _, _, err := probeVideoStream(ctx, path)
+	if err == nil {
+		t.Fatal("probeVideoStream(audio-only) = nil, want ErrAVNoVideoStream")
+	}
+	if !errors.Is(err, ErrAVNoVideoStream) {
+		t.Errorf("probeVideoStream(audio-only) error = %v, want errors.Is ErrAVNoVideoStream", err)
+	}
+}
+
 // generateCoverArtVideo builds a fixture whose FIRST video stream is a tiny
 // 32x32 embedded picture and whose real, much larger video stream sits behind
 // it at v:1 -- the exact shape of CR-03's bypass (2). Deliberately muxed to

@@ -14,6 +14,18 @@ import (
 // (AVE-02/T-34-07).
 var ErrAVResolutionExceeded = errors.New("declared video resolution exceeds configured maximum")
 
+// ErrAVNoVideoStream classifies ffprobe reporting zero video streams --
+// IN-01 fold-in (34-REVIEW-FIX.md "Residual Risk / Follow-ups for Phase
+// 35"): a generic-brand ISOBMFF audio-only file (major brand
+// isom/mp42, not the M4A /M4B brands m4aBrands checks) sniffs as mp4 and
+// routes to the av engine once AVConverter registers, then dies here. Before
+// this sentinel all three call sites in this package (avProbeSource in
+// av.go, probeVideoStreams and probeVideoStream below) emitted the identical
+// anonymous fmt.Errorf("ffprobe: no video stream found"), giving the worker
+// no way to mark such a job terminal with a distinguishable error_code
+// instead of retrying a hopeless job.
+var ErrAVNoVideoStream = errors.New("ffprobe: no video stream found")
+
 // avVideoStream is one decoded entry from ffprobe's video-stream listing.
 // Index is the stream's ABSOLUTE index within the container (not its
 // video-relative ordinal) so a later ffmpeg "-map 0:<Index>" selects
@@ -78,7 +90,7 @@ func probeVideoStreams(ctx context.Context, path string) ([]avVideoStream, error
 		return nil, fmt.Errorf("ffprobe: unparseable stream probe output: %w", err)
 	}
 	if len(probe.Streams) == 0 {
-		return nil, fmt.Errorf("ffprobe: no video stream found")
+		return nil, fmt.Errorf("%w", ErrAVNoVideoStream)
 	}
 	streams := make([]avVideoStream, 0, len(probe.Streams))
 	for _, s := range probe.Streams {
@@ -150,7 +162,7 @@ func probeVideoStream(ctx context.Context, path string) (codec string, width, he
 	}
 	s, ok := avPrimaryVideoStream(streams)
 	if !ok {
-		return "", 0, 0, fmt.Errorf("ffprobe: no video stream found")
+		return "", 0, 0, fmt.Errorf("%w", ErrAVNoVideoStream)
 	}
 	return s.CodecName, s.Width, s.Height, nil
 }
