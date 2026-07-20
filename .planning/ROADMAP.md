@@ -160,7 +160,14 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
   2. An uploaded video job targeting txt/srt/vtt/json is routed instead to the existing `audio` queue/worker (video-source pairs added to `AudioConverter.Pairs()`, `Engine()` stays `EngineAudio`), with a dedicated pair-disjointness unit test proving zero overlap between `AVConverter.Pairs()` and `AudioConverter.Pairs()`.
   3. A stage-aware transient/terminal classifier for av jobs is derived fresh (not copied from audio's ffmpeg-timeout-is-terminal precedent, since ffmpeg IS the expensive operation for transcode) and a unit test pins transcode-timeout as transient versus deterministic/malformed-input failures as terminal.
   4. An `AVUniqueTTL` derived from the av engine's own timeout/retry budget prevents duplicate processing, verified by a monotonicity/lower-bound test mirroring `AudioUniqueTTL`.
-**Plans**: TBD
+**Plans**: 7 plans
+- [ ] 35-01-PLAN.md — AV stage sentinels (D-01), video→transcript pairs + video budget floor + `-map 0:a:0` (D-04/D-05), pair-disjointness test (AVE-03, AVT-01)
+- [ ] 35-02-PLAN.md — av queue: task type, D-03 retry schedule, AVUniqueTTL, EnqueueAVConvert, AllConvertQueues (AVE-03)
+- [ ] 35-03-PLAN.md — worker: stage-aware `isAVTerminal` (D-02) + `HandleAVConvert` with distinguishable error codes (D-09) (AVE-03)
+- [ ] 35-04-PLAN.md — API: two-tier upload ceiling (D-07), Enqueuer seam, derived queue-depth collector list (AVE-03)
+- [ ] 35-05-PLAN.md — reconciler av routing + engine-routing completeness test (D-06) (AVE-03)
+- [ ] 35-06-PLAN.md — register AVConverter + wire SniffVideo (D-08), AV opts dispatch, enqueue-switch completeness test (AVE-03, AVT-01)
+- [ ] 35-07-PLAN.md — `cmd/av-worker` binary + live end-to-end checkpoint (AVE-03)
 
 ### Phase 36: Containerization & RTF-Measured Timeout
 **Goal**: A running av-worker container in docker-compose passes a full live E2E, with `AV_ENGINE_TIMEOUT` sized from a measured RTF matrix across the closed opts space rather than a copied or guessed constant.
