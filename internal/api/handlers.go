@@ -265,6 +265,42 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if detected == "" {
+		// D-08 (Phase 35): mkv/webm EBML-container detection, placed after the
+		// OLE-CFB check and before SniffAudio below. mp4/mov/avi are ALREADY
+		// caught by Sniff()'s fixed-12-byte-window signatures table earlier in
+		// this chain (matchMP4/matchMOV/matchAVI, avsniff.go) -- SniffVideo
+		// exists here only to close the mkv/webm gap that has had zero
+		// non-test callers since Phase 34 (WR-02: registering AVConverter
+		// without wiring this would ship an engine for formats the service
+		// cannot recognize). Placed before SniffAudio, not after, because
+		// SniffAudio's mp3PeekLen=512KiB peek is the single most expensive
+		// buffer in this chain -- ordering video first keeps that cost paid
+		// only when video detection has already declined.
+		//
+		// CRITICAL deviation from SniffAudio's exact reassignment shape
+		// (auto-fixed, Rule 1): SniffAudio only reassigns `rest` when it gets
+		// a non-empty match because it is the LAST detector in this chain --
+		// on a miss, `detected` stays "" and the handler returns the
+		// unrecognized-content 422 immediately after, so a stale `rest` is
+		// never read again. SniffVideo is NOT last (SniffAudio still runs
+		// after it): SniffVideo's io.ReadFull(rest, ...) call ALWAYS drains
+		// up to avPeekLen bytes from the underlying stream `rest` refers to,
+		// whether or not it finds a match. If `rest` were only reassigned on
+		// a match, a miss would silently leave `rest` pointing at a reader
+		// that has already lost its first bytes to this drain, and
+		// SniffAudio's subsequent read (or, on a genuine unrecognized upload
+		// with no further sniffer, s.storage.Upload) would receive a
+		// truncated stream (the exact T-31-02 class of bug). `rest` is
+		// therefore ALWAYS rebound to SniffVideo's returned reader on
+		// verr == nil, regardless of match; only `detected` is conditional.
+		if videoDetected, videoRest, verr := convert.SniffVideo(rest); verr == nil {
+			rest = videoRest
+			if videoDetected != "" {
+				detected = videoDetected
+			}
+		}
+	}
+	if detected == "" {
 		// AUD-05: mp3/wav/m4a/ogg content detection, placed LAST (after the
 		// OLE-CFB check, before the final fail-closed 422 below) because
 		// mp3PeekLen=512KiB is the most expensive buffer of the whole chain --
