@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -74,46 +75,98 @@ func (AVConverter) Pairs() []Pair {
 // Engine reports the AV engine class (D-01).
 func (AVConverter) Engine() string { return EngineAV }
 
+// avScaleFilter builds the server-constructed -vf scale filter for a
+// validated target height, or "" when no resize was requested. Width -2
+// preserves the source aspect ratio AND rounds to an even dimension, which
+// libx264/libx265/libvpx-vp9 all require. height reaches here only after
+// ParseAVOpts has constrained it to the closed avResolutionHeights enum --
+// it is never a raw client string interpolated into argv (AVO-02).
+func avScaleFilter(height int) string {
+	if height == 0 {
+		return ""
+	}
+	return "scale=-2:" + strconv.Itoa(height)
+}
+
+// avInputArgs builds the leading, always-identical hardening prefix shared by
+// every ffmpeg invocation in this file (AVE-02): -nostdin plus
+// -protocol_whitelist file,crypto plus a "file:"-prefixed -i path, so ffmpeg
+// can never reinterpret a path as a protocol/URL specifier (concat:/http:/
+// pipe:) or a leading-dash option (IN-01 precedent, mirrors
+// ffmpegNormalizeArgs/ffprobeDurationArgs).
+func avInputArgs(inPath string) []string {
+	return []string{
+		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
+		"-i", "file:" + inPath,
+	}
+}
+
 // transcodeToMP4Args builds ffmpeg's argv for the mov/avi/mkv/webm -> mp4
 // full re-encode path (AVC-01): H.264/AAC with +faststart. codec selects
 // libx264 (default, or the explicit "h264" client choice) or libx265
 // ("hevc", AVO-03) -- the HEVC branch uses x265DefaultCRF, NEVER
-// x264DefaultCRF (Pitfall 4, 34-RESEARCH.md). Every element leads with the
-// AVE-02 hardening flags (-protocol_whitelist file,crypto) and a
-// "file:"-prefixed -i path (IN-01 precedent, mirrors
-// ffmpegNormalizeArgs/ffprobeDurationArgs).
-func transcodeToMP4Args(inPath, outPath, codec string, threads int) []string {
+// x264DefaultCRF (Pitfall 4, 34-RESEARCH.md). height, when non-zero, emits a
+// server-constructed scale filter (CR-01: the option was previously accepted
+// and validated but never reached ffmpeg). videoIndex is the ABSOLUTE index
+// of the stream avPrimaryVideoStream selected, mapped explicitly so this
+// re-encode path and the stream-copy path agree on what "the video" means
+// (CR-03).
+func transcodeToMP4Args(inPath, outPath, codec string, height, videoIndex, threads int) []string {
 	videoCodec := "libx264"
 	crf := x264DefaultCRF
 	if codec == "hevc" {
 		videoCodec = "libx265"
 		crf = x265DefaultCRF
 	}
-	return []string{
-		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-		"-i", "file:" + inPath,
+	args := append(avInputArgs(inPath),
+		"-map", "0:"+strconv.Itoa(videoIndex), "-map", "0:a:0?")
+	if f := avScaleFilter(height); f != "" {
+		args = append(args, "-vf", f)
+	}
+	return append(args,
 		"-c:v", videoCodec, "-preset", "veryfast", "-crf", strconv.Itoa(crf),
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		"-threads", strconv.Itoa(threads),
-		outPath,
-	}
+		"file:"+outPath,
+	)
 }
 
 // transcodeToWebMArgs builds ffmpeg's argv for the mp4 -> webm path
 // (AVC-02): VP9/Opus, ALWAYS a full re-encode -- this builder never selects
 // a stream-copy fast path; the caller (Convert) decides whether to call this
 // builder at all vs. issuing a raw "-c copy" invocation, gated on
-// avStreamCopyLegal.
-func transcodeToWebMArgs(inPath, outPath string, threads int) []string {
-	return []string{
-		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-		"-i", "file:" + inPath,
+// avStreamCopyLegal. height/videoIndex carry the same meaning as in
+// transcodeToMP4Args (CR-01/CR-03).
+func transcodeToWebMArgs(inPath, outPath string, height, videoIndex, threads int) []string {
+	args := append(avInputArgs(inPath),
+		"-map", "0:"+strconv.Itoa(videoIndex), "-map", "0:a:0?")
+	if f := avScaleFilter(height); f != "" {
+		args = append(args, "-vf", f)
+	}
+	return append(args,
 		"-c:v", "libvpx-vp9", "-b:v", "1M",
 		"-c:a", "libopus",
 		"-threads", strconv.Itoa(threads),
-		outPath,
+		"file:"+outPath,
+	)
+}
+
+// streamCopyArgs builds ffmpeg's argv for the AVC-05 remux fast path. It maps
+// EXACTLY the two streams avStreamCopyLegal inspected -- videoIndex (the
+// absolute index of the probed primary video stream) and a:0 -- because a
+// bare "-c copy" uses ffmpeg's default stream selection and would carry
+// ADDITIONAL streams past the gate, letting a container smuggle a codec this
+// project's own mp4/webm contract forbids (CR-03).
+func streamCopyArgs(inPath, outPath, target string, videoIndex int) []string {
+	args := append(avInputArgs(inPath),
+		"-map", "0:"+strconv.Itoa(videoIndex), "-map", "0:a:0",
+		"-c", "copy",
+	)
+	if target == "mp4" {
+		args = append(args, "-movflags", "+faststart")
 	}
+	return append(args, "file:"+outPath)
 }
 
 // extractAudioArgs builds ffmpeg's argv for the video -> mp3/wav/m4a
@@ -121,12 +174,12 @@ func transcodeToWebMArgs(inPath, outPath string, threads int) []string {
 // streamCopy selects "-c:a copy" (source already AAC, target m4a) instead of
 // a target-specific re-encode codec -- the caller (Convert) decides
 // streamCopy via an ffprobe codec check, never this function.
+// A nil return means the target was not one of this builder's closed set --
+// callers MUST treat a nil argv as a programming error and fail closed rather
+// than invoke ffmpeg, which would otherwise fall back to extension-based
+// codec auto-selection (WR-09).
 func extractAudioArgs(inPath, outPath, target string, streamCopy bool) []string {
-	args := []string{
-		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-		"-i", "file:" + inPath,
-		"-vn",
-	}
+	args := append(avInputArgs(inPath), "-vn")
 	if streamCopy {
 		args = append(args, "-c:a", "copy")
 	} else {
@@ -137,9 +190,11 @@ func extractAudioArgs(inPath, outPath, target string, streamCopy bool) []string 
 			args = append(args, "-c:a", "pcm_s16le")
 		case "m4a":
 			args = append(args, "-c:a", "aac", "-b:a", "128k")
+		default:
+			return nil
 		}
 	}
-	return append(args, outPath)
+	return append(args, "file:"+outPath)
 }
 
 // thumbnailArgs builds ffmpeg's argv for the video -> jpg/png/webp
@@ -148,11 +203,16 @@ func extractAudioArgs(inPath, outPath, target string, streamCopy bool) []string 
 // EXPLICIT per-target -c:v -- never relying on ffmpeg's extension-based
 // auto-selection, which is known to fail for at least one target on at
 // least one real ffmpeg build (Pitfall 3, 34-RESEARCH.md).
-func thumbnailArgs(inPath, outPath, target string, timecode float64) []string {
+// videoIndex explicitly maps the probed primary video stream so a container's
+// embedded cover art can never be extracted in place of the real video
+// (CR-03). A nil return signals an out-of-set target, same fail-closed
+// contract as extractAudioArgs (WR-09).
+func thumbnailArgs(inPath, outPath, target string, timecode float64, videoIndex int) []string {
 	args := []string{
 		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 		"-ss", strconv.FormatFloat(timecode, 'f', -1, 64),
 		"-i", "file:" + inPath,
+		"-map", "0:" + strconv.Itoa(videoIndex),
 		"-frames:v", "1",
 	}
 	switch target {
@@ -162,8 +222,10 @@ func thumbnailArgs(inPath, outPath, target string, timecode float64) []string {
 		args = append(args, "-c:v", "png")
 	case "webp":
 		args = append(args, "-c:v", "libwebp")
+	default:
+		return nil
 	}
-	return append(args, outPath)
+	return append(args, "file:"+outPath)
 }
 
 // avMaxSourceDuration is the Phase-34 plausibility ceiling on a source
@@ -183,14 +245,35 @@ const avMaxSourceDuration = 4 * time.Hour
 // a resolution decode-bomb.
 const avMaxSourceResolutionHeight = 4320
 
+// avDefaultThumbnailTimecode is the seek point used when a client requests no
+// timecode at all. It is clamped against the source's real duration by
+// convertThumbnail, so it is a preference rather than a hard floor (CR-04).
+const avDefaultThumbnailTimecode = 1.0
+
+// avProbeTimeout bounds the guard stage's ffprobe subprocesses. ProbeDuration
+// documents (audioduration.go) that its ctx must carry a SHORT bound distinct
+// from the full engine timeout -- reading container metadata is near-instant
+// even for huge files, so a hung ffprobe on a malformed container must never
+// be allowed to burn the entire ENGINE_TIMEOUT budget (WR-05).
+const avProbeTimeout = 15 * time.Second
+
 // ErrAVOutputMissingOrEmpty classifies ffmpeg's "exit 0 but produced nothing
-// usable" failure mode -- an out-of-range thumbnail -ss produces NO output
-// file at all, not an empty one (34-RESEARCH.md Pitfall 2); both shapes (a
-// missing file and a zero-byte file) map to this SAME class so a caller can
-// errors.Is-match "no usable output" regardless of which guard caught it.
-// The thumbnail path's pre-flight bounds check below reuses this same
-// sentinel, not a separate ad hoc error, for the identical reason.
+// usable" failure mode -- ffmpeg can exit 0 having written no file at all, or
+// a zero-byte one (34-RESEARCH.md Pitfall 2); both shapes map to this SAME
+// class so a caller can errors.Is-match "no usable output" regardless of
+// which guard caught it. Strictly an ENGINE-fault class, detected only by
+// post-hoc output validation -- client input faults never fold into it
+// (WR-04, see ErrAVTimecodeOutOfRange).
 var ErrAVOutputMissingOrEmpty = errors.New("av: output missing or empty")
+
+// ErrAVTimecodeOutOfRange classifies a CLIENT-supplied thumbnail timecode
+// past the source's declared duration -- a 4xx-class input fault detected
+// pre-flight, before ffmpeg is invoked at all. Deliberately NOT folded into
+// ErrAVOutputMissingOrEmpty's engine-fault class (WR-04): the API layer must
+// be able to tell 422-worthy bad input from a 500-worthy engine failure, and
+// the worker must be able to tell deterministically-terminal from retryable
+// (asynq.SkipRetry discipline, CLAUDE.md "Error Handling").
+var ErrAVTimecodeOutOfRange = errors.New("av: timecode exceeds source duration")
 
 // avStreamCopyLegal reports whether srcVideoCodec/srcAudioCodec are already
 // legal in targetContainer per THIS PROJECT's own AVC-01/AVC-02 codec
@@ -231,12 +314,18 @@ func probeAudioCodec(ctx context.Context, path string) (string, error) {
 }
 
 // avThreadCount resolves the -threads value passed to every ffmpeg
-// invocation in this file. A plain runtime.NumCPU() read -- no env var, no
-// cgroup-aware sizing wired yet (that mechanism, CgroupCPULimit, is reusable
-// verbatim by a LATER phase per 34-PATTERNS.md's "Cgroup-aware thread
-// sizing" note; wiring it here would be premature for a converter that is
-// not yet registered/queued).
+// invocation in this file, preferring the container's cgroup CPU quota over
+// the host core count. runtime.NumCPU() reports the HOST's CPUs inside a
+// container and does not honor a cgroup quota, so on a 16-core host it would
+// hand ffmpeg -threads 16 while docker-compose.yml limits the worker to
+// cpus: "2.0" -- oversubscription and CFS thrashing under concurrent jobs
+// (WR-06). CgroupCPULimit (cgroup.go) fails open on cgroup v1 hosts and
+// outside any container, so the NumCPU fallback still covers the local
+// `go run` dev flow.
 func avThreadCount() int {
+	if n, ok := CgroupCPULimit(); ok {
+		return n
+	}
 	return runtime.NumCPU()
 }
 
@@ -299,54 +388,92 @@ func (c AVConverter) Convert(ctx context.Context, inPath, outPath string, opts m
 	// Guard stage (AVE-02/T-34-12): duration + resolution ceilings enforced
 	// BEFORE any ffmpeg encode/decode -- multi-axis decompression-bomb
 	// defense, both fail-closed and independently required.
-	if err := EnforceMaxDuration(ctx, inPath, avMaxSourceDuration); err != nil {
+	src, err := avProbeSource(ctx, inPath)
+	if err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
-	if err := EnforceMaxResolution(ctx, inPath, avMaxSourceResolutionHeight); err != nil {
+	if err := enforceMaxDurationOf(src.duration, avMaxSourceDuration); err != nil {
+		return fmt.Errorf("av: %w", err)
+	}
+	if err := enforceMaxResolutionOf(src.videoStreams, avMaxSourceResolutionHeight); err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
 
 	switch targetFormat {
 	case "mp4", "webm":
-		return c.convertTranscode(ctx, inPath, outPath, targetFormat, o)
+		return c.convertTranscode(ctx, inPath, outPath, targetFormat, o, src)
 	case "mp3", "wav", "m4a":
 		return c.convertAudioExtract(ctx, inPath, outPath, targetFormat)
 	default:
-		return c.convertThumbnail(ctx, inPath, outPath, targetFormat, o)
+		return c.convertThumbnail(ctx, inPath, outPath, targetFormat, o, src)
 	}
+}
+
+// avSourceProbe is everything the guard stage learned about the source,
+// probed EXACTLY ONCE and threaded through to the conversion stage. Before
+// WR-05 a single thumbnail job spawned ProbeDuration twice and
+// probeVideoStream once on the same file, and a transcode spawned
+// probeVideoStream twice -- redundant subprocesses whose independently
+// derived answers could disagree if the file changed between probes. Probing
+// once makes the guard's decision and the conversion's decision provably the
+// same decision.
+type avSourceProbe struct {
+	duration     time.Duration
+	videoStreams []avVideoStream
+	primary      avVideoStream
+	audioCodec   string
+}
+
+// avProbeSource runs the whole probe stage under its OWN short timeout,
+// derived from but distinct from the caller's full engine budget (WR-05).
+func avProbeSource(ctx context.Context, inPath string) (avSourceProbe, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, avProbeTimeout)
+	defer cancel()
+
+	dur, err := ProbeDuration(probeCtx, inPath)
+	if err != nil {
+		return avSourceProbe{}, err
+	}
+	streams, err := probeVideoStreams(probeCtx, inPath)
+	if err != nil {
+		return avSourceProbe{}, err
+	}
+	primary, ok := avPrimaryVideoStream(streams)
+	if !ok {
+		return avSourceProbe{}, fmt.Errorf("ffprobe: no video stream found")
+	}
+	// An absent audio stream is not an error: ffprobe reports empty output
+	// and the conversion paths handle a video-only source (the transcode
+	// builders map audio optionally, and a stream copy is disqualified
+	// because avStreamCopyLegal cannot match an empty codec).
+	audioCodec, err := probeAudioCodec(probeCtx, inPath)
+	if err != nil {
+		return avSourceProbe{}, err
+	}
+	return avSourceProbe{
+		duration:     dur,
+		videoStreams: streams,
+		primary:      primary,
+		audioCodec:   audioCodec,
+	}, nil
 }
 
 // convertTranscode implements AVC-01/AVC-02/AVC-05: probe the source's
 // declared video+audio codec, gate a "-c copy" remux on avStreamCopyLegal
 // (never on ffmpeg's own muxer acceptance), else full re-encode via
 // transcodeToMP4Args (HEVC-aware) or transcodeToWebMArgs.
-func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, target string, o AVOpts) error {
-	srcVideoCodec, _, _, err := probeVideoStream(ctx, inPath)
-	if err != nil {
-		return fmt.Errorf("av: ffprobe: %w", err)
-	}
-	srcAudioCodec, err := probeAudioCodec(ctx, inPath)
-	if err != nil {
-		return fmt.Errorf("av: ffprobe: %w", err)
-	}
-
+func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, target string, o AVOpts, src avSourceProbe) error {
 	var args []string
-	if avStreamCopyLegal(target, srcVideoCodec, srcAudioCodec) {
-		args = []string{
-			"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-			"-i", "file:" + inPath,
-			"-c", "copy",
-		}
-		if target == "mp4" {
-			args = append(args, "-movflags", "+faststart")
-		}
-		args = append(args, outPath)
+	if avStreamCopyEligible(target, o, src) {
+		args = streamCopyArgs(inPath, outPath, target, src.primary.Index)
 	} else {
 		switch target {
 		case "mp4":
-			args = transcodeToMP4Args(inPath, outPath, o.Codec, avThreadCount())
+			args = transcodeToMP4Args(inPath, outPath, o.Codec, o.ResolutionHeight, src.primary.Index, avThreadCount())
 		case "webm":
-			args = transcodeToWebMArgs(inPath, outPath, avThreadCount())
+			args = transcodeToWebMArgs(inPath, outPath, o.ResolutionHeight, src.primary.Index, avThreadCount())
+		default:
+			return fmt.Errorf("av: unsupported transcode target %q", target)
 		}
 	}
 
@@ -354,6 +481,31 @@ func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, targ
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
 	return validateAVOutput(outPath, target)
+}
+
+// avStreamCopyEligible decides whether the AVC-05 remux fast path can be
+// taken. Container-codec legality (avStreamCopyLegal) is necessary but NOT
+// sufficient: a stream copy reproduces the source bit-for-bit, so it cannot
+// satisfy any client option that asks for different output bits. Before
+// CR-01/CR-02 this gate consulted only the codec table, so an h264+aac source
+// took the copy path unconditionally and a client's explicit
+// {"codec": "hevc"} or {"resolution_height": 480} was validated,
+// applicability-checked, and then silently discarded -- the client got an
+// unscaled H.264 file with no error and no warning.
+func avStreamCopyEligible(target string, o AVOpts, src avSourceProbe) bool {
+	if !avStreamCopyLegal(target, src.primary.CodecName, src.audioCodec) {
+		return false
+	}
+	// A resize is by definition a re-encode; no copy can produce it.
+	if o.ResolutionHeight != 0 {
+		return false
+	}
+	// An explicit codec request is honored only if the copy would actually
+	// yield that codec -- i.e. the source is already in it.
+	if o.Codec != "" && o.Codec != src.primary.CodecName {
+		return false
+	}
+	return true
 }
 
 // convertAudioExtract implements AVC-03: extract the audio track only
@@ -368,29 +520,49 @@ func (c AVConverter) convertAudioExtract(ctx context.Context, inPath, outPath, t
 		}
 		streamCopy = srcAudioCodec == "aac"
 	}
-	if _, err := runCommand(ctx, "ffmpeg", extractAudioArgs(inPath, outPath, target, streamCopy)...); err != nil {
+	args := extractAudioArgs(inPath, outPath, target, streamCopy)
+	if args == nil {
+		return fmt.Errorf("av: unsupported audio-extract target %q", target)
+	}
+	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
 	return validateAVOutput(outPath, target)
 }
 
-// convertThumbnail implements AVC-04: default timecode 1.0s when unset,
-// pre-flight bounds-checked against ProbeDuration BEFORE invoking ffmpeg at
-// all (Pitfall 2 -- an out-of-range -ss produces NO output file, so
-// rejecting up front is strictly better than letting ffmpeg silently no-op).
-func (c AVConverter) convertThumbnail(ctx context.Context, inPath, outPath, target string, o AVOpts) error {
-	timecode := o.Timecode
-	if timecode == 0 {
-		timecode = 1.0
+// convertThumbnail implements AVC-04. The seek point is bounds-checked
+// against the guard stage's already-probed duration BEFORE invoking ffmpeg at
+// all (Pitfall 2 -- an out-of-range -ss produces NO output file, so rejecting
+// up front is strictly better than letting ffmpeg silently no-op).
+//
+// CR-04, the unset-vs-zero distinction: an ABSENT timecode gets a default
+// clamped against the real duration, so a sub-second source still yields a
+// thumbnail instead of being permanently unconvertible; an EXPLICIT
+// out-of-range timecode is still a hard client error. Only an explicit
+// request can fail here, which is why the sentinel is the input-fault
+// ErrAVTimecodeOutOfRange, not the engine-fault
+// ErrAVOutputMissingOrEmpty (WR-04).
+func (c AVConverter) convertThumbnail(ctx context.Context, inPath, outPath, target string, o AVOpts, src avSourceProbe) error {
+	seconds := src.duration.Seconds()
+	var timecode float64
+	if o.Timecode != nil {
+		timecode = *o.Timecode
+		if timecode >= seconds {
+			return fmt.Errorf("%w: timecode %.3fs exceeds source duration %.3fs",
+				ErrAVTimecodeOutOfRange, timecode, seconds)
+		}
+	} else {
+		// Default to avDefaultThumbnailTimecode, but never past the source:
+		// half-duration keeps a sub-second clip inside range and still lands
+		// on a representative frame rather than frame 0.
+		timecode = math.Min(avDefaultThumbnailTimecode, seconds/2)
 	}
-	dur, err := ProbeDuration(ctx, inPath)
-	if err != nil {
-		return fmt.Errorf("av: ffprobe: %w", err)
+
+	args := thumbnailArgs(inPath, outPath, target, timecode, src.primary.Index)
+	if args == nil {
+		return fmt.Errorf("av: unsupported thumbnail target %q", target)
 	}
-	if timecode >= dur.Seconds() {
-		return fmt.Errorf("%w: timecode %.3fs exceeds source duration %.3fs", ErrAVOutputMissingOrEmpty, timecode, dur.Seconds())
-	}
-	if _, err := runCommand(ctx, "ffmpeg", thumbnailArgs(inPath, outPath, target, timecode)...); err != nil {
+	if _, err := runCommand(ctx, "ffmpeg", args...); err != nil {
 		return fmt.Errorf("av: ffmpeg: %w", err)
 	}
 	return validateAVOutput(outPath, target)

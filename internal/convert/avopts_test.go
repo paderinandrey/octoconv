@@ -5,6 +5,55 @@ import (
 	"testing"
 )
 
+// avTestTimecode is a literal-to-pointer helper for AVOpts.Timecode, which is
+// a *float64 so an explicit {"timecode": 0} stays distinguishable from an
+// absent field (CR-04, 34-REVIEW.md).
+func avTestTimecode(f float64) *float64 { return &f }
+
+// TestParseAVOpts_TimecodeUnsetVsExplicitZero pins CR-04's parse-side half:
+// nil means "the client sent no timecode", a non-nil pointer to 0 means "the
+// client explicitly asked for the first frame". With a plain float64 the two
+// were byte-identical, so an explicit frame-0 request was unrequestable AND
+// isZeroAVOpts wrongly classified it as "no options requested", skipping
+// ValidateAVApplicability entirely.
+func TestParseAVOpts_TimecodeUnsetVsExplicitZero(t *testing.T) {
+	absent, err := ParseAVOpts([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("ParseAVOpts({}): %v", err)
+	}
+	if absent.Timecode != nil {
+		t.Errorf("ParseAVOpts({}).Timecode = %v, want nil (unset)", *absent.Timecode)
+	}
+	if !isZeroAVOpts(absent) {
+		t.Error("isZeroAVOpts(absent timecode) = false, want true")
+	}
+
+	zero, err := ParseAVOpts([]byte(`{"timecode":0}`))
+	if err != nil {
+		t.Fatalf(`ParseAVOpts({"timecode":0}): %v`, err)
+	}
+	if zero.Timecode == nil || *zero.Timecode != 0 {
+		t.Errorf(`ParseAVOpts({"timecode":0}).Timecode = %v, want a non-nil pointer to 0`, zero.Timecode)
+	}
+	if isZeroAVOpts(zero) {
+		t.Error(`isZeroAVOpts({"timecode":0}) = true, want false -- an explicit request must be applicability-checked`)
+	}
+	// ...and being a real request, it must be rejected on a transcode target.
+	if err := ValidateAVApplicability(EngineAV, "mov", "mp4", zero); err == nil {
+		t.Error(`ValidateAVApplicability({"timecode":0} on mp4) = nil, want error`)
+	}
+}
+
+// TestParseAVOpts_NonFiniteTimecodeRejected pins that NaN/Inf cannot slip past
+// the >= 0 range check into ffmpeg's -ss argv.
+func TestParseAVOpts_NonFiniteTimecodeRejected(t *testing.T) {
+	for _, raw := range []string{`{"timecode":1e400}`, `{"timecode":-1e400}`} {
+		if _, err := ParseAVOpts([]byte(raw)); err == nil {
+			t.Errorf("ParseAVOpts(%s) = nil error, want rejection", raw)
+		}
+	}
+}
+
 func TestParseAVOpts(t *testing.T) {
 	t.Run("empty object valid, zero opts", func(t *testing.T) {
 		o, err := ParseAVOpts([]byte(`{}`))
@@ -21,7 +70,7 @@ func TestParseAVOpts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseAVOpts: unexpected error: %v", err)
 		}
-		if o.Timecode != 2.5 {
+		if o.Timecode == nil || *o.Timecode != 2.5 {
 			t.Errorf("ParseAVOpts = %+v, want timecode=2.5", o)
 		}
 	})
@@ -193,14 +242,14 @@ func TestValidateAVApplicability(t *testing.T) {
 	})
 
 	t.Run("timecode on transcode target rejected", func(t *testing.T) {
-		o := AVOpts{Timecode: 3}
+		o := AVOpts{Timecode: avTestTimecode(3)}
 		if err := ValidateAVApplicability(EngineAV, "mov", "mp4", o); err == nil {
 			t.Error("ValidateAVApplicability(timecode on mp4 transcode target) = nil error, want error")
 		}
 	})
 
 	t.Run("timecode on thumbnail target accepted", func(t *testing.T) {
-		o := AVOpts{Timecode: 3}
+		o := AVOpts{Timecode: avTestTimecode(3)}
 		if err := ValidateAVApplicability(EngineAV, "mov", "jpg", o); err != nil {
 			t.Errorf("ValidateAVApplicability(timecode on jpg thumbnail target) = %v, want nil", err)
 		}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,31 +57,190 @@ func assertArgv(t *testing.T, got, want []string) {
 // "file:"-prefixed -i path. Runs unconditionally -- pure function, no
 // subprocess.
 func TestTranscodeToMP4Args(t *testing.T) {
-	got := transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", 4)
+	got := transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", 0, 0, 4)
 	want := []string{
 		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 		"-i", "file:/work/in.mov",
+		"-map", "0:0", "-map", "0:a:0?",
 		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		"-threads", "4",
-		"/work/out.mp4",
+		"file:/work/out.mp4",
 	}
 	assertArgv(t, got, want)
+}
+
+// TestTranscodeArgs_ResolutionHeightEmitsScaleFilter pins CR-01: a validated
+// resolution_height must actually reach ffmpeg as a server-constructed scale
+// filter. Before the fix the option was parsed, range-checked and
+// applicability-checked, then silently discarded -- the client got a
+// full-resolution transcode with no error and no warning. Width -2 preserves
+// aspect ratio and keeps the dimension even (required by
+// libx264/libx265/libvpx-vp9).
+func TestTranscodeArgs_ResolutionHeightEmitsScaleFilter(t *testing.T) {
+	for _, height := range []int{480, 720, 1080} {
+		want := "-vf scale=-2:" + strconv.Itoa(height)
+		mp4 := strings.Join(transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", height, 0, 4), " ")
+		if !strings.Contains(mp4, want) {
+			t.Errorf("transcodeToMP4Args(height=%d) = %q, want it to contain %q", height, mp4, want)
+		}
+		webm := strings.Join(transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", height, 0, 2), " ")
+		if !strings.Contains(webm, want) {
+			t.Errorf("transcodeToWebMArgs(height=%d) = %q, want it to contain %q", height, webm, want)
+		}
+	}
+	// height 0 means "no resize requested": no filter at all, not scale=-2:0.
+	for _, argv := range [][]string{
+		transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", 0, 0, 4),
+		transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 0, 0, 2),
+	} {
+		if slices.Contains(argv, "-vf") {
+			t.Errorf("argv %v carries a -vf filter for height 0, want none", argv)
+		}
+	}
+}
+
+// TestTranscodeArgs_MapsProbedVideoStream pins CR-03: both transcode builders
+// map the ABSOLUTE index of the video stream the probe selected, so the
+// re-encode path and the stream-copy path agree on what "the video" means and
+// a container's embedded cover art can never be transcoded in its place.
+func TestTranscodeArgs_MapsProbedVideoStream(t *testing.T) {
+	mp4 := strings.Join(transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", 0, 3, 4), " ")
+	if !strings.Contains(mp4, "-map 0:3 -map 0:a:0?") {
+		t.Errorf("transcodeToMP4Args = %q, want it to map probed video index 3", mp4)
+	}
+	webm := strings.Join(transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 0, 3, 2), " ")
+	if !strings.Contains(webm, "-map 0:3 -map 0:a:0?") {
+		t.Errorf("transcodeToWebMArgs = %q, want it to map probed video index 3", webm)
+	}
+}
+
+// TestStreamCopyArgs_MapsExactlyTheGatedStreams pins CR-03's core security
+// fix: avStreamCopyLegal inspects exactly one video and one audio stream, so
+// the copy must MAP exactly those two. A bare "-c copy" uses ffmpeg's default
+// stream selection and would carry additional streams -- e.g. a second audio
+// stream in a codec this project's own mp4 contract forbids -- straight past
+// the gate that exists to prevent precisely that.
+func TestStreamCopyArgs_MapsExactlyTheGatedStreams(t *testing.T) {
+	got := streamCopyArgs("/work/in.mkv", "/work/out.mp4", "mp4", 2)
+	want := []string{
+		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
+		"-i", "file:/work/in.mkv",
+		"-map", "0:2", "-map", "0:a:0",
+		"-c", "copy",
+		"-movflags", "+faststart",
+		"file:/work/out.mp4",
+	}
+	assertArgv(t, got, want)
+
+	webm := streamCopyArgs("/work/in.mkv", "/work/out.webm", "webm", 0)
+	if slices.Contains(webm, "+faststart") {
+		t.Errorf("streamCopyArgs(webm) = %v, want no mp4-only +faststart flag", webm)
+	}
+}
+
+// TestAVBuildersHardenEveryInvocation is AVE-02's table canary: EVERY argv
+// builder in this file must carry -nostdin and -protocol_whitelist
+// file,crypto, and must "file:"-prefix BOTH the input and the output path
+// (WR-01 -- -protocol_whitelist constrains input protocols only, so an
+// unprefixed output would still be reinterpretable as a protocol or, with a
+// leading dash, as an option).
+func TestAVBuildersHardenEveryInvocation(t *testing.T) {
+	builders := map[string][]string{
+		"transcodeToMP4Args":  transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "h264", 720, 0, 4),
+		"transcodeToWebMArgs": transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 720, 0, 2),
+		"streamCopyArgs":      streamCopyArgs("/work/in.mkv", "/work/out.mp4", "mp4", 0),
+		"extractAudioArgs":    extractAudioArgs("/work/in.mp4", "/work/out.mp3", "mp3", false),
+		"thumbnailArgs":       thumbnailArgs("/work/in.mp4", "/work/out.jpg", "jpg", 1.5, 0),
+	}
+	for name, argv := range builders {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(strings.Join(argv, " "), "-protocol_whitelist file,crypto") {
+				t.Errorf("%s = %v, want -protocol_whitelist file,crypto", name, argv)
+			}
+			if !slices.Contains(argv, "-nostdin") {
+				t.Errorf("%s = %v, want -nostdin", name, argv)
+			}
+			for i, a := range argv {
+				if a == "-i" && i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "file:") {
+					t.Errorf("%s -i element = %q, want a file:-prefixed path", name, argv[i+1])
+				}
+			}
+			if last := argv[len(argv)-1]; !strings.HasPrefix(last, "file:") {
+				t.Errorf("%s output element = %q, want a file:-prefixed path", name, last)
+			}
+		})
+	}
+}
+
+// TestAVBuildersFailClosedOnUnknownTarget pins WR-09: the argv builders'
+// target switches must fail closed rather than return a codec-less argv that
+// hands stream selection back to ffmpeg's extension-based auto-selection --
+// the exact behavior thumbnailArgs' own doc comment says must never be
+// relied on (Pitfall 3).
+func TestAVBuildersFailClosedOnUnknownTarget(t *testing.T) {
+	if got := extractAudioArgs("/work/in.mp4", "/work/out.xyz", "xyz", false); got != nil {
+		t.Errorf("extractAudioArgs(unknown target) = %v, want nil", got)
+	}
+	if got := thumbnailArgs("/work/in.mp4", "/work/out.xyz", "xyz", 1.0, 0); got != nil {
+		t.Errorf("thumbnailArgs(unknown target) = %v, want nil", got)
+	}
+}
+
+// TestAVStreamCopyEligible pins CR-02: container-codec legality is necessary
+// but NOT sufficient for the remux fast path. A stream copy reproduces the
+// source bit-for-bit, so it cannot satisfy a client option asking for
+// different output bits. Before the fix an h264+aac source took the copy
+// branch unconditionally, so an explicit {"codec":"hevc"} silently produced
+// H.264 -- and because it only manifested for h264/aac sources, the existing
+// VP9-source re-encode test could never catch it.
+func TestAVStreamCopyEligible(t *testing.T) {
+	h264aac := avSourceProbe{
+		primary:    avVideoStream{Index: 0, CodecName: "h264"},
+		audioCodec: "aac",
+	}
+	tc := func(f float64) *float64 { return &f }
+	cases := []struct {
+		name string
+		o    AVOpts
+		want bool
+	}{
+		{"no opts copies", AVOpts{}, true},
+		{"explicit hevc must re-encode", AVOpts{Codec: "hevc"}, false},
+		{"explicit h264 matching source may copy", AVOpts{Codec: "h264"}, true},
+		{"resize must re-encode", AVOpts{ResolutionHeight: 480}, false},
+		{"resize plus matching codec must still re-encode", AVOpts{Codec: "h264", ResolutionHeight: 720}, false},
+		{"unrelated opt does not block copy", AVOpts{Timecode: tc(1)}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := avStreamCopyEligible("mp4", c.o, h264aac); got != c.want {
+				t.Errorf("avStreamCopyEligible(mp4, %+v) = %v, want %v", c.o, got, c.want)
+			}
+		})
+	}
+
+	// Illegal source codecs are never copy-eligible regardless of opts.
+	vp9aac := avSourceProbe{primary: avVideoStream{CodecName: "vp9"}, audioCodec: "aac"}
+	if avStreamCopyEligible("mp4", AVOpts{}, vp9aac) {
+		t.Error("avStreamCopyEligible(mp4, vp9+aac) = true, want false (AVC-05 codec contract)")
+	}
 }
 
 // TestHEVCUsesX265CRF proves the HEVC branch references x265DefaultCRF (28),
 // NEVER x264DefaultCRF (23) -- Pitfall 4, AVO-03.
 func TestHEVCUsesX265CRF(t *testing.T) {
-	got := transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "hevc", 4)
+	got := transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "hevc", 0, 0, 4)
 	want := []string{
 		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 		"-i", "file:/work/in.mov",
+		"-map", "0:0", "-map", "0:a:0?",
 		"-c:v", "libx265", "-preset", "veryfast", "-crf", "28",
 		"-c:a", "aac", "-b:a", "128k",
 		"-movflags", "+faststart",
 		"-threads", "4",
-		"/work/out.mp4",
+		"file:/work/out.mp4",
 	}
 	assertArgv(t, got, want)
 	if strings.Contains(strings.Join(got, " "), "libx265 -preset veryfast -crf 23") {
@@ -90,14 +251,15 @@ func TestHEVCUsesX265CRF(t *testing.T) {
 // TestTranscodeToWebMArgs pins the mp4 -> webm argv shape (AVC-02, always a
 // full re-encode). Runs unconditionally.
 func TestTranscodeToWebMArgs(t *testing.T) {
-	got := transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 2)
+	got := transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 0, 0, 2)
 	want := []string{
 		"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 		"-i", "file:/work/in.mp4",
+		"-map", "0:0", "-map", "0:a:0?",
 		"-c:v", "libvpx-vp9", "-b:v", "1M",
 		"-c:a", "libopus",
 		"-threads", "2",
-		"/work/out.webm",
+		"file:/work/out.webm",
 	}
 	assertArgv(t, got, want)
 }
@@ -118,7 +280,7 @@ func TestExtractAudioArgs(t *testing.T) {
 				"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 				"-i", "file:/work/in.mp4", "-vn",
 				"-c:a", "libmp3lame", "-q:a", "2",
-				"/work/out.mp3",
+				"file:/work/out.mp3",
 			},
 		},
 		{
@@ -128,7 +290,7 @@ func TestExtractAudioArgs(t *testing.T) {
 				"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 				"-i", "file:/work/in.mp4", "-vn",
 				"-c:a", "pcm_s16le",
-				"/work/out.wav",
+				"file:/work/out.wav",
 			},
 		},
 		{
@@ -138,7 +300,7 @@ func TestExtractAudioArgs(t *testing.T) {
 				"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 				"-i", "file:/work/in.mp4", "-vn",
 				"-c:a", "aac", "-b:a", "128k",
-				"/work/out.m4a",
+				"file:/work/out.m4a",
 			},
 		},
 		{
@@ -149,7 +311,7 @@ func TestExtractAudioArgs(t *testing.T) {
 				"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
 				"-i", "file:/work/in.mp4", "-vn",
 				"-c:a", "copy",
-				"/work/out.m4a",
+				"file:/work/out.m4a",
 			},
 		},
 	}
@@ -178,7 +340,7 @@ func TestThumbnailArgs_ExplicitCodec(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.target, func(t *testing.T) {
 			outPath := "/work/thumb." + tc.target
-			got := thumbnailArgs("/work/in.mp4", outPath, tc.target, 1.5)
+			got := thumbnailArgs("/work/in.mp4", outPath, tc.target, 1.5, 0)
 
 			ssIdx, iIdx, codecIdx := -1, -1, -1
 			for i, a := range got {
@@ -499,9 +661,12 @@ func TestAVConverter_Thumbnail_LiveBinary(t *testing.T) {
 	}
 }
 
-// TestAVConverter_Thumbnail_OutOfRangeSS proves an out-of-range timecode
-// fails closed (Pitfall 2): no output file is created, and the error is of
-// the ErrAVOutputMissingOrEmpty class.
+// TestAVConverter_Thumbnail_OutOfRangeSS proves an EXPLICIT out-of-range
+// timecode fails closed (Pitfall 2): no output file is created, and the error
+// is the client-input-fault ErrAVTimecodeOutOfRange class -- deliberately NOT
+// ErrAVOutputMissingOrEmpty, which stays reserved for genuine engine faults
+// so the API can tell a 422 from a 500 and the worker can tell terminal from
+// retryable (WR-04).
 func TestAVConverter_Thumbnail_OutOfRangeSS(t *testing.T) {
 	requireLiveAVBinaries(t)
 	dir := t.TempDir()
@@ -514,11 +679,61 @@ func TestAVConverter_Thumbnail_OutOfRangeSS(t *testing.T) {
 	if err == nil {
 		t.Fatal("Convert(out-of-range timecode) = nil, want a fail-closed error")
 	}
-	if !errors.Is(err, ErrAVOutputMissingOrEmpty) {
-		t.Errorf("Convert(out-of-range timecode) error = %v, want errors.Is ErrAVOutputMissingOrEmpty", err)
+	if !errors.Is(err, ErrAVTimecodeOutOfRange) {
+		t.Errorf("Convert(out-of-range timecode) error = %v, want errors.Is ErrAVTimecodeOutOfRange", err)
+	}
+	if errors.Is(err, ErrAVOutputMissingOrEmpty) {
+		t.Errorf("Convert(out-of-range timecode) error = %v, want it NOT folded into the engine-fault class", err)
 	}
 	if _, statErr := os.Stat(outPath); statErr == nil {
 		t.Error("Convert(out-of-range timecode) created an output file; want none (Pitfall 2)")
+	}
+}
+
+// TestAVConverter_Thumbnail_SubSecondSource pins CR-04: a source shorter than
+// the 1.0s default seek point must still yield a thumbnail. Before the fix
+// the default was substituted unconditionally and then bounds-rejected, so
+// EVERY sub-second source was permanently unconvertible with no client-side
+// remedy other than guessing a smaller timecode.
+func TestAVConverter_Thumbnail_SubSecondSource(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "short.mp4")
+	out, err := exec.Command("ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc=duration=0.4:size=64x64:rate=25",
+		"-c:v", "libx264", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate sub-second fixture: %v\n%s", err, out)
+	}
+
+	outPath := filepath.Join(dir, "thumb.jpg")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+		t.Fatalf("Convert(0.4s source -> jpg) = %v, want nil (CR-04: default must clamp, not fail)", err)
+	}
+	if fi, statErr := os.Stat(outPath); statErr != nil || fi.Size() == 0 {
+		t.Errorf("Convert(0.4s source) produced no usable thumbnail (stat err %v)", statErr)
+	}
+}
+
+// TestAVConverter_Thumbnail_ExplicitZeroTimecode pins the other half of
+// CR-04: {"timecode": 0} is a legitimate request for the FIRST frame and must
+// be honored, not silently rewritten to the 1.0s default. With a plain
+// float64 field it was byte-indistinguishable from an absent field.
+func TestAVConverter_Thumbnail_ExplicitZeroTimecode(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "thumb.png")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, map[string]any{"timecode": float64(0)}); err != nil {
+		t.Fatalf("Convert(timecode 0 -> png) = %v, want nil (frame 0 is requestable)", err)
+	}
+	if fi, statErr := os.Stat(outPath); statErr != nil || fi.Size() == 0 {
+		t.Errorf("Convert(timecode 0) produced no usable thumbnail (stat err %v)", statErr)
 	}
 }
 
@@ -539,11 +754,18 @@ func TestValidateAVOutput_SniffMismatch(t *testing.T) {
 	}
 }
 
-// TestProtocolWhitelist_BlocksHTTP_Canary is AVE-02's required offline
-// canary (34-RESEARCH.md "Protocol-whitelist offline canary"): a crafted
-// HLS m3u8 referencing an http:// segment must be rejected by
-// -protocol_whitelist file,crypto, with zero outbound connection attempted
-// and no output file produced.
+// TestProtocolWhitelist_BlocksHTTP_Canary is AVE-02's required offline canary
+// (34-RESEARCH.md "Protocol-whitelist offline canary"): a crafted HLS m3u8
+// referencing an http:// segment must be rejected, with zero outbound
+// connection attempted and no output file produced.
+//
+// WR-10: this drives the canary through the PRODUCTION argv builders rather
+// than a hand-written inline argv. The old version proved only that ffmpeg's
+// own -protocol_whitelist flag works -- which was never in doubt -- and would
+// have kept passing if someone deleted the flag from transcodeToMP4Args
+// tomorrow. Anchoring it to the builders gives the regression protection the
+// test is named for. TestAVBuildersHardenEveryInvocation complements this by
+// asserting the flag pair is present in every builder's output.
 func TestProtocolWhitelist_BlocksHTTP_Canary(t *testing.T) {
 	requireLiveAVBinaries(t)
 	dir := t.TempDir()
@@ -552,15 +774,34 @@ func TestProtocolWhitelist_BlocksHTTP_Canary(t *testing.T) {
 	if err := os.WriteFile(evilPath, []byte(playlist), 0o644); err != nil {
 		t.Fatalf("write evil.m3u8: %v", err)
 	}
-	outPath := filepath.Join(dir, "out.mp4")
 
+	builders := map[string][]string{
+		"transcodeToMP4Args": transcodeToMP4Args(evilPath, filepath.Join(dir, "mp4.mp4"), "h264", 0, 0, 2),
+		"streamCopyArgs":     streamCopyArgs(evilPath, filepath.Join(dir, "copy.mp4"), "mp4", 0),
+		"thumbnailArgs":      thumbnailArgs(evilPath, filepath.Join(dir, "thumb.jpg"), "jpg", 0, 0),
+	}
+	for name, argv := range builders {
+		t.Run(name, func(t *testing.T) {
+			outPath := strings.TrimPrefix(argv[len(argv)-1], "file:")
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if _, err := runCommand(ctx, "ffmpeg", argv...); err == nil {
+				t.Fatalf("%s against an http:// HLS segment reference = nil error, want a protocol-whitelist rejection", name)
+			}
+			if _, statErr := os.Stat(outPath); statErr == nil {
+				t.Errorf("%s produced %s despite protocol-whitelist rejection; want no output file, no outbound connection succeeded", name, outPath)
+			}
+		})
+	}
+
+	// Belt and braces: the full production entry point must reject it too.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, err := runCommand(ctx, "ffmpeg", "-y", "-nostdin", "-protocol_whitelist", "file,crypto", "-i", "file:"+evilPath, "-c", "copy", outPath)
-	if err == nil {
-		t.Fatal("ffmpeg with -protocol_whitelist file,crypto against an http:// HLS segment reference = nil error, want a protocol-whitelist rejection")
+	outPath := filepath.Join(dir, "convert.mp4")
+	if err := (AVConverter{}).Convert(ctx, evilPath, outPath, nil); err == nil {
+		t.Fatal("AVConverter.Convert(evil.m3u8) = nil, want a fail-closed rejection")
 	}
 	if _, statErr := os.Stat(outPath); statErr == nil {
-		t.Error("ffmpeg produced out.mp4 despite protocol-whitelist rejection; want no output file, no outbound connection succeeded")
+		t.Error("AVConverter.Convert(evil.m3u8) produced an output file; want none")
 	}
 }

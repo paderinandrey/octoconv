@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 )
 
 // avResolutionHeights is the closed set of accepted resolution_height values
@@ -68,8 +69,15 @@ const x265DefaultCRF = 28
 type AVOpts struct {
 	// Timecode is the thumbnail seek point in seconds (thumbnail targets
 	// only), range-checked here (>= 0); duration-relative clamping happens
-	// later in Plan 03's Convert, not here.
-	Timecode float64 `json:"timecode,omitempty"`
+	// later, in Convert, not here.
+	//
+	// A POINTER, deliberately (CR-04): with a plain float64 an explicit
+	// {"timecode": 0} -- a legitimate request for the very first frame -- was
+	// byte-identical to an absent field, so it was silently rewritten to the
+	// 1.0s default AND treated by isZeroAVOpts as "no options requested",
+	// short-circuiting ValidateAVApplicability. nil now means "unset" and
+	// only nil takes the default.
+	Timecode *float64 `json:"timecode,omitempty"`
 	// ResolutionHeight is the target output height in pixels (transcode
 	// targets only), validated against the closed avResolutionHeights enum
 	// -- never an arbitrary client WxH pair (AVO-02).
@@ -98,8 +106,8 @@ func ParseAVOpts(raw []byte) (AVOpts, error) {
 	if err := dec.Decode(&o); err != nil {
 		return AVOpts{}, fmt.Errorf("parse opts: %w", err)
 	}
-	if o.Timecode < 0 {
-		return AVOpts{}, fmt.Errorf("timecode out of range %v", o.Timecode)
+	if o.Timecode != nil && (*o.Timecode < 0 || math.IsNaN(*o.Timecode) || math.IsInf(*o.Timecode, 0)) {
+		return AVOpts{}, fmt.Errorf("timecode out of range %v", *o.Timecode)
 	}
 	if o.ResolutionHeight != 0 && !avResolutionHeights[o.ResolutionHeight] {
 		return AVOpts{}, fmt.Errorf("unsupported resolution_height %d", o.ResolutionHeight)
@@ -142,7 +150,7 @@ func ValidateAVApplicability(engine, source, target string, o AVOpts) error {
 		return fmt.Errorf("av options are only valid for av-engine conversions")
 	}
 	normTarget := NormalizeFormat(target)
-	if o.Timecode != 0 && !avThumbnailTargets[normTarget] {
+	if o.Timecode != nil && !avThumbnailTargets[normTarget] {
 		return fmt.Errorf("timecode is only valid for thumbnail targets")
 	}
 	if o.ResolutionHeight != 0 && !avTranscodeTargets[normTarget] {
@@ -157,7 +165,9 @@ func ValidateAVApplicability(engine, source, target string, o AVOpts) error {
 // isZeroAVOpts reports whether o carries no client-requested options at all
 // -- the same "empty opts always apply" shortcut ValidateApplicability uses
 // for DocOpts/AudioOpts (opts.go, audioopts.go), generalized to AVOpts's 3
-// fields.
+// fields. Note Timecode is checked for nil, not for 0: an explicit
+// {"timecode": 0} IS a request and must still be applicability-checked
+// (CR-04).
 func isZeroAVOpts(o AVOpts) bool {
-	return o == AVOpts{}
+	return o.Timecode == nil && o.ResolutionHeight == 0 && o.Codec == ""
 }

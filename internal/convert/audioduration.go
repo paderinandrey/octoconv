@@ -106,6 +106,13 @@ func EnforceMaxDuration(ctx context.Context, path string, max time.Duration) err
 	if err != nil {
 		return err
 	}
+	return enforceMaxDurationOf(d, max)
+}
+
+// enforceMaxDurationOf applies the ceiling to an ALREADY-probed duration, so
+// a caller that must probe the same file for other reasons can reuse that
+// single probe instead of spawning another ffprobe (WR-05, 34-REVIEW.md).
+func enforceMaxDurationOf(d, max time.Duration) error {
 	if d > max {
 		return fmt.Errorf("%w: declared %v exceeds ceiling %v", ErrAudioDurationExceeded, d, max)
 	}
