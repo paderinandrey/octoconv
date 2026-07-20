@@ -64,10 +64,35 @@ func audioThreadCount() int {
 // (a single set converted to itself, minus identity pairs), source and
 // target here never overlap, so every combination is valid -- no from==to
 // filter is needed (mirrors libvips.go's nested-loop shape).
+//
+// D-04 (35-CONTEXT.md): the five detected video containers were added to
+// audioSourceFormats this phase so a client can request a transcript
+// directly from a video upload -- the ffmpeg normalize stage (stage 1)
+// already demuxes any container ffmpeg can decode, so restricting to a
+// subset would be arbitrary, and this keeps the source set symmetric with
+// AVConverter's own source formats. audioTargetFormats stays exactly
+// {txt,srt,vtt,json} -- unchanged -- which is what keeps AudioConverter and
+// AVConverter pair-disjoint under Registry.Register's silent
+// last-write-wins semantics (see pairs_disjoint_test.go): AVConverter's
+// target formats are {mp4,webm,mp3,wav,m4a,jpg,png,webp}, disjoint from
+// audio's {txt,srt,vtt,json} regardless of how much the two converters'
+// SOURCE formats now overlap.
 var (
-	audioSourceFormats = []string{"mp3", "wav", "m4a", "ogg"}
+	audioSourceFormats = []string{
+		"mp3", "wav", "m4a", "ogg",
+		"mp4", "mov", "avi", "mkv", "webm", // D-04: video containers
+	}
 	audioTargetFormats = []string{"txt", "srt", "vtt", "json"}
 )
+
+// videoSourceFormats is the D-04/D-05 subset of audioSourceFormats that are
+// video containers rather than audio-native formats -- used only to select
+// the video-aware minFfmpegBudgetVideo floor below; it is NOT a separate
+// pair-advertising set (Pairs() still iterates audioSourceFormats as a
+// whole).
+var videoSourceFormats = map[string]bool{
+	"mp4": true, "mov": true, "avi": true, "mkv": true, "webm": true,
+}
 
 // defaultAudioModelPath is the path Phase 32 will bake the whisper.cpp model
 // to inside the worker image. It is a compile-time server constant, never
@@ -88,6 +113,36 @@ const defaultAudioModelPath = "/models/ggml-base.bin"
 // "audio: ffmpeg:" timeout. Below this floor Convert fails fast with a
 // distinct transient budget error instead (see the check in Convert).
 const minFfmpegBudget = 30 * time.Second
+
+// minFfmpegBudgetVideo is the D-05 (35-CONTEXT.md) video-source-aware
+// counterpart to minFfmpegBudget: [ASSUMED] a provisional 90s floor
+// (3x audio's 30s), grounded in RESEARCH.md's local-SSD demux measurements
+// (a well-formed container's demux-only cost was negligible regardless of
+// resolution/bitrate on this dev machine) -- revisited in Phase 36 alongside
+// the RTF matrix once production hardware is measured. It exists because
+// demuxing a multi-gigabyte mkv is materially heavier than demuxing an mp3,
+// so the flat 30s floor above under-protects video sources against the same
+// upstream-S3-download-budget-exhaustion misclassification minFfmpegBudget
+// guards against for audio -- this floor protects against THAT budget
+// exhaustion, not raw demux cost, which is why the raise is modest (90s)
+// rather than dramatic. Selecting between the two floors is
+// selectMinFfmpegBudget's job, not a class-wide whole-engine-timeout raise
+// (D-05 explicitly declines that -- it would slow pure-audio jobs too and
+// force a per-job unique-lock TTL recompute for the whole class).
+const minFfmpegBudgetVideo = 90 * time.Second
+
+// selectMinFfmpegBudget resolves which pre-stage-1 budget floor applies to
+// inPath's declared source extension: minFfmpegBudgetVideo for any of the
+// five video containers in videoSourceFormats, else the unchanged
+// minFfmpegBudget. Factored out of Convert as its own pure function so the
+// selection is unit-testable without a live ffmpeg subprocess (mirrors
+// ffmpegNormalizeArgs's own argv-pinning-testability rationale).
+func selectMinFfmpegBudget(inPath string) time.Duration {
+	if videoSourceFormats[NormalizeFormat(filepath.Ext(inPath))] {
+		return minFfmpegBudgetVideo
+	}
+	return minFfmpegBudget
+}
 
 // AudioConverter transcribes audio by shelling out to `ffmpeg` (normalize)
 // then `whisper-cli` (transcribe) -- the fourth engine class (EngineAudio),
@@ -121,8 +176,10 @@ func (c AudioConverter) model() string {
 }
 
 // Pairs returns every {source, target} combination of audioSourceFormats x
-// audioTargetFormats (16 pairs) -- source and target sets are disjoint, so
-// no identity-pair filter is needed (unlike libvips.go's imageFormats).
+// audioTargetFormats (36 pairs after D-04: 9 sources x 4 targets, up from
+// 16 before the five video containers were added) -- source and target sets
+// are disjoint, so no identity-pair filter is needed (unlike libvips.go's
+// imageFormats).
 func (AudioConverter) Pairs() []Pair {
 	pairs := make([]Pair, 0, len(audioSourceFormats)*len(audioTargetFormats))
 	for _, from := range audioSourceFormats {
@@ -179,8 +236,23 @@ func ffmpegNormalizeArgs(inPath, normPath string) []string {
 	// http://169.254.169.254/latest/meta-data/) can make ffmpeg open a network
 	// protocol during demux; -nostdin stops a malformed input from leaving
 	// ffmpeg blocked on an interactive stdin prompt.
+	//
+	// -map 0:a:0 (D-04/D-05, 35-RESEARCH.md Open Question 3, RESOLVED): a
+	// video container may carry multiple audio tracks, and live-testing
+	// ffmpeg's own automatic (no -map) stream selection against this exact
+	// pinned ffmpeg version found it does not reliably prefer the
+	// higher-channel-count track over a lower-channel-count
+	// disposition=default one -- an ambiguity this project deliberately does
+	// not depend on resolving. An explicit "-map 0:a:0" deterministically
+	// selects the first audio stream instead, mirroring AVConverter's own
+	// "0:a:0[?]" explicit-stream-mapping convention (av.go:122,143,163) and
+	// verified a no-op for every existing single-audio-track source
+	// (mp3/wav/m4a/ogg) -- it adds zero subprocesses and sidesteps ffmpeg's
+	// selection heuristic entirely rather than re-implementing it.
 	return []string{"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-		"-i", "file:" + inPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:" + normPath}
+		"-i", "file:" + inPath,
+		"-map", "0:a:0",
+		"-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:" + normPath}
 }
 
 // whisperArgs builds whisper-cli's argv from already-validated inputs.
@@ -277,10 +349,16 @@ func (c AudioConverter) Convert(ctx context.Context, inPath, outPath string, opt
 	// surface as this distinct budget error instead, which carries no
 	// "audio: ffmpeg:" prefix and matches no terminal signature — so it
 	// classifies transient and asynq retries the attempt. Accepted residual:
-	// an upstream stall that still leaves >= minFfmpegBudget remaining can in
-	// principle be misattributed to ffmpeg; the floor only removes the
+	// an upstream stall that still leaves >= the applicable floor remaining
+	// can in principle be misattributed to ffmpeg; the floor only removes the
 	// near-total-exhaustion case deterministically.
-	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < minFfmpegBudget {
+	//
+	// D-05 (35-CONTEXT.md): the floor is video-source-aware --
+	// selectMinFfmpegBudget returns minFfmpegBudgetVideo for the five video
+	// containers D-04 added to audioSourceFormats (demuxing a multi-gigabyte
+	// mkv is materially heavier than demuxing an mp3) and the unchanged
+	// minFfmpegBudget for mp3/wav/m4a/ogg.
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < selectMinFfmpegBudget(inPath) {
 		return fmt.Errorf("audio: insufficient attempt budget remaining: %w", context.DeadlineExceeded)
 	}
 

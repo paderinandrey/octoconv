@@ -191,8 +191,28 @@ func TestAudioConverter_Contract(t *testing.T) {
 	}
 
 	pairs := (AudioConverter{}).Pairs()
-	if len(pairs) != 16 {
-		t.Errorf("len(Pairs()) = %d, want 16 (4 sources x 4 targets)", len(pairs))
+	if len(pairs) != 36 {
+		t.Errorf("len(Pairs()) = %d, want 36 (9 sources x 4 targets, D-04)", len(pairs))
+	}
+
+	// D-04: AudioConverter.Engine() must report EngineAudio for the five
+	// video-container source pairs too, not just the original four
+	// audio-native sources -- video-to-transcript rides the SAME engine
+	// class/queue, no new engine constant is introduced.
+	for _, from := range []string{"mp4", "mov", "avi", "mkv", "webm"} {
+		found := false
+		for _, p := range pairs {
+			if p.From == from && p.To == "txt" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Pairs() missing {From: %q, To: \"txt\"}, want all five video containers present (D-04)", from)
+		}
+	}
+	if got := (AudioConverter{}).Engine(); got != EngineAudio {
+		t.Errorf("Engine() = %q, want %q (D-04: video sources ride the audio engine class)", got, EngineAudio)
 	}
 
 	flagCases := map[string][]string{
@@ -328,7 +348,9 @@ func TestSetAudioThreads_AudioThreadCount(t *testing.T) {
 func TestFfmpegNormalizeArgs_FilePrefix(t *testing.T) {
 	got := ffmpegNormalizeArgs("/work/in.mp3", "/work/norm.wav")
 	want := []string{"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
-		"-i", "file:/work/in.mp3", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:/work/norm.wav"}
+		"-i", "file:/work/in.mp3",
+		"-map", "0:a:0",
+		"-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:/work/norm.wav"}
 	if len(got) != len(want) {
 		t.Fatalf("ffmpegNormalizeArgs = %v, want %v", got, want)
 	}
@@ -336,6 +358,55 @@ func TestFfmpegNormalizeArgs_FilePrefix(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("ffmpegNormalizeArgs = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestFfmpegNormalizeArgs_MapAdjacency pins the exact insertion point of
+// D-04/D-05's "-map 0:a:0": immediately after the "-i file:<inPath>" pair
+// and before "-ar" -- proves the deterministic-stream-selection fix lands
+// where the multi-audio-track open question (35-RESEARCH.md Open Question
+// 3) requires, and continues to assert the AVE-02 hardening flags
+// (-protocol_whitelist file,crypto, -nostdin) and file: prefixes survive
+// the insertion unchanged (T-34-10/WR-08 non-regression).
+func TestFfmpegNormalizeArgs_MapAdjacency(t *testing.T) {
+	got := ffmpegNormalizeArgs("/work/in.mp4", "/work/norm.wav")
+
+	iIdx, mapIdx, arIdx := -1, -1, -1
+	for i, a := range got {
+		switch {
+		case a == "-i" && iIdx == -1:
+			iIdx = i
+		case a == "-map" && mapIdx == -1:
+			mapIdx = i
+		case a == "-ar" && arIdx == -1:
+			arIdx = i
+		}
+	}
+	if iIdx == -1 || mapIdx == -1 || arIdx == -1 {
+		t.Fatalf("ffmpegNormalizeArgs = %v, want -i, -map, and -ar all present", got)
+	}
+	if mapIdx != iIdx+2 {
+		t.Errorf("ffmpegNormalizeArgs -map is at index %d, want it immediately after the -i file:<inPath> pair (index %d)", mapIdx, iIdx+2)
+	}
+	if got[mapIdx+1] != "0:a:0" {
+		t.Errorf("ffmpegNormalizeArgs -map value = %q, want %q", got[mapIdx+1], "0:a:0")
+	}
+	if mapIdx >= arIdx {
+		t.Errorf("ffmpegNormalizeArgs -map at index %d must precede -ar at index %d", mapIdx, arIdx)
+	}
+
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "-protocol_whitelist file,crypto") {
+		t.Errorf("ffmpegNormalizeArgs = %v, want -protocol_whitelist file,crypto to survive the -map insertion", got)
+	}
+	if !strings.Contains(joined, "-nostdin") {
+		t.Errorf("ffmpegNormalizeArgs = %v, want -nostdin to survive the -map insertion", got)
+	}
+	if got[iIdx+1] != "file:/work/in.mp4" {
+		t.Errorf("ffmpegNormalizeArgs -i element = %q, want a file:-prefixed path", got[iIdx+1])
+	}
+	if last := got[len(got)-1]; !strings.HasPrefix(last, "file:") {
+		t.Errorf("ffmpegNormalizeArgs output element = %q, want a file:-prefixed path", last)
 	}
 }
 
@@ -412,5 +483,112 @@ func TestAudioConverter_GarbageOpts(t *testing.T) {
 	}
 	if !strings.HasPrefix(err.Error(), "audio:") {
 		t.Errorf("Convert(garbage opts) error = %q, want prefix \"audio:\"", err.Error())
+	}
+}
+
+// TestSelectMinFfmpegBudget pins D-05: the five video containers D-04 added
+// to audioSourceFormats select minFfmpegBudgetVideo; the original four
+// audio-native sources keep the unchanged minFfmpegBudget. Runs
+// unconditionally -- pure function, no subprocess.
+func TestSelectMinFfmpegBudget(t *testing.T) {
+	for _, ext := range []string{"mp4", "mov", "avi", "mkv", "webm"} {
+		t.Run(ext, func(t *testing.T) {
+			if got := selectMinFfmpegBudget("/work/in." + ext); got != minFfmpegBudgetVideo {
+				t.Errorf("selectMinFfmpegBudget(.%s) = %v, want minFfmpegBudgetVideo (%v)", ext, got, minFfmpegBudgetVideo)
+			}
+		})
+	}
+	for _, ext := range []string{"mp3", "wav", "m4a", "ogg"} {
+		t.Run(ext, func(t *testing.T) {
+			if got := selectMinFfmpegBudget("/work/in." + ext); got != minFfmpegBudget {
+				t.Errorf("selectMinFfmpegBudget(.%s) = %v, want minFfmpegBudget (%v)", ext, got, minFfmpegBudget)
+			}
+		})
+	}
+}
+
+// TestAudioConverter_VideoNoAudioTrack_FailsClosed pins 35-RESEARCH.md Open
+// Question 1 (RESOLVED, no code change needed): a video source with ZERO
+// audio streams already fails closed today via the EXISTING isAudioTerminal
+// classifier (internal/worker/worker.go) -- ffmpeg's stage-1 normalize
+// exits non-zero ("Output file does not contain any stream" / "Stream map
+// '0:a:0' matches no streams" once -map 0:a:0 is added), wrapped with the
+// SAME "audio: ffmpeg:" prefix isAudioTerminal's strings.Contains check
+// already matches on for every other ffmpeg-stage failure. This is
+// currently an EMERGENT property of two independently-motivated mechanisms
+// (ffmpeg's own stream-mapping failure + isAudioTerminal's blanket
+// ffmpeg-stage rule), not a designed guarantee -- pinned here as a
+// regression test rather than new production code, per D-04's own
+// resolution.
+func TestAudioConverter_VideoNoAudioTrack_FailsClosed(t *testing.T) {
+	modelPath := requireLiveAudioBinaries(t)
+	c := AudioConverter{modelPath: modelPath}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "video-only.mp4")
+	out, err := exec.Command("ffmpeg", "-y", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate video-only fixture: %v\n%s", err, out)
+	}
+
+	outPath := filepath.Join(dir, "out.txt")
+	// D-05: inPath is a video source, so selectMinFfmpegBudget requires
+	// minFfmpegBudgetVideo (90s) remaining before stage 1 is even allowed to
+	// start -- the timeout here must exceed that floor or Convert fails fast
+	// with the DISTINCT "insufficient attempt budget remaining" error instead
+	// of reaching ffmpeg at all, defeating the point of this test.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	convErr := c.Convert(ctx, src, outPath, nil)
+	if convErr == nil {
+		t.Fatal("Convert(video with zero audio streams) = nil, want a fail-closed error")
+	}
+	if !strings.Contains(convErr.Error(), "audio: ffmpeg:") {
+		t.Errorf("Convert(video, no audio track) error = %q, want it to carry the \"audio: ffmpeg:\" prefix isAudioTerminal already classifies TERMINAL", convErr.Error())
+	}
+}
+
+// TestAudioConverter_VideoSilentAudioTrack_FailsClosed pins 35-RESEARCH.md
+// Open Question 2 (PARTIALLY RESOLVED): a video source whose audio track is
+// pure digital silence already fails closed today via validateAudioOutput's
+// EXISTING "audio: output is empty" check (already in
+// internal/worker/worker.go's terminalAudioSignatures) -- whisper-cli exits
+// 0 but produces a genuinely empty transcript for near-zero-confidence
+// synthetic silence.
+//
+// NOTE: this does NOT retire STATE.md's accepted hallucination-on-silence
+// risk -- moderate-confidence real-world background chatter/music can still
+// produce a structurally-valid, NON-EMPTY hallucinated transcript that this
+// emptiness check cannot catch; only the specific "genuinely
+// near-zero-confidence synthetic silence" shape tested here is closed.
+func TestAudioConverter_VideoSilentAudioTrack_FailsClosed(t *testing.T) {
+	modelPath := requireLiveAudioBinaries(t)
+	c := AudioConverter{modelPath: modelPath}
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "video-silent-audio.mp4")
+	out, err := exec.Command("ffmpeg", "-y", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",
+		"-f", "lavfi", "-i", "anullsrc=duration=2",
+		"-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", src).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate silent-audio-track fixture: %v\n%s", err, out)
+	}
+
+	outPath := filepath.Join(dir, "out.txt")
+	// D-05: same minFfmpegBudgetVideo (90s) floor as above -- must exceed it
+	// or Convert fails fast on the budget check instead of reaching ffmpeg.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	convErr := c.Convert(ctx, src, outPath, nil)
+	if convErr == nil {
+		t.Fatal("Convert(video with pure-silence audio track) = nil, want a fail-closed error")
+	}
+	if !strings.Contains(convErr.Error(), "audio: output is empty") {
+		t.Errorf("Convert(video, silent audio track) error = %q, want it to carry \"audio: output is empty\" (isAudioTerminal's existing terminalAudioSignatures entry)", convErr.Error())
 	}
 }
