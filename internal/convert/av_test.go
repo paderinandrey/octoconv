@@ -1,7 +1,9 @@
 package convert
 
 import (
+	"context"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -230,5 +232,85 @@ func TestAVConverter_Contract(t *testing.T) {
 	}
 	if len(AVConverter{}.Pairs()) == 0 {
 		t.Error("Pairs() is empty, want the locked pair set")
+	}
+}
+
+// TestAVStreamCopyLegal pins avStreamCopyLegal's allowlist (AVC-05/T-34-11):
+// mp4<-h264/aac and webm<-vp9/opus are the ONLY legal combinations -- every
+// other combination, including an unknown target container, is false. Runs
+// unconditionally.
+func TestAVStreamCopyLegal(t *testing.T) {
+	cases := []struct {
+		target, vcodec, acodec string
+		want                   bool
+	}{
+		{"mp4", "h264", "aac", true},
+		{"mp4", "vp9", "opus", false},
+		{"webm", "vp9", "opus", true},
+		{"webm", "h264", "aac", false},
+		{"avi", "h264", "aac", false},
+	}
+	for _, tc := range cases {
+		if got := avStreamCopyLegal(tc.target, tc.vcodec, tc.acodec); got != tc.want {
+			t.Errorf("avStreamCopyLegal(%q,%q,%q) = %v, want %v", tc.target, tc.vcodec, tc.acodec, got, tc.want)
+		}
+	}
+}
+
+// TestFfprobeAudioCodecArgs_Hardening proves the stream-copy-eligibility
+// audio-codec probe carries the AVE-02 hardening flags and a
+// "file:"-prefixed path. Runs unconditionally -- pure function, no
+// subprocess.
+func TestFfprobeAudioCodecArgs_Hardening(t *testing.T) {
+	got := ffprobeAudioCodecArgs("/work/in.mp4")
+	hasWhitelist, hasFilePrefix := false, false
+	for i, a := range got {
+		if a == "-protocol_whitelist" && i+1 < len(got) && got[i+1] == "file,crypto" {
+			hasWhitelist = true
+		}
+		if a == "file:/work/in.mp4" {
+			hasFilePrefix = true
+		}
+	}
+	if !hasWhitelist {
+		t.Errorf("ffprobeAudioCodecArgs = %v, want -protocol_whitelist file,crypto", got)
+	}
+	if !hasFilePrefix {
+		t.Errorf("ffprobeAudioCodecArgs = %v, want a file:-prefixed path element", got)
+	}
+}
+
+// TestAVConverter_UnsupportedTargetFailsFast asserts Convert rejects an
+// unsupported target extension BEFORE the guard stage/any subprocess runs --
+// mirrors AudioConverter's equivalent test (whisper_test.go). The input path
+// deliberately does not exist; if the guard stage or a subprocess ran first,
+// the error would instead be an "av: ffprobe:"/"av:" duration/resolution
+// failure, not this fail-fast message. Runs ungated.
+func TestAVConverter_UnsupportedTargetFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	for _, out := range []string{"out.xyz", "out"} {
+		outPath := filepath.Join(dir, out)
+		err := (AVConverter{}).Convert(context.Background(), filepath.Join(dir, "does-not-exist.mp4"), outPath, nil)
+		if err == nil {
+			t.Fatalf("Convert(-> %s) = nil, want unsupported-target error", out)
+		}
+		if !strings.Contains(err.Error(), "unsupported target format") {
+			t.Errorf("Convert(-> %s) error = %q, want it to mention \"unsupported target format\"", out, err.Error())
+		}
+	}
+}
+
+// TestAVConverter_GarbageOpts asserts Convert rejects unparseable opts
+// before invoking any subprocess (AVOptsFromMap fails first) -- safe to run
+// ungated since it never reaches ffprobe/ffmpeg.
+func TestAVConverter_GarbageOpts(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "out.mp4")
+	err := (AVConverter{}).Convert(context.Background(), filepath.Join(dir, "does-not-exist.mov"), outPath, map[string]any{"bogus": 1})
+	if err == nil {
+		t.Fatal("Convert(garbage opts) = nil, want error")
+	}
+	if !strings.HasPrefix(err.Error(), "av:") {
+		t.Errorf("Convert(garbage opts) error = %q, want prefix \"av:\"", err.Error())
 	}
 }
