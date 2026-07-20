@@ -2350,6 +2350,148 @@ func TestCreateJob_AVOptsRejectedForInapplicablePair(t *testing.T) {
 	}
 }
 
+// --- D-06 API enqueue-switch completeness guard (Plan 06, third and final seam) ---
+
+// TestCreateJobRoutesEveryEngineToItsQueue is the D-06 completeness guard for
+// the API's enqueue switch (35-CONTEXT.md): D-06 explicitly declined
+// refactoring the API's (and the reconciler's) routing switch into a shared
+// queueForEngine helper for this phase, so the risk of a future engine
+// constant silently missing an enqueue case is closed by this test instead
+// of a structural refactor -- the sanctioned structural replacement for that
+// declined refactor, and the THIRD and final D-06 seam this phase closes
+// (the queue-depth collector list was closed in plan 04's derived-collector
+// wiring, the reconciler routing switch in plan 05's
+// TestSweepRoutesEveryEngineConstant). The API switch at least fails closed
+// at runtime already (a missing case returns 500, never silently drops the
+// job) -- the queue-depth collector's variadic call site did NOT fail closed
+// (Pitfall 2, 35-RESEARCH.md), which is why all three seams get their own
+// test rather than relying on any one switch's fail-closed default to stand
+// in for the others.
+//
+// The table is driven directly off the convert.Engine* constants: a future
+// sixth engine class added to convert.go without a matching case in
+// handleCreateJob's enqueue switch fails this test (via the missing table
+// row/accessor) rather than staying invisible except for a 500 in
+// production.
+func TestCreateJobRoutesEveryEngineToItsQueue(t *testing.T) {
+	type fixture struct {
+		filename string
+		target   string
+		data     func(t *testing.T) []byte
+	}
+	cases := []struct {
+		engine string
+		fx     fixture
+		callID func(*fakeQueue) uuid.UUID
+	}{
+		{convert.EngineImage, fixture{"in.png", "webp", func(*testing.T) []byte { return pngBytesFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedImage }},
+		{convert.EngineDocument, fixture{"in.docx", "pdf", docxFixture}, func(q *fakeQueue) uuid.UUID { return q.enqueuedDocument }},
+		{convert.EngineHTML, fixture{"in.html", "pdf", func(*testing.T) []byte { return htmlFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedHTML }},
+		{convert.EngineAudio, fixture{"in.mp3", "txt", audioMP3Fixture}, func(q *fakeQueue) uuid.UUID { return q.enqueuedAudio }},
+		{convert.EngineAV, fixture{"in.mp4", "mp3", func(*testing.T) []byte { return mp4BytesFixture() }}, func(q *fakeQueue) uuid.UUID { return q.enqueuedAV }},
+	}
+
+	allAccessors := make(map[string]func(*fakeQueue) uuid.UUID, len(cases))
+	for _, c := range cases {
+		allAccessors[c.engine] = c.callID
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.engine, func(t *testing.T) {
+			repo := &fakeRepo{}
+			store := &fakeStorage{}
+			queue := &fakeQueue{}
+			srv, _ := newTestServer(repo, store, queue)
+
+			body, ct := multipartBody(t, tc.fx.filename, tc.fx.target, tc.fx.data(t))
+			req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+			req.Header.Set("Content-Type", ct)
+			rec := httptest.NewRecorder()
+
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("engine %q: status = %d, want 202; body=%s", tc.engine, rec.Code, rec.Body.String())
+			}
+			if repo.created == nil || repo.created.Engine != tc.engine {
+				t.Fatalf("engine %q: job Engine = %+v, want %q", tc.engine, repo.created, tc.engine)
+			}
+			if got := tc.callID(queue); got != repo.createdID {
+				t.Fatalf("engine %q: matching Enqueue call id = %s, want %s (repo.createdID)", tc.engine, got, repo.createdID)
+			}
+			for otherEngine, accessor := range allAccessors {
+				if otherEngine == tc.engine {
+					continue
+				}
+				if got := accessor(queue); got != uuid.Nil {
+					t.Fatalf("engine %q: unexpected enqueue call recorded on %q's accessor: %s, want uuid.Nil", tc.engine, otherEngine, got)
+				}
+			}
+		})
+	}
+
+	// AVT-01 routing split (ROADMAP success criterion 2): the SAME source
+	// format (mp4) resolves to two DIFFERENT engines depending on target --
+	// mp4 -> srt (transcript) rides the existing audio queue/worker
+	// (video-to-transcript, D-04), while mp4 -> webm (transcode) is the real
+	// AVConverter's own pair. Reuses the "one queue and NONE of the others"
+	// negative-assertion style already established by
+	// TestCreateJob_AudioDetectedAndAccepted (handlers_test.go).
+	t.Run("mp4_to_srt_routes_audio_not_av", func(t *testing.T) {
+		repo := &fakeRepo{}
+		store := &fakeStorage{}
+		queue := &fakeQueue{}
+		srv, _ := newTestServer(repo, store, queue)
+
+		body, ct := multipartBody(t, "in.mp4", "srt", mp4BytesFixture())
+		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
+		if repo.created == nil || repo.created.Engine != convert.EngineAudio {
+			t.Fatalf("job Engine = %+v, want audio", repo.created)
+		}
+		if queue.enqueuedAudio != repo.createdID {
+			t.Errorf("enqueuedAudio = %s, want %s", queue.enqueuedAudio, repo.createdID)
+		}
+		if queue.enqueuedAV != uuid.Nil {
+			t.Errorf("enqueuedAV = %s, want uuid.Nil (mp4 -> srt must never touch the av queue)", queue.enqueuedAV)
+		}
+	})
+
+	t.Run("mp4_to_webm_routes_av_not_audio", func(t *testing.T) {
+		repo := &fakeRepo{}
+		store := &fakeStorage{}
+		queue := &fakeQueue{}
+		srv, _ := newTestServer(repo, store, queue)
+
+		body, ct := multipartBody(t, "in.mp4", "webm", mp4BytesFixture())
+		req := authed(httptest.NewRequest(http.MethodPost, "/v1/jobs", body))
+		req.Header.Set("Content-Type", ct)
+		rec := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+		}
+		if repo.created == nil || repo.created.Engine != convert.EngineAV {
+			t.Fatalf("job Engine = %+v, want av", repo.created)
+		}
+		if queue.enqueuedAV != repo.createdID {
+			t.Errorf("enqueuedAV = %s, want %s", queue.enqueuedAV, repo.createdID)
+		}
+		if queue.enqueuedAudio != uuid.Nil {
+			t.Errorf("enqueuedAudio = %s, want uuid.Nil (mp4 -> webm must never touch the audio queue)", queue.enqueuedAudio)
+		}
+	})
+}
+
 // --- D-07 two-tier upload ceiling tests (35-04) ---
 
 // TestNewServer_MaxEngineBytesDefaults proves NewServer's zero-value
