@@ -320,11 +320,15 @@ func TestSetAudioThreads_AudioThreadCount(t *testing.T) {
 // defense-in-depth): the argv element handed to ffmpeg's -i flag carries the
 // explicit "file:" protocol prefix, so a future client-influenced filename
 // cannot be reinterpreted as a protocol/URL specifier
-// (concat:/http:/pipe:) or a leading-dash option. Runs ungated -- pure argv
+// (concat:/http:/pipe:) or a leading-dash option. It also pins WR-08
+// (34-REVIEW.md): this invocation runs ffmpeg on untrusted client audio and
+// must carry the same -nostdin/-protocol_whitelist hardening pair every other
+// ffmpeg/ffprobe call site in this package does. Runs ungated -- pure argv
 // construction, no subprocess invoked.
 func TestFfmpegNormalizeArgs_FilePrefix(t *testing.T) {
 	got := ffmpegNormalizeArgs("/work/in.mp3", "/work/norm.wav")
-	want := []string{"-y", "-i", "file:/work/in.mp3", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "/work/norm.wav"}
+	want := []string{"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
+		"-i", "file:/work/in.mp3", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:/work/norm.wav"}
 	if len(got) != len(want) {
 		t.Fatalf("ffmpegNormalizeArgs = %v, want %v", got, want)
 	}

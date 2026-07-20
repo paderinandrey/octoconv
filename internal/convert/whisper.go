@@ -169,7 +169,18 @@ func ffmpegNormalizeArgs(inPath, normPath string) []string {
 	// internal/worker/worker.go) always passes a server-generated workdir
 	// path, so this is a no-op for current behavior; it only matters if a
 	// future caller ever threads a client-influenced filename through here.
-	return []string{"-y", "-i", "file:" + inPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", normPath}
+	//
+	// WR-08 (34-REVIEW.md): -protocol_whitelist file,crypto and -nostdin are
+	// the AVE-02 hardening pair that audioduration.go and av.go both assert
+	// holds on EVERY ffmpeg/ffprobe invocation "with no exception". This
+	// invocation runs ffmpeg on untrusted CLIENT audio uploads and was the one
+	// place where that claim was false. Without the whitelist a crafted
+	// container (e.g. an HLS playlist referencing
+	// http://169.254.169.254/latest/meta-data/) can make ffmpeg open a network
+	// protocol during demux; -nostdin stops a malformed input from leaving
+	// ffmpeg blocked on an interactive stdin prompt.
+	return []string{"-y", "-nostdin", "-protocol_whitelist", "file,crypto",
+		"-i", "file:" + inPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "file:" + normPath}
 }
 
 // whisperArgs builds whisper-cli's argv from already-validated inputs.
