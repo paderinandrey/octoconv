@@ -382,7 +382,7 @@ if limit, ok := s.maxEngineBytes[engine]; ok && header.Size > limit {
 | A3 | Global `MAX_UPLOAD_BYTES` raised to 2 GiB; per-engine ceiling for AV also 2 GiB; image/document/html/audio per-engine ceilings held at the current 100 MiB default | Numeric Recommendations | This is a **business decision** (what video file sizes internal clients actually need to submit), not derivable from code — STATE.md's own Blockers/Concerns log flags this explicitly as "Must be an explicit named decision... not an implicit side effect of picking a video-friendly number." 2 GiB is a defensible engineering default (headroom for a ~30-60 min internal recording at consumer bitrates) but genuinely needs operator/user confirmation before being treated as final |
 | A4 | ffmpeg's automatic (no `-map`) audio-stream selection prioritizes the `disposition=default`-flagged stream over raw channel count | Open Questions / Code Examples | LOW-MEDIUM risk if wrong: the recommended fix (`-map 0:a:0`, explicit first-stream selection) sidesteps this entirely and does not depend on which heuristic is correct — this assumption is informational context only, not load-bearing for the recommendation |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 ### 1. Video with no audio track submitted for transcription — RESOLVED, no code change needed
 
