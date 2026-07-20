@@ -119,3 +119,16 @@ None beyond redeploying with the updated `MAX_UPLOAD_BYTES=2147483648` env value
 ---
 *Phase: 35-queue-worker-routing-integration*
 *Completed: 2026-07-21*
+
+## Self-Check: PASSED
+
+- FOUND: internal/api/api.go
+- FOUND: internal/api/handlers.go
+- FOUND: internal/api/handlers_test.go
+- FOUND: cmd/api/main.go
+- FOUND: .env.example
+- FOUND: docker-compose.yml
+- FOUND: .planning/phases/35-queue-worker-routing-integration/35-04-SUMMARY.md
+- FOUND commit: 1ac6213 (Task 1)
+- FOUND commit: f324d33 (Task 2)
+- FOUND commit: f434511 (this SUMMARY)
