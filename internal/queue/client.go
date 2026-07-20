@@ -63,6 +63,15 @@ type Client struct {
 	// Derived fresh, never reused from another engine class's TTL (per the
 	// AudioUniqueTTL binding decision, STATE.md).
 	audioUniqueTTL time.Duration
+	// avMaxRetry is the per-task MaxRetry budget for av conversion tasks
+	// (AV_MAX_RETRY, LOCKED default 2 per D-03 — fewer attempts than
+	// audio's 3, since each av attempt costs materially more).
+	avMaxRetry int
+	// avUniqueTTL is the per-job asynq.Unique lock TTL for av conversion
+	// tasks, derived once at construction from avMaxRetry and
+	// AV_ENGINE_TIMEOUT via AVUniqueTTL. Derived fresh, never reused from
+	// another engine class's TTL.
+	avUniqueTTL time.Duration
 }
 
 // NewClient builds a queue client from REDIS_ADDR, IMAGE_MAX_RETRY (default
@@ -70,9 +79,24 @@ type Client struct {
 // a conversion attempt), DOCUMENT_MAX_RETRY (default 3),
 // DOCUMENT_ENGINE_TIMEOUT (default 300s — Phase 9 D-01), HTML_MAX_RETRY
 // (default 3), HTML_ENGINE_TIMEOUT (default 60s), AUDIO_MAX_RETRY (default
-// 3), and AUDIO_ENGINE_TIMEOUT (default 600s — an [ASSUMED] placeholder;
-// Phase 32 re-derives this from real-time-factor measurement against the
-// pinned whisper-cli model).
+// 3), AUDIO_ENGINE_TIMEOUT (default 600s — an [ASSUMED] placeholder; Phase 32
+// re-derives this from real-time-factor measurement against the pinned
+// whisper-cli model), AV_MAX_RETRY (default 2, D-03 LOCKED), and
+// AV_ENGINE_TIMEOUT (default 600s — [ASSUMED] provisional, mirroring the
+// exact precedent AUDIO_ENGINE_TIMEOUT set: a 600s Go-code placeholder later
+// replaced by a 742s production value after Phase 32's RTF measurement;
+// Phase 36 re-derives AV_ENGINE_TIMEOUT the same way from an RTF matrix).
+//
+// COUPLING (Pitfall 4, RESEARCH.md): RECONCILER_ACTIVE_STALE_AFTER is a
+// single global threshold (default 900s) that must comfortably exceed every
+// engine's *_ENGINE_TIMEOUT, or the reconciler will re-enqueue a still-
+// legitimately-running job as stale. This is a documented near-miss from the
+// audio engine (see docker-compose.yml): audio's duration-ceiling-derived
+// timeout once breached the 900s/15m reconciler cap and forced
+// AUDIO_MAX_DURATION_SECONDS to be lowered as a NO-GO lever. Any future
+// raise of AV_ENGINE_TIMEOUT toward 900s is therefore a coupled decision
+// requiring RECONCILER_ACTIVE_STALE_AFTER to be raised in the same change —
+// do not raise one without the other.
 func NewClient() (*Client, error) {
 	opt, err := RedisOpt()
 	if err != nil {
@@ -86,6 +110,8 @@ func NewClient() (*Client, error) {
 	htmlEngineTimeout := envDuration("HTML_ENGINE_TIMEOUT", 60*time.Second)
 	audioMaxRetry := envInt("AUDIO_MAX_RETRY", 3)
 	audioEngineTimeout := envDuration("AUDIO_ENGINE_TIMEOUT", 600*time.Second)
+	avMaxRetry := envInt("AV_MAX_RETRY", 2)
+	avEngineTimeout := envDuration("AV_ENGINE_TIMEOUT", 600*time.Second)
 	return &Client{
 		c:                 asynq.NewClient(opt),
 		imageMaxRetry:     imageMaxRetry,
@@ -97,6 +123,8 @@ func NewClient() (*Client, error) {
 		htmlUniqueTTL:     HTMLUniqueTTL(htmlMaxRetry, htmlEngineTimeout),
 		audioMaxRetry:     audioMaxRetry,
 		audioUniqueTTL:    AudioUniqueTTL(audioMaxRetry, audioEngineTimeout),
+		avMaxRetry:        avMaxRetry,
+		avUniqueTTL:       AVUniqueTTL(avMaxRetry, avEngineTimeout),
 	}, nil
 }
 
@@ -161,6 +189,18 @@ func (c *Client) EnqueueAudioConvert(ctx context.Context, jobID uuid.UUID) error
 	}
 	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
 		return fmt.Errorf("enqueue audio convert %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// EnqueueAVConvert puts a video conversion job onto the av queue.
+func (c *Client) EnqueueAVConvert(ctx context.Context, jobID uuid.UUID) error {
+	task, err := NewAVConvertTask(jobID, c.avMaxRetry, c.avUniqueTTL)
+	if err != nil {
+		return err
+	}
+	if _, err := c.c.EnqueueContext(ctx, task); err != nil {
+		return fmt.Errorf("enqueue av convert %s: %w", jobID, err)
 	}
 	return nil
 }
