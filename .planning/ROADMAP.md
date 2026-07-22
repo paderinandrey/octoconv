@@ -120,7 +120,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 ### v1.8 AV Engine (video/ffmpeg) (Phases 34-37) — IN PROGRESS
 
 - [x] **Phase 34: AV Engine Foundation** - Standalone AVConverter (transcode/audio-extract/thumbnail via ffmpeg), video container sniffers (mp4/mov ftyp, RIFF AVI, EBML mkv/webm), validated AVOpts, duration/resolution guards + protocol-whitelist hardening (completed 2026-07-20)
-- [ ] **Phase 35: Queue, Worker & Routing Integration** - av queue + cmd/av-worker, stage-aware retry classification, API/reconciler engine routing, video→transcript pairs routed onto the existing audio queue/worker with a pair-disjointness test
+- [x] **Phase 35: Queue, Worker & Routing Integration** - av queue + cmd/av-worker, stage-aware retry classification, API/reconciler engine routing, video→transcript pairs routed onto the existing audio queue/worker with a pair-disjointness test (completed 2026-07-22)
 - [ ] **Phase 36: Containerization & RTF-Measured Timeout** - Dockerfile.av-worker (pinned ffmpeg), compose service, RTF-matrix measured AV_ENGINE_TIMEOUT, disk-space guard, CI bake
 - [ ] **Phase 37: KEDA/Helm Chart Integration** - av-worker Deployment + ScaledObject (WR-01 triad), QueueAV collector, scale-from-zero load-proof
 
@@ -167,7 +167,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 - [x] 35-04-PLAN.md — API: two-tier upload ceiling (D-07), Enqueuer seam, derived queue-depth collector list (AVE-03)
 - [x] 35-05-PLAN.md — reconciler av routing + engine-routing completeness test (D-06) (AVE-03)
 - [x] 35-06-PLAN.md — register AVConverter + wire SniffVideo (D-08), AV opts dispatch, enqueue-switch completeness test (AVE-03, AVT-01)
-- [ ] 35-07-PLAN.md — `cmd/av-worker` binary + live end-to-end checkpoint (AVE-03)
+- [x] 35-07-PLAN.md — `cmd/av-worker` binary + live end-to-end checkpoint (AVE-03)
 
 ### Phase 36: Containerization & RTF-Measured Timeout
 **Goal**: A running av-worker container in docker-compose passes a full live E2E, with `AV_ENGINE_TIMEOUT` sized from a measured RTF matrix across the closed opts space rather than a copied or guessed constant.
@@ -229,7 +229,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
-| 35. Queue, Worker & Routing Integration | v1.8 | 6/7 | In Progress|  |
+| 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete   | 2026-07-22 |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
 
