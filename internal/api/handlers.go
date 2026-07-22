@@ -32,6 +32,16 @@ const (
 	// (T-14-02): a conservative 4 KiB comfortably fits the closed DocOpts
 	// schema while bounding the DoS surface of an oversized field.
 	maxOptsBytes = 4096
+	// multipartInMemoryBudget caps how many bytes of a multipart upload
+	// ParseMultipartForm buffers in the process heap; larger file parts spill
+	// to temp files on disk (Go's documented behavior). It is deliberately
+	// DECOUPLED from maxUploadByte (CR-01, Phase 35): the total request size is
+	// already bounded pre-parse by http.MaxBytesReader, so passing the full
+	// upload ceiling (2 GiB since D-07) as the in-memory budget would let one
+	// large-video upload buffer up to 2 GiB in RAM -- linear in concurrent
+	// uploads, a real memory-exhaustion vector. 32 MiB matches Go's own
+	// net/http defaultMaxMemory.
+	multipartInMemoryBudget = 32 << 20
 	// maxPresetNameBytes bounds the client-supplied preset name before any DB
 	// lookup (T-18-09) -- an opaque-string DoS guard, request-independent of
 	// preset existence, so a 400 here leaks nothing about the presets table.
@@ -90,8 +100,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Cap the request body to reject oversized uploads before buffering them.
+	// The total-size ceiling is enforced here by MaxBytesReader; the separate,
+	// smaller multipartInMemoryBudget bounds heap use during parsing (CR-01).
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxUploadByte)
-	if err := r.ParseMultipartForm(s.maxUploadByte); err != nil {
+	if err := r.ParseMultipartForm(multipartInMemoryBudget); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "file exceeds size limit")
