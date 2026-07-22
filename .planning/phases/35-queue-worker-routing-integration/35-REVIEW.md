@@ -21,7 +21,11 @@ findings:
   warning: 1
   info: 0
   total: 2
-status: issues_found
+status: resolved
+resolution:
+  CR-01: fixed (8a0003a) — multipart in-memory budget decoupled to fixed 32 MiB
+  WR-01: fixed (49b1043) — convertAudioExtract reuses probed src.audioCodec
+  security-obs-1: fixed (5dfbb05) — disjointness test normalizes pairs
 ---
 
 # Phase 35: Code Review Report
