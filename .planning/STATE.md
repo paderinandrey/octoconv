@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
 status: executing
-stopped_at: Completed 36-01-PLAN.md (disk-space guard + AVConverter config-threading)
-last_updated: "2026-07-22T14:41:46.968Z"
+stopped_at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
+last_updated: "2026-07-22T15:09:56.165Z"
 last_activity: 2026-07-22
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 ## Current Position
 
 Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-07-22
 
@@ -85,6 +85,7 @@ Last activity: 2026-07-22
 
 *Updated after each plan completion*
 | Phase 36 P01 | 15min | 3 tasks | 6 files |
+| Phase 36 P02 | 30min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - **FFmpeg decoder RCE surface — pin ffmpeg ≥8.1.2, not floating `apt-get install` (Phase 36):** a live June-2026 disclosure (CVE-2026-8461 "PixelSmash") achieved RCE via a 50KB crafted file against comparable services; this project has no existing dependency-advisory-tracking process — flagged as accepted-risk/tech-debt to revisit, not assumed durable after a one-time pin.
 - **Open question carried into planning — upload-size ceiling for video:** `MAX_UPLOAD_BYTES` is currently one global value enforced before content-type detection runs; video files are legitimately much larger than other engine classes' typical inputs, and raising the global ceiling weakens DoS posture for all other classes too. Must be an explicit named decision during Phase 34/36 planning, not an implicit side effect of picking a video-friendly number.
 - [Phase 36]: avDiskSafetyFactorDefault=3.0 is an explicit [ASSUMED] Claude's Discretion default, overridable via AV_DISK_SAFETY_FACTOR — No measured ffmpeg disk-usage ratio existed at Plan 01 time to derive a better default from
+- [Phase 36]: lavfi/testsrc/sine/wrapped_avframe + format/aformat/aresample/zlib/webp-muxer added to Dockerfile.av-worker's minimal ffmpeg build — beyond RESEARCH.md's flag list; required for the RTF measurement script's lavfi fixture synthesis AND for production audio-resample/png/webp-thumbnail paths, confirmed via live smoke test of the full av.go argv suite
 
 ### Quick Tasks Completed
 
@@ -170,9 +172,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-22T14:41:46.959Z
-Stopped at: Completed 36-01-PLAN.md (disk-space guard + AVConverter config-threading)
-Resume file: .planning/phases/36-containerization-rtf-measured-timeout/36-02-PLAN.md
+Last session: 2026-07-22T15:09:56.155Z
+Stopped at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
+Resume file: .planning/phases/36-containerization-rtf-measured-timeout/36-03-PLAN.md
 
 ## Operator Next Steps
 
