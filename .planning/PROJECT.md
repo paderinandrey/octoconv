@@ -12,7 +12,14 @@ OctoConv — внутренний асинхронный сервис конве
 
 **v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18.** Четвёртый engine-класс (офлайн whisper.cpp-транскрипция) в полном контуре: fail-closed валидация → async-пайплайн со stage-aware retry → контейнер с RTF-измеренным таймаутом → KEDA scale-from-zero (live-proven). Плюс закрыт hardening-хвост v1.6. Аудит 12/12 требований, интеграция 22/22, E2E 2/2.
 
-**v1.8 в работе — Phase 34 (AV Engine Foundation) завершена 2026-07-20.** Standalone `AVConverter` (транскод / извлечение аудио / thumbnail) собран и проверен против живого ffmpeg 8.1.2, плюс магик-байтовые снифферы видео-контейнеров и закрытый `AVOpts` allowlist. Верификация 5/5 критериев, 10/10 требований (AVC-01..05, AVO-01..03, AVE-01/02). Конвертер намеренно **не зарегистрирован** в `convert.Default` — очередь, воркер и роутинг это Phase 35.
+**v1.8 в работе — Phase 35 (Queue, Worker & Routing Integration) завершена 2026-07-22.** `AVConverter` подключён к async-пайплайну: очередь `av`, `cmd/av-worker`, роутинг в API и реконсилере, stage-aware retry-классификатор (`isAVTerminal`: transcode-таймаут transient, остальное terminal), `AVUniqueTTL`. Видео→транскрипт едет через существующий audio-воркер (пары `AudioConverter` расширены 16→36, `Engine()` остаётся audio). Дифференциал доказан живьём: один mp4, `webm`→очередь av, `srt`→очередь audio. Верификация 4/4, security 31/31, требования AVE-03/AVT-01. `AV_ENGINE_TIMEOUT`=600s пока `[ASSUMED]` — RTF-замер это Phase 36.
+
+<details>
+<summary>Phase 34 (AV Engine Foundation) — завершена 2026-07-20</summary>
+
+Standalone `AVConverter` (транскод / извлечение аудио / thumbnail) собран и проверен против живого ffmpeg 8.1.2, плюс магик-байтовые снифферы видео-контейнеров и закрытый `AVOpts` allowlist. Верификация 5/5 критериев, 10/10 требований (AVC-01..05, AVO-01..03, AVE-01/02). Конвертер намеренно **не был зарегистрирован** в `convert.Default` — это сделал Phase 35.
+
+</details>
 
 ## Current Milestone: v1.8 AV Engine (video/ffmpeg)
 
@@ -214,4 +221,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-20 after Phase 34 (AV Engine Foundation) completion*
+*Last updated: 2026-07-22 after Phase 35 (Queue, Worker & Routing Integration) completion*
