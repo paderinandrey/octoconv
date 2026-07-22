@@ -1,0 +1,159 @@
+# Build stage
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/av-worker ./cmd/av-worker
+
+# ffmpeg build stage: mirrors Dockerfile.audio-worker's whisper-build stage in
+# SHAPE -- a separate, throwaway build stage whose only job is producing a
+# compiled artifact the runtime stage COPYs, never rebuilding the toolchain
+# there. KEY DIFFERENCE from whisper: ffmpeg's own codec DEPENDENCIES
+# (libx264/libx265/libvpx/libopus/libmp3lame/libwebp) are real Debian bookworm
+# packages, so only ffmpeg's OWN compiled binary is a throwaway-stage
+# artifact -- the runtime stage apt-installs the shared libs directly instead
+# of COPYing .so files the way whisper.cpp's self-built libwhisper.so is.
+FROM debian:bookworm-slim AS ffmpeg-build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential pkg-config git ca-certificates curl nasm yasm \
+      libx264-dev libx265-dev libvpx-dev libopus-dev libmp3lame-dev libwebp-dev \
+      zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/*
+# Pin ffmpeg by COMMIT hash, not the mutable n8.1.2 tag (D-01/D-10, mirrors
+# Dockerfile.audio-worker's WHISPER_COMMIT rationale): git tags can be
+# force-pushed, silently changing every byte of the compiled binary.
+# FFMPEG_COMMIT is the commit n8.1.2 PEELS TO (git rev-list -n 1 n8.1.2),
+# resolved via git ls-remote/git rev-list on 2026-07-22 (36-RESEARCH.md
+# Package Legitimacy Audit). NOTE the ANNOTATED-TAG caveat, which whisper.cpp's
+# lightweight v1.9.1 tag did NOT need: `git ls-remote --tags` returns TWO
+# lines for n8.1.2 (the tag OBJECT hash and a "n8.1.2^{}" PEELED COMMIT hash).
+# This pin uses the PEELED COMMIT, matching what `git checkout n8.1.2` +
+# `git rev-parse HEAD` actually resolves to -- using the tag-object hash here
+# would make the rev-parse guard below fail-loud unnecessarily (safe, but
+# wrong) on every single build.
+# CVE-2026-8461 (PixelSmash, MagicYUV decoder RCE) fix commit
+# 9516e6900a8294c5a9e0da8d4ad88956776d6666 is a VERIFIED ancestor of n8.1.2
+# (git merge-base --is-ancestor, run live 2026-07-22) -- this is D-02's
+# closure evidence.
+ARG FFMPEG_COMMIT=38b88335f99e76ed89ff3c93f877fdefce736c13
+RUN git clone --depth 1 --branch n8.1.2 \
+      https://github.com/FFmpeg/FFmpeg.git /ffmpeg \
+ && git -C /ffmpeg checkout --detach "${FFMPEG_COMMIT}" \
+ && [ "$(git -C /ffmpeg rev-parse HEAD)" = "${FFMPEG_COMMIT}" ]
+WORKDIR /ffmpeg
+# Minimal codec build (36-RESEARCH.md Pattern 2): everything is disabled by
+# default below, then only the codecs/muxers/demuxers/protocols/filters the
+# closed AVOpts allowlist (av.go's Pairs()) actually needs are re-enabled.
+# This is a SECOND, structural layer of defense beneath AVE-02's
+# -protocol_whitelist argv flag (T-36-06) -- network protocols like
+# http/https/rtmp/concat are not merely blocked by a CLI flag, they are not
+# compiled into the binary AT ALL, so no future argv typo could ever
+# re-enable them.
+#
+# --enable-gpl --enable-nonfree are LOAD-BEARING: libx264/libx265 are
+# GPL-licensed and ffmpeg's configure gates them behind these two flags --
+# without --enable-gpl, configure refuses --enable-libx264/--enable-libx265
+# outright (verified against n8.1.2's configure script).
+#
+# --enable-filter=scale is LOAD-BEARING: avScaleFilter's "-vf scale=-2:H"
+# (AVO-02 resolution requests, av.go) needs the scale filter to be compiled
+# in at all -- filters are disabled-by-default below exactly like
+# codecs/muxers/protocols are.
+#
+# A CPU-pinned/native-only build is DELIBERATELY NOT REQUESTED below
+# (36-RESEARCH.md Pattern 3): ffmpeg enables its runtime CPU-capability
+# detection by DEFAULT (verified by reading n8.1.2's configure script
+# directly), so the compiled binary dispatches to the best available SIMD
+# codepath (SSE/AVX/NEON) at process STARTUP rather than baking one
+# instruction set in at compile time -- this is what makes building on the
+# arm64 OrbStack host and running on amd64 (or vice versa) work with no
+# --platform pin, unlike whisper.cpp's -DGGML_NATIVE=OFF requirement which
+# solves the analogous problem via a different mechanism (whisper.cpp/GGML
+# defaults to -march=native, ffmpeg does not). Do not add a flag that forces
+# host-CPU-only code generation or turns off that runtime detection.
+# DEVIATION (Rule 3 -- blocking issue found live during Task 1 build/smoke
+# verification): the RESEARCH.md/PATTERNS.md flag list above did not include
+# the "lavfi" input device or the "testsrc"/"sine" source filters, but Task 2
+# (scripts/av-rtf-measure.sh) is REQUIRED to synthesize fixtures in-container
+# via "ffmpeg -f lavfi -i testsrc=... -f lavfi -i sine=..." -- confirmed live
+# that a build without these flags rejects "-f lavfi" outright ("Unknown
+# input format: 'lavfi'"). --enable-indev=lavfi (lavfi is registered as an
+# INPUT DEVICE in libavdevice/alldevices.c, not a demuxer, despite the
+# internal struct being named ff_lavfi_demuxer) plus adding testsrc/sine to
+# --enable-filter (verified against n8.1.2's libavfilter/allfilters.c:
+# ff_vsrc_testsrc, ff_asrc_sine) are both load-bearing for the measurement
+# script to run at all, with zero effect on the production argv paths in
+# av.go (which never use -f lavfi). "wrapped_avframe" was also added to
+# --enable-decoder (verified against n8.1.2's libavcodec/allcodecs.c:
+# ff_wrapped_avframe_decoder) after a live smoke test showed the lavfi
+# testsrc source's internal raw-frame passthrough decoder was otherwise
+# missing ("Decoding requested, but no decoder found for: wrapped_avframe").
+# "format"/"aformat"/"aresample" filters were also added after a live smoke
+# test showed ffmpeg's implicit filtergraph auto-insertion needs them for
+# pixel-format/sample-format/sample-rate negotiation between the lavfi
+# sources and the libx264/aac/libvpx-vp9/libopus encoders (verified against
+# n8.1.2's fftools/ffmpeg_filter.c, which explicitly inserts "format"/
+# "aformat" at each output, and libavfilter/formats.c, whose
+# conversion_filter table names "aresample" as the audio auto-convert
+# filter) -- without them ffmpeg errors "'aresample' filter not present,
+# cannot convert formats" on ANY audio path needing resample/format
+# conversion, not just the lavfi fixture path, so this is production-path
+# load-bearing, not measurement-only. "--enable-zlib" (plus zlib1g-dev in
+# the apt-install line above) is likewise production-path load-bearing: a
+# live smoke test of AVC-04's thumbnail path showed "Unknown encoder 'png'"
+# -- the png/apng encoders' configure entries (png_encoder_select=
+# deflate_wrapper) require zlib, which configure only autodetects when the
+# -dev headers are present; without it configure silently drops the png
+# encoder even though --enable-encoder=png was requested. The dedicated
+# "webp" muxer (distinct from "image2") was added to --enable-muxer for the
+# same reason: the image2 muxer's own extension table does not claim
+# ".webp" (verified against n8.1.2's img2enc.c), so a thumbnail request for
+# target=webp otherwise fails "Unable to choose an output format" even
+# though libwebp itself is enabled.
+RUN ./configure \
+      --disable-everything --disable-doc --disable-debug \
+      --enable-gpl --enable-nonfree --enable-zlib \
+      --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus \
+      --enable-libmp3lame --enable-libwebp \
+      --enable-encoder=libx264,libx265,libvpx_vp9,aac,libopus,libmp3lame,pcm_s16le,mjpeg,png,libwebp \
+      --enable-decoder=h264,hevc,vp8,vp9,aac,mp3,mp3float,opus,pcm_s16le,mjpeg,png,wrapped_avframe \
+      --enable-muxer=mp4,mov,ipod,webm,matroska,mp3,wav,image2,webp \
+      --enable-demuxer=mov,matroska,avi,wav \
+      --enable-protocol=file,crypto \
+      --enable-filter=scale,format,aformat,aresample,testsrc,sine \
+      --enable-indev=lavfi \
+ && make -j"$(nproc)" \
+ && make install
+# Belt-and-suspenders runtime version-string assertion (36-RESEARCH.md "FFmpeg
+# version/CVE guard"): the git rev-parse guard above only proves the SOURCE
+# was pinned correctly -- this proves the COMPILED BINARY that lands in the
+# runtime stage actually reports 8.1.2, catching a configure/build
+# misconfiguration that silently links a different ffmpeg found on PATH.
+RUN /usr/local/bin/ffmpeg -version | grep -q "ffmpeg version n\?8\.1\.2" \
+ || { echo "FATAL: built ffmpeg does not report version 8.1.2" >&2; exit 1; }
+
+# Runtime stage: av engine needs ffmpeg/ffprobe + their runtime shared libs.
+# ROADMAP SC1's "Debian apt 5.1.x with CVE backports" wording is SUPERSEDED
+# by D-01/D-10 (from-source n8.1.2 build above) -- SC1's INTENT
+# (version-pinned, CVE-clean, fail-loud) is satisfied by the from-source
+# approach; this is not a deviation from the roadmap, just a stronger
+# implementation of the same intent.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libx264-164 libx265-199 libvpx7 libopus0 libmp3lame0 libwebp7 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=ffmpeg-build /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-build /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+COPY --from=build /out/av-worker /usr/local/bin/av-worker
+# Run unprivileged: the worker shells out to untrusted-input engines.
+USER nobody
+# The av engine is a single synchronous ffmpeg/ffprobe CLI invocation per job
+# (no forking daemon like LibreOffice's oosplash->soffice.bin), so -- matching
+# Dockerfile.worker's/Dockerfile.audio-worker's own documented rationale for
+# the image/audio engines -- there is no orphaned-grandchild risk here and no
+# init/reaper is needed as PID 1.
+ENTRYPOINT ["/usr/local/bin/av-worker"]
