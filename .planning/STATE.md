@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: executing
-stopped_at: Phase 35 planned (7 plans, 3 waves) — ready to execute
-last_updated: "2026-07-20T22:56:21.501Z"
+status: ready_to_plan
+stopped_at: Phase 35 complete (7/7) — ready to discuss Phase 36
+last_updated: 2026-07-22T02:35:34.640Z
 last_activity: 2026-07-20 -- Phase 35 execution started
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 10
-  completed_plans: 3
+  completed_plans: 10
   percent: 25
 ---
 
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 35 — queue-worker-routing-integration
+**Current focus:** Phase 36 — containerization & rtf measured timeout
 
 ## Current Position
 
-Phase: 35 (queue-worker-routing-integration) — EXECUTING
-Plan: 1 of 7
-Status: Executing Phase 35
-Last activity: 2026-07-20 -- Phase 35 execution started
+Phase: 36
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-22
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 87 (all v1.0–v1.7)
+- Total plans completed: 94 (all v1.0–v1.7)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -74,7 +74,7 @@ Last activity: 2026-07-20 -- Phase 35 execution started
 | 32 | 5 | - | - |
 | 33 | 3 | - | - |
 | 34 | 3 | - | - |
-| 35 | TBD | - | - |
+| 35 | 7 | - | - |
 | 36 | TBD | - | - |
 | 37 | TBD | - | - |
 

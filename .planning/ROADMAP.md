@@ -229,7 +229,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 32. Containerization & Local E2E + RTF Gate | v1.7 | 5/5 | Complete    | 2026-07-18 |
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
-| 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete   | 2026-07-22 |
+| 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete    | 2026-07-22 |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
 
