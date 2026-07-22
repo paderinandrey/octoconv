@@ -21,14 +21,30 @@ import "testing"
 // now share five SOURCE formats (mp4/mov/avi/mkv/webm, after D-04). A
 // future edit that adds an overlapping TARGET format to either converter
 // would silently break this invariant without this test.
+// Pairs are compared in NORMALIZED form (NormalizeFormat on both From and To),
+// because that is exactly the key Registry.Register indexes on (convert.go:78).
+// Comparing raw pairs would miss an alias-level collision -- e.g. one converter
+// claiming target "jpeg" and the other "jpg" map to the same registry slot even
+// though the raw Pair values differ (35-SECURITY.md non-blocking observation 1).
+// All current formats are already canonical, so this changes nothing today; it
+// closes the gap against a future alias-form pair being added.
 func TestAVAudioPairDisjointness(t *testing.T) {
-	avPairs := (AVConverter{}).Pairs()
-	audioPairs := (AudioConverter{}).Pairs()
+	norm := func(p Pair) Pair {
+		return Pair{From: NormalizeFormat(p.From), To: NormalizeFormat(p.To)}
+	}
+	avPairs := make([]Pair, 0)
+	for _, p := range (AVConverter{}).Pairs() {
+		avPairs = append(avPairs, norm(p))
+	}
+	audioPairs := make([]Pair, 0)
+	for _, p := range (AudioConverter{}).Pairs() {
+		audioPairs = append(audioPairs, norm(p))
+	}
 
 	for _, p := range avPairs {
 		for _, q := range audioPairs {
 			if p == q {
-				t.Fatalf("pair %+v registered by both AVConverter and AudioConverter, want disjoint", p)
+				t.Fatalf("normalized pair %+v registered by both AVConverter and AudioConverter, want disjoint", p)
 			}
 		}
 	}
