@@ -429,7 +429,7 @@ func (c AVConverter) Convert(ctx context.Context, inPath, outPath string, opts m
 	case "mp4", "webm":
 		return c.convertTranscode(ctx, inPath, outPath, targetFormat, o, src)
 	case "mp3", "wav", "m4a":
-		return c.convertAudioExtract(ctx, inPath, outPath, targetFormat)
+		return c.convertAudioExtract(ctx, inPath, outPath, targetFormat, src)
 	default:
 		return c.convertThumbnail(ctx, inPath, outPath, targetFormat, o, src)
 	}
@@ -537,15 +537,14 @@ func avStreamCopyEligible(target string, o AVOpts, src avSourceProbe) bool {
 // convertAudioExtract implements AVC-03: extract the audio track only
 // (-vn), using "-c:a copy" only when the source is already AAC and the
 // target is m4a, else a target-specific re-encode.
-func (c AVConverter) convertAudioExtract(ctx context.Context, inPath, outPath, target string) error {
-	streamCopy := false
-	if target == "m4a" {
-		srcAudioCodec, err := probeAudioCodec(ctx, inPath)
-		if err != nil {
-			return fmt.Errorf("av: ffprobe: %w", err)
-		}
-		streamCopy = srcAudioCodec == "aac"
-	}
+//
+// The source's audio codec comes from the already-probed src (avProbeSource),
+// NOT a fresh ffprobe (WR-01, Phase 35): re-probing here duplicated a
+// subprocess and violated avSourceProbe's own "probed EXACTLY ONCE" invariant,
+// whose whole point is that the guard's decision and the conversion's decision
+// are provably the same decision on the same bytes.
+func (c AVConverter) convertAudioExtract(ctx context.Context, inPath, outPath, target string, src avSourceProbe) error {
+	streamCopy := target == "m4a" && src.audioCodec == "aac"
 	args := extractAudioArgs(inPath, outPath, target, streamCopy)
 	if args == nil {
 		return fmt.Errorf("av: unsupported audio-extract target %q", target)

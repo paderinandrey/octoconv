@@ -792,7 +792,7 @@ func TestAVStageSentinels_Distinguishable(t *testing.T) {
 	})
 
 	t.Run("audio-extract", func(t *testing.T) {
-		err := c.convertAudioExtract(ctx, missing, filepath.Join(dir, "out.mp3"), "mp3")
+		err := c.convertAudioExtract(ctx, missing, filepath.Join(dir, "out.mp3"), "mp3", src)
 		if err == nil {
 			t.Fatal("convertAudioExtract(missing input) = nil, want error")
 		}
