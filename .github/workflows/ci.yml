@@ -74,6 +74,8 @@ jobs:
             webhook-worker-2.cache-from=type=gha,scope=webhook-worker
             audio-worker.cache-to=type=gha,mode=max,scope=audio-worker
             audio-worker.cache-from=type=gha,scope=audio-worker
+            av-worker.cache-to=type=gha,mode=max,scope=av-worker
+            av-worker.cache-from=type=gha,scope=av-worker
 
   # Tier 4: live E2E against the real compose stack (docker-compose.yml +
   # docker-compose.e2e.yml — the ONLY job referencing the .e2e.yml override,
@@ -108,6 +110,7 @@ jobs:
             webhook-worker-1.cache-from=type=gha,scope=webhook-worker
             webhook-worker-2.cache-from=type=gha,scope=webhook-worker
             audio-worker.cache-from=type=gha,scope=audio-worker
+            av-worker.cache-from=type=gha,scope=av-worker
       - name: Bring up compose stack
         run: docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
         # deliberately NOT --build here: images are already loaded and tagged
