@@ -258,15 +258,42 @@ const avMaxSourceDuration = 4 * time.Hour
 // a resolution decode-bomb.
 const avMaxSourceResolutionHeight = 4320
 
-// avDiskSafetyFactor is the multiplier EnforceMinFreeDisk applies to a
-// probed input file's size when sizing its "at least this much free space"
-// ceiling (D-06/T-36-01). [ASSUMED] 3.0 is Claude's Discretion default per
-// 36-CONTEXT.md -- sized to cover ffmpeg's own working set (decoded frame
-// buffers, muxer staging, an intermediate re-encode) on top of the source
-// and destination files' own footprint, not a value derived from a measured
-// decode/encode disk-usage ratio. cmd/av-worker/main.go (Task 3) makes this
-// overridable via AV_DISK_SAFETY_FACTOR.
-const avDiskSafetyFactor = 3.0
+// avDiskSafetyFactorDefault is the multiplier EnforceMinFreeDisk applies to
+// a probed input file's size when sizing its "at least this much free
+// space" ceiling (D-06/T-36-01), used when SetAVDiskSafetyFactor was never
+// called (avDiskSafetyFactorOverride == 0). [ASSUMED] 3.0 is Claude's
+// Discretion default per 36-CONTEXT.md -- sized to cover ffmpeg's own
+// working set (decoded frame buffers, muxer staging, an intermediate
+// re-encode) on top of the source and destination files' own footprint, not
+// a value derived from a measured decode/encode disk-usage ratio.
+const avDiskSafetyFactorDefault = 3.0
+
+// avDiskSafetyFactorOverride stores the AV_DISK_SAFETY_FACTOR override for
+// every subsequent EnforceMinFreeDisk call inside Convert. Set once at
+// process startup via SetAVDiskSafetyFactor (cmd/av-worker/main.go), BEFORE
+// the asynq server starts consuming tasks -- single write before any
+// concurrent reader, no mutex needed, mirroring SetAudioThreads's contract
+// (whisper.go). Zero means "never set", in which case
+// effectiveAVDiskSafetyFactor falls back to avDiskSafetyFactorDefault.
+var avDiskSafetyFactorOverride float64
+
+// SetAVDiskSafetyFactor stores the AV_DISK_SAFETY_FACTOR override for every
+// subsequent disk-space guard call. Call exactly once at process startup,
+// BEFORE the asynq server starts consuming tasks -- mirrors
+// SetAudioThreads's contract (whisper.go).
+func SetAVDiskSafetyFactor(f float64) {
+	avDiskSafetyFactorOverride = f
+}
+
+// effectiveAVDiskSafetyFactor resolves the configured override when
+// positive, else avDiskSafetyFactorDefault -- mirrors
+// effectiveVeraPDFTimeout's resolver shape (verapdf.go).
+func effectiveAVDiskSafetyFactor() float64 {
+	if avDiskSafetyFactorOverride > 0 {
+		return avDiskSafetyFactorOverride
+	}
+	return avDiskSafetyFactorDefault
+}
 
 // avDefaultThumbnailTimecode is the seek point used when a client requests no
 // timecode at all. It is clamped against the source's real duration by
@@ -473,7 +500,7 @@ func (c AVConverter) Convert(ctx context.Context, inPath, outPath string, opts m
 	if err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
-	if err := EnforceMinFreeDisk(filepath.Dir(inPath), fi.Size(), avDiskSafetyFactor); err != nil {
+	if err := EnforceMinFreeDisk(filepath.Dir(inPath), fi.Size(), effectiveAVDiskSafetyFactor()); err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
 

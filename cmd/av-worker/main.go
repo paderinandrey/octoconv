@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -52,6 +53,32 @@ func main() {
 	defer qc.Close()
 
 	repo := jobs.NewRepo(pool)
+
+	// D-09/Pitfall 4 (Phase 36): re-register a CONFIGURED AVConverter,
+	// overriding the zero-value registration converters.go's init() already
+	// performed -- documented last-write-wins semantics (Registry.Register
+	// is a bare map assignment, converters.go). This MUST run before
+	// srv.Start(mux) below: that is the point asynq's worker goroutines
+	// begin concurrently reading the registered converter, so this single
+	// write must happen-before every concurrent read (no mutex needed, same
+	// happens-before boundary as AUDIO_MODEL_PATH/AUDIO_THREADS in
+	// cmd/audio-worker/main.go).
+	maxDuration := envDurationSeconds("AV_MAX_DURATION_SECONDS", 4*time.Hour)
+	convert.Default.Register(convert.AVConverter{
+		MaxSourceDuration:         maxDuration,
+		MaxSourceResolutionHeight: 4320,
+	})
+
+	// D-06 (Phase 36): AV_DISK_SAFETY_FACTOR threads into the disk-space
+	// guard the SAME env-only-in-main + setter convention as
+	// AUDIO_MODEL_PATH/AUDIO_THREADS -- internal/convert never reads any env
+	// var directly. Must also complete before srv.Start(mux) below.
+	diskSafetyFactor := envFloat("AV_DISK_SAFETY_FACTOR", 3.0)
+	convert.SetAVDiskSafetyFactor(diskSafetyFactor)
+
+	threads, threadSource := resolveAVThreads()
+	log.Printf("🧵 AV_MAX_DURATION_SECONDS=%v AV_DISK_SAFETY_FACTOR=%.2f threads=%d (source=%s)",
+		maxDuration, diskSafetyFactor, threads, threadSource)
 
 	h := worker.NewHandler(
 		repo,
@@ -147,6 +174,69 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// envDurationSeconds reads a duration env var whose _SECONDS-suffixed name
+// invites a bare integer-seconds value (WR-05, cloned verbatim from
+// cmd/audio-worker/main.go): time.ParseDuration alone REJECTS "14400"
+// ("missing unit in duration"), and the codebase-wide silent-fallback
+// pattern would then quietly replace an operator's explicit ceiling with
+// the default -- unacceptable for a fail-closed resource guard. Accepts, in
+// order: Go duration syntax ("4h", "14400s") and bare non-negative integer
+// seconds ("14400"), both tolerant of a trailing inline comment via
+// firstField (same convention as envDuration/envInt). A set-but-unparseable
+// value is logged before falling back to def -- this env guards a security
+// ceiling, so the fallback must never be silent.
+func envDurationSeconds(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f := firstField(v)
+	// WR-02 (review, audio precedent): both parse branches reject negatives
+	// -- a negative ceiling makes EnforceMaxDuration (d > max) terminally
+	// reject EVERY job, so "-5s"/"-30m" must fall through to the
+	// logged-warning default below, never be returned silently. Zero stays
+	// valid: it is an explicit reject-everything ceiling, consistent with
+	// the bare-integer branch's sec >= 0.
+	if d, err := time.ParseDuration(f); err == nil && d >= 0 {
+		return d
+	}
+	if sec, err := strconv.Atoi(f); err == nil && sec >= 0 {
+		return time.Duration(sec) * time.Second
+	}
+	log.Printf("⚠️ %s=%q is neither a duration (\"4h\") nor bare integer seconds (\"14400\"); using default %v", key, f, def)
+	return def
+}
+
+// envFloat reads a float env var (AV_DISK_SAFETY_FACTOR), tolerant of a
+// trailing inline comment via firstField (same convention as every other
+// numeric env helper in this file). A set-but-unparseable or non-positive
+// value falls back to def with a logged warning -- this env sizes a
+// fail-closed resource guard, so the fallback must never be silent.
+func envFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f := firstField(v)
+	if n, err := strconv.ParseFloat(f, 64); err == nil && n > 0 {
+		return n
+	}
+	log.Printf("⚠️ %s=%q is not a positive number; using default %v", key, f, def)
+	return def
+}
+
+// resolveAVThreads mirrors av.go's unexported avThreadCount() resolver
+// (CgroupCPULimit -> runtime.NumCPU fallback) so this startup log line can
+// report the SAME thread count Convert will actually use, without exporting
+// avThreadCount itself. An AV_THREADS operator override is deliberately out
+// of scope for this task (plan: "optional and out of scope unless trivial").
+func resolveAVThreads() (int, string) {
+	if n, ok := convert.CgroupCPULimit(); ok {
+		return n, "cgroup"
+	}
+	return runtime.NumCPU(), "NumCPU fallback"
 }
 
 func firstField(s string) string {
