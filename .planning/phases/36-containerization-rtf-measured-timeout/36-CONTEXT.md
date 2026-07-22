@@ -45,6 +45,20 @@ Ship a running `av-worker` container in docker-compose that passes a full live E
 
 - **D-08: The `av-worker` compose service + CI bake matrix entry land here, and `AV_ENGINE_TIMEOUT`/`AV_MAX_RETRY` propagate identically across every `queue.NewClient()`-constructing service (IN-02).** This is the compose-parity item explicitly deferred from Phase 35 (docker-compose was consistent-by-default there because no service set `AV_*`; the moment the measured timeout is set on one service it must be set on all, or `AVUniqueTTL` diverges between enqueuer and consumer → silent duplicate processing). ShutdownTimeout = measured `AV_ENGINE_TIMEOUT + 10s` on the av-worker service.
 
+### VP9 RTF worst-case — measure-first (operator decision 2026-07-22)
+
+- **D-09: The VP9/webm RTF worst-case is resolved by MEASUREMENT, not pre-committed in the plan.** Research surfaced that `transcodeToWebMArgs` measured RTF ≈ 1.41 (slower than real time, untuned) in this project's own 35-RESEARCH data — likely the true worst-case cell, above HEVC. Operator chose to measure before deciding. Therefore the plan MUST:
+  - Measure BOTH the VP9 and HEVC worst-case cells in the RTF matrix (do not assume HEVC is worst).
+  - Keep the two remediation paths as explicit, operator-gated branches decided AFTER the measurement prints its p95 RTF, NOT baked into the plan up front:
+    - **Path A (speed):** add VP9 tuning (`-row-mt 1`, `-cpu-used`, `-deadline good`) to `transcodeToWebMArgs` — a Phase 34 argv-builder change + its argv-pinning tests, must not disturb the AVE-02 protocol-whitelist flags.
+    - **Path B (capacity lever):** accept untuned VP9 and lower `AV_MAX_DURATION_SECONDS` to keep the derived timeout under the 900s reconciler cap (Phase 32's documented NO-GO lever, verbatim).
+  - Wire `AV_MAX_DURATION_SECONDS` so the chosen value plugs in cleanly. Research flagged that `AVConverter` is a zero-field struct with hardcoded consts registered via `init()` — there is no current mechanism to thread an env-derived duration ceiling through it. The plan must resolve this (recommended: struct field + register-at-startup instead of `init()`), and this refactor touches Phase 34's registration path, so treat it as a real task, not a one-liner.
+  - This branch decision is part of the SUPERVISED go/no-go gate (D-05): the operator reads the measured RTF and picks Path A or B. The plan makes both executable; the measurement selects.
+
+### FFmpeg pin — resolved by research (n8.1.2, CVE-clean)
+
+- **D-10: Pin ffmpeg to tag `n8.1.2`, commit `38b88335f99e76ed89ff3c93f877fdefce736c13`.** Research verified live via git that this is the latest stable 8.x and that the commit already contains the CVE-2026-8461 (PixelSmash) fix (`git merge-base --is-ancestor`, cross-referenced against JFrog/BleepingComputer writeups). NOTE: this is an ANNOTATED tag, so pin by the PEELED commit above, not the tag-object hash — the whisper.cpp lightweight-tag pattern (hash == commit) does not transfer directly; the build guard must `rev-parse` the peeled commit. Matches the host's 8.1.2, keeping the RTF measurement valid. Minimal `--disable-everything` + selective `--enable-*` build (libx264/libx265/libvpx_vp9/libopus/libmp3lame/libwebp + native aac/png/mjpeg/pcm) confirmed feasible; a live decoder-completeness smoke-test against real uploads is a required pre-ship gate. ffmpeg `runtime_cpudetect` is on by default — do NOT pass `--cpu=host`/`--disable-runtime-cpudetect`; no whisper-style portability flag needed.
+
 ### Claude's Discretion
 
 - Exact ffmpeg configure flags / codec libraries to enable (must cover the AVOpts allowlist: libx264, libx265, libvpx-vp9, libopus, aac/faststart; disable what's not needed to shrink the image and attack surface).
