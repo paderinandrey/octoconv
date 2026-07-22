@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: ready_to_plan
-stopped_at: Phase 35 complete (7/7) — ready to discuss Phase 36
-last_updated: 2026-07-22T02:35:34.640Z
-last_activity: 2026-07-20 -- Phase 35 execution started
+status: executing
+stopped_at: Completed 36-01-PLAN.md (disk-space guard + AVConverter config-threading)
+last_updated: "2026-07-22T14:41:46.968Z"
+last_activity: 2026-07-22
 progress:
   total_phases: 4
-  completed_phases: 1
-  total_plans: 10
-  completed_plans: 10
-  percent: 25
+  completed_phases: 2
+  total_plans: 14
+  completed_plans: 11
+  percent: 50
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 36 — containerization & rtf measured timeout
+**Current focus:** Phase 36 — containerization-rtf-measured-timeout
 
 ## Current Position
 
-Phase: 36
-Plan: Not started
-Status: Ready to plan
+Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-07-22
 
 ## Performance Metrics
@@ -84,6 +84,7 @@ Last activity: 2026-07-22
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 36 P01 | 15min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -97,6 +98,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - **New resource axis — disk-space/ephemeral-storage guard (Phase 36):** video decode/transcode has no prior codebase precedent for a disk-space ceiling (no earlier engine class needed one); must be sized explicitly during containerize/measure, not assumed-safe by analogy to CPU/RAM guards.
 - **FFmpeg decoder RCE surface — pin ffmpeg ≥8.1.2, not floating `apt-get install` (Phase 36):** a live June-2026 disclosure (CVE-2026-8461 "PixelSmash") achieved RCE via a 50KB crafted file against comparable services; this project has no existing dependency-advisory-tracking process — flagged as accepted-risk/tech-debt to revisit, not assumed durable after a one-time pin.
 - **Open question carried into planning — upload-size ceiling for video:** `MAX_UPLOAD_BYTES` is currently one global value enforced before content-type detection runs; video files are legitimately much larger than other engine classes' typical inputs, and raising the global ceiling weakens DoS posture for all other classes too. Must be an explicit named decision during Phase 34/36 planning, not an implicit side effect of picking a video-friendly number.
+- [Phase 36]: avDiskSafetyFactorDefault=3.0 is an explicit [ASSUMED] Claude's Discretion default, overridable via AV_DISK_SAFETY_FACTOR — No measured ffmpeg disk-usage ratio existed at Plan 01 time to derive a better default from
 
 ### Quick Tasks Completed
 
@@ -168,9 +170,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-20T22:40:21.997Z
-Stopped at: Phase 35 planned (7 plans, 3 waves) — ready to execute
-Resume file: .planning/phases/35-queue-worker-routing-integration/35-01-PLAN.md
+Last session: 2026-07-22T14:41:46.959Z
+Stopped at: Completed 36-01-PLAN.md (disk-space guard + AVConverter config-threading)
+Resume file: .planning/phases/36-containerization-rtf-measured-timeout/36-02-PLAN.md
 
 ## Operator Next Steps
 
