@@ -174,11 +174,15 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 **Depends on**: Phase 35 (needs the queue/worker contract stable before containerizing; timeout measurement must follow the opts allowlist closing in Phase 34, not precede it)
 **Requirements**: AVE-04
 **Success Criteria** (what must be TRUE):
-  1. `Dockerfile.av-worker` installs a version-pinned Debian `ffmpeg` package (exact `apt-get install ffmpeg=<version>` pin, per STACK.md — Debian backports CVE fixes into 5.1.x; the CVE-2026-8461 backport status is verified against the Debian security tracker during planning, fail-loud if unfixed), and an `av-worker` compose service transcodes/extracts/thumbnails an uploaded file end-to-end through the live compose stack (upload → poll → presigned download) with a signed webhook confirmed.
+  1. `Dockerfile.av-worker` ships a version-pinned, CVE-clean ffmpeg with fail-loud verification (SUPERSEDED by CONTEXT D-01/D-10: built from PINNED SOURCE — tag `n8.1.2`, peeled commit `38b88335f99e76ed89ff3c93f877fdefce736c13`, verified to contain the CVE-2026-8461 fix — NOT `apt-get install ffmpeg`; the original apt-5.1.x wording is retired, its intent — pinned, CVE-clean, fail-loud build guard — preserved), and an `av-worker` compose service transcodes/extracts/thumbnails an uploaded file end-to-end through the live compose stack (upload → poll → presigned download) with a signed webhook confirmed.
   2. `AV_ENGINE_TIMEOUT` is derived from a measured RTF matrix spanning the codec × resolution × preset combinations exposed by the closed `AVOpts` allowlist (not a single fixture), with any NO-GO lever applied and documented like Phase 32's audio precedent.
   3. A new disk-space/ephemeral-storage guard and cgroup-derived `-threads`/RAM sizing (mirroring `CgroupCPULimit()`) are wired and verified against the container's real resource ceiling.
   4. The `av-worker` image is added to the CI bake matrix with its `AV_ENGINE_TIMEOUT`/`AV_WORKER_CONCURRENCY`/ShutdownTimeout env wired, and all queue-client-constructing services propagate the new env identically (IN-02 pattern).
-**Plans**: TBD
+**Plans**: 4 plans (3 waves)
+- [ ] 36-01-PLAN.md — disk-space guard (D-06) + AVConverter config-threading refactor (D-09) + cmd/av-worker env wiring (AVE-04)
+- [ ] 36-02-PLAN.md — Dockerfile.av-worker (from-source ffmpeg n8.1.2, fail-loud pin guard, minimal codec build) + scripts/av-rtf-measure.sh (VP9+HEVC matrix) (AVE-04)
+- [ ] 36-03-PLAN.md — av-worker compose service + IN-02 AV_* env parity (8 services) + CI bake + .env.example (AVE-04)
+- [ ] 36-04-PLAN.md — SUPERVISED RTF measurement run + go/no-go + Path A/B selection + finalize measured timeout + live E2E (AVE-04)
 
 ### Phase 37: KEDA/Helm Chart Integration
 **Goal**: The av class autoscales in the cluster with production parity to the other four engine classes, and scale-from-zero is live-proven.
@@ -230,7 +234,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 33. KEDA/Helm Chart Integration | v1.7 | 3/3 | Complete    | 2026-07-18 |
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
 | 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete    | 2026-07-22 |
-| 36. Containerization & RTF-Measured Timeout | v1.8 | 0/TBD | Not started | - |
+| 36. Containerization & RTF-Measured Timeout | v1.8 | 0/4 | Planned | - |
 | 37. KEDA/Helm Chart Integration | v1.8 | 0/TBD | Not started | - |
 
 ---
