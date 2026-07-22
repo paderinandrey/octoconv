@@ -106,3 +106,7 @@ None - no external service configuration required. `AV_MAX_DURATION_SECONDS` and
 ---
 *Phase: 36-containerization-rtf-measured-timeout*
 *Completed: 2026-07-22*
+
+## Self-Check: PASSED
+
+All created/modified files verified present on disk; all task commit hashes (`53d4f41`, `e83d07a`, `74bfd68`) and the summary-doc commit (`00b67fa`) verified present in `git log --oneline --all`.
