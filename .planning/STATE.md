@@ -4,13 +4,13 @@ milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
 status: executing
 stopped_at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
-last_updated: "2026-07-22T15:09:56.165Z"
+last_updated: "2026-07-22T15:17:58.665Z"
 last_activity: 2026-07-22
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
   percent: 50
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 ## Current Position
 
 Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
-Plan: 3 of 4
+Plan: 4 of 4
 Status: Ready to execute
 Last activity: 2026-07-22
 
@@ -86,6 +86,7 @@ Last activity: 2026-07-22
 *Updated after each plan completion*
 | Phase 36 P01 | 15min | 3 tasks | 6 files |
 | Phase 36 P02 | 30min | 2 tasks | 2 files |
+| Phase 36 P03 | 20min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -101,6 +102,8 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - **Open question carried into planning — upload-size ceiling for video:** `MAX_UPLOAD_BYTES` is currently one global value enforced before content-type detection runs; video files are legitimately much larger than other engine classes' typical inputs, and raising the global ceiling weakens DoS posture for all other classes too. Must be an explicit named decision during Phase 34/36 planning, not an implicit side effect of picking a video-friendly number.
 - [Phase 36]: avDiskSafetyFactorDefault=3.0 is an explicit [ASSUMED] Claude's Discretion default, overridable via AV_DISK_SAFETY_FACTOR — No measured ffmpeg disk-usage ratio existed at Plan 01 time to derive a better default from
 - [Phase 36]: lavfi/testsrc/sine/wrapped_avframe + format/aformat/aresample/zlib/webp-muxer added to Dockerfile.av-worker's minimal ffmpeg build — beyond RESEARCH.md's flag list; required for the RTF measurement script's lavfi fixture synthesis AND for production audio-resample/png/webp-thumbnail paths, confirmed via live smoke test of the full av.go argv suite
+- [Phase 36]: audio-worker's own env block also needed the IN-02 AV_MAX_RETRY/AV_ENGINE_TIMEOUT parity pair (constructs queue.NewClient() too) -- caught by the plan's own grep-count-8 acceptance criterion before commit — IN-02 parity must hold across every queue.NewClient()-constructing process, not just the ones named in prose
+- [Phase 36]: AV_MAX_DURATION_SECONDS/AV_DISK_SAFETY_FACTOR excluded from IN-02 docker-compose parity — only av-worker's own process reads them; queue.NewClient() never touches either var, so parity does not apply
 
 ### Quick Tasks Completed
 
@@ -172,9 +175,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-22T15:09:56.155Z
+Last session: 2026-07-22T15:16:19.678Z
 Stopped at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
-Resume file: .planning/phases/36-containerization-rtf-measured-timeout/36-03-PLAN.md
+Resume file: None
 
 ## Operator Next Steps
 
