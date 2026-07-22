@@ -109,6 +109,12 @@ services:
       # constructing services (RTF-measured, 32-03-SUMMARY.md).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- AVUniqueTTL is
+      # derived from these unconditionally in every queue.NewClient()-
+      # constructing process; must be byte-identical across all 8 services
+      # (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       STORAGE_TTL: "168h"
       METRICS_ADDR: "127.0.0.1:9090"
       # WEBHOOK_ALLOW_PRIVATE_IPS / WEBHOOK_ALLOW_INSECURE_HTTP: deliberately
@@ -155,6 +161,10 @@ services:
       # constructing services (RTF-measured, 32-03-SUMMARY.md).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -208,6 +218,10 @@ services:
       # out of scope).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   webhook-worker-2:
@@ -251,6 +265,10 @@ services:
       # out of scope).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   document-worker:
@@ -297,6 +315,10 @@ services:
       # constructing services (RTF-measured, 32-03-SUMMARY.md).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       VERAPDF_TIMEOUT: "60s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
@@ -342,6 +364,10 @@ services:
       # constructing services (RTF-measured, 32-03-SUMMARY.md).
       AUDIO_MAX_RETRY: "3"
       AUDIO_ENGINE_TIMEOUT: "742s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       METRICS_ADDR: "127.0.0.1:9090"
     # /dev/shm sizing as a belt-and-suspenders compensating control
     # alongside the --disable-dev-shm-usage argv flag (D-09/Pitfall C) --
@@ -410,6 +436,10 @@ services:
       DOCUMENT_ENGINE_TIMEOUT: "300s"
       HTML_MAX_RETRY: "3"
       HTML_ENGINE_TIMEOUT: "60s"
+      # IN-02 (Phase 36): same requirement, av engine -- must be
+      # byte-identical across all 8 services (36-03-SUMMARY.md).
+      AV_MAX_RETRY: "2"
+      AV_ENGINE_TIMEOUT: "600s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
