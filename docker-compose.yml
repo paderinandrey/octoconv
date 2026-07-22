@@ -419,6 +419,79 @@ services:
           cpus: "2.0"
           memory: 1g
 
+  # ffmpeg is source-built with a minimal --disable-everything codec set
+  # (Dockerfile.av-worker, Phase 36 Plan 02) -- no platform: pin needed
+  # (ffmpeg runtime CPU dispatch, 36-RESEARCH.md Pattern 3, mirrors the
+  # audio-worker/chromium-worker precedent, unlike document-worker's
+  # veraPDF-forced amd64 pin).
+  av-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.av-worker
+    container_name: octoconv-av-worker
+    restart: always
+    # cmd/av-worker sets asynq ShutdownTimeout = AV_ENGINE_TIMEOUT (600s
+    # provisional, below) + 10s = 610s so an in-flight ffmpeg transcode
+    # survives SIGTERM instead of being aborted+requeued. Docker's default
+    # SIGKILL window is 10s, which would make that graceful window dead
+    # configuration -- grant 610s + 10s margin so the code's window is
+    # actually reachable under compose (mirrors audio-worker's WR-05
+    # precedent). BOTH the timeout and this margin are PROVISIONAL --
+    # finalized by Plan 04's supervised RTF measurement (D-05/AVE-04).
+    stop_grace_period: 620s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://octo:octo-pass@postgres:5432/octo_db
+      REDIS_ADDR: redis:6379
+      S3_ENDPOINT: minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: octoconv
+      S3_USE_SSL: "false"
+      AV_WORKER_CONCURRENCY: "2"
+      # PROVISIONAL (Phase 35 D-05 placeholder, .env.example) -- Plan 04's
+      # scripts/av-rtf-measure.sh matrix run finalizes the real value
+      # (AVE-04). Coupled to stop_grace_period above and to
+      # RECONCILER_ACTIVE_STALE_AFTER (900s global cap, webhook-worker-1/-2
+      # below): must stay under that cap, never raised alongside it
+      # (32-03-SUMMARY.md near-miss precedent).
+      AV_ENGINE_TIMEOUT: "600s"
+      AV_MAX_RETRY: "2" # D-03 LOCKED -- fewer attempts, longer backoff
+      # PROVISIONAL 4h ceiling (av.go's const default). This is the NO-GO
+      # lever: if Plan 04's measured AV_ENGINE_TIMEOUT would breach the 900s
+      # reconciler cap, lower THIS value instead of raising the cap or the
+      # timeout (mirrors AUDIO_MAX_DURATION_SECONDS's Phase 32 precedent,
+      # 32-03-SUMMARY.md).
+      AV_MAX_DURATION_SECONDS: "14400"
+      # queue.NewClient() (constructed by cmd/av-worker/main.go) also reads
+      # every OTHER engine class's retry/timeout vars unconditionally, even
+      # though this process only runs the av engine (DEBT-05).
+      IMAGE_MAX_RETRY: "4"
+      ENGINE_TIMEOUT: "120s"
+      DOCUMENT_MAX_RETRY: "3"
+      DOCUMENT_ENGINE_TIMEOUT: "300s"
+      HTML_MAX_RETRY: "3"
+      HTML_ENGINE_TIMEOUT: "60s"
+      AUDIO_MAX_RETRY: "3"
+      AUDIO_ENGINE_TIMEOUT: "742s"
+      METRICS_ADDR: "127.0.0.1:9090"
+    deploy:
+      resources:
+        limits:
+          # Fleet baseline (D-11); must match the RTF-measurement container
+          # exactly, mirrors audio-worker's precedent.
+          cpus: "2.0"
+          # PROVISIONAL 1g (audio-worker baseline). Open Question 4 (audio's
+          # 1g vs chromium's 2g) is resolved by Plan 04's measurement's
+          # peak-RSS observation, not assumed here.
+          memory: 1g
+
   # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
   # only, never 0.0.0.0 — no auth layer needed since it's unreachable outside
   # the host, matching the internal-only trust model (D-18/T-04-14). Image
