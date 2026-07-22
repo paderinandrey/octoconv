@@ -42,7 +42,20 @@ var avThumbnailExtractTargets = []string{"jpg", "png", "webp"}
 // directly against a real ffmpeg/ffprobe binary but deliberately NOT
 // registered into convert.Default (Phase 34 scope fence, mirrors Phase 30's
 // own AudioConverter fence) -- registration is Phase 35's responsibility.
-type AVConverter struct{}
+//
+// MaxSourceDuration and MaxSourceResolutionHeight (D-09/Pitfall 4, Phase 36)
+// let an operator-configured instance override the guard ceilings without
+// editing package consts -- a zero value on either field falls back to
+// avMaxSourceDuration/avMaxSourceResolutionHeight (resolved in Convert),
+// so a bare AVConverter{} is provably identical to the pre-Phase-36 behavior:
+// every existing caller/test that constructs AVConverter{} is unaffected.
+// cmd/av-worker/main.go re-registers a configured instance at startup from
+// AV_MAX_DURATION_SECONDS, overriding the zero-value registration in
+// converters.go's init().
+type AVConverter struct {
+	MaxSourceDuration         time.Duration
+	MaxSourceResolutionHeight int
+}
 
 // Pairs returns the locked pair set (34-RESEARCH.md Open Question 1,
 // RESOLVED 34-03 Task 1): transcode {mov,avi,mkv,webm}->mp4 plus mp4->webm
@@ -245,6 +258,16 @@ const avMaxSourceDuration = 4 * time.Hour
 // a resolution decode-bomb.
 const avMaxSourceResolutionHeight = 4320
 
+// avDiskSafetyFactor is the multiplier EnforceMinFreeDisk applies to a
+// probed input file's size when sizing its "at least this much free space"
+// ceiling (D-06/T-36-01). [ASSUMED] 3.0 is Claude's Discretion default per
+// 36-CONTEXT.md -- sized to cover ffmpeg's own working set (decoded frame
+// buffers, muxer staging, an intermediate re-encode) on top of the source
+// and destination files' own footprint, not a value derived from a measured
+// decode/encode disk-usage ratio. cmd/av-worker/main.go (Task 3) makes this
+// overridable via AV_DISK_SAFETY_FACTOR.
+const avDiskSafetyFactor = 3.0
+
 // avDefaultThumbnailTimecode is the seek point used when a client requests no
 // timecode at all. It is clamped against the source's real duration by
 // convertThumbnail, so it is a preference rather than a hard floor (CR-04).
@@ -413,15 +436,44 @@ func (c AVConverter) Convert(ctx context.Context, inPath, outPath string, opts m
 
 	// Guard stage (AVE-02/T-34-12): duration + resolution ceilings enforced
 	// BEFORE any ffmpeg encode/decode -- multi-axis decompression-bomb
-	// defense, both fail-closed and independently required.
+	// defense, both fail-closed and independently required. maxDuration/
+	// maxHeight resolve c's configured fields when non-zero, else fall back
+	// to the package-const defaults (D-09/Pitfall 4) -- mirrors
+	// api.NewServer's zero-value-defaulting-in-constructor pattern, so a
+	// bare AVConverter{} enforces exactly today's 4h/4320 ceilings.
+	maxDuration := c.MaxSourceDuration
+	if maxDuration == 0 {
+		maxDuration = avMaxSourceDuration
+	}
+	maxHeight := c.MaxSourceResolutionHeight
+	if maxHeight == 0 {
+		maxHeight = avMaxSourceResolutionHeight
+	}
+
 	src, err := avProbeSource(ctx, inPath)
 	if err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
-	if err := enforceMaxDurationOf(src.duration, avMaxSourceDuration); err != nil {
+	if err := enforceMaxDurationOf(src.duration, maxDuration); err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
-	if err := enforceMaxResolutionOf(src.videoStreams, avMaxSourceResolutionHeight); err != nil {
+	if err := enforceMaxResolutionOf(src.videoStreams, maxHeight); err != nil {
+		return fmt.Errorf("av: %w", err)
+	}
+
+	// Disk-space guard (D-06/T-36-01): fail-closed BEFORE the expensive
+	// ffmpeg subprocess, same guard-before-expensive-work discipline as the
+	// duration/resolution checks above. Sized proportional to the already-
+	// on-disk input file (inPath was already downloaded from S3 by this
+	// point), not the eventual output -- the guard's job is to bound
+	// ffmpeg's OWN working-set footprint (decode buffers, muxer staging,
+	// intermediate re-encode data) relative to what is already known to
+	// exist on disk.
+	fi, err := os.Stat(inPath)
+	if err != nil {
+		return fmt.Errorf("av: %w", err)
+	}
+	if err := EnforceMinFreeDisk(filepath.Dir(inPath), fi.Size(), avDiskSafetyFactor); err != nil {
 		return fmt.Errorf("av: %w", err)
 	}
 

@@ -18,5 +18,11 @@ func init() {
 	// into the upload detection chain (internal/api/handlers.go) in the same
 	// change would ship an engine for formats (mkv/webm) the service cannot
 	// recognize -- see that file for the paired change.
+	//
+	// This zero-value registration is a placeholder ceiling (4h/4320,
+	// avMaxSourceDuration/avMaxSourceResolutionHeight): cmd/av-worker/main.go
+	// re-registers a CONFIGURED AVConverter (MaxSourceDuration derived from
+	// AV_MAX_DURATION_SECONDS) before it starts consuming tasks, using this
+	// same documented last-write-wins semantics (Phase 36/D-09).
 	Default.Register(AVConverter{})
 }

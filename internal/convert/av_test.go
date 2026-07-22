@@ -400,6 +400,66 @@ func TestAVConverter_Contract(t *testing.T) {
 	}
 }
 
+// TestAVConverter_FieldDefaulting_BareStructMatchesPackageConsts pins D-09's
+// core contract (Pitfall 4): a bare (zero-value) AVConverter{} enforces
+// EXACTLY the pre-Phase-36 avMaxSourceDuration (4h)/
+// avMaxSourceResolutionHeight (4320) ceilings. A tiny, fast fixture passes
+// both guards against the zero-value struct, proving the resolver's "0 means
+// use the package default" fallback engages -- every existing caller/test
+// that constructs AVConverter{} is provably unaffected by this refactor.
+func TestAVConverter_FieldDefaulting_BareStructMatchesPackageConsts(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "out.mp3")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := (AVConverter{}).Convert(ctx, src, outPath, nil); err != nil {
+		t.Fatalf("bare AVConverter{}.Convert = %v, want nil (fixture is well under the 4h/4320 defaults)", err)
+	}
+}
+
+// TestAVConverter_FieldDefaulting_ConfiguredDurationRejects proves a
+// non-zero MaxSourceDuration field overrides avMaxSourceDuration AND is
+// actually enforced -- a 2-second fixture must be rejected against a
+// 1-second configured ceiling, with the same ErrAudioDurationExceeded
+// sentinel the reused duration guard (enforceMaxDurationOf) always uses.
+func TestAVConverter_FieldDefaulting_ConfiguredDurationRejects(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "out.mp3")
+
+	c := AVConverter{MaxSourceDuration: 1 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := c.Convert(ctx, src, outPath, nil)
+	if !errors.Is(err, ErrAudioDurationExceeded) {
+		t.Fatalf("Convert with MaxSourceDuration=1s against a 2s fixture = %v, want errors.Is(err, ErrAudioDurationExceeded)", err)
+	}
+}
+
+// TestAVConverter_FieldDefaulting_ConfiguredResolutionRejects proves a
+// non-zero MaxSourceResolutionHeight field overrides
+// avMaxSourceResolutionHeight AND is actually enforced -- the 64px-tall
+// fixture must be rejected against a 32px configured ceiling, with the same
+// ErrAVResolutionExceeded sentinel enforceMaxResolutionOf always uses.
+func TestAVConverter_FieldDefaulting_ConfiguredResolutionRejects(t *testing.T) {
+	requireLiveAVBinaries(t)
+	dir := t.TempDir()
+	src := mustGenerateAVFixture(t, dir, "src.mp4", "-c:v", "libx264", "-c:a", "aac")
+	outPath := filepath.Join(dir, "out.mp3")
+
+	c := AVConverter{MaxSourceResolutionHeight: 32}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := c.Convert(ctx, src, outPath, nil)
+	if !errors.Is(err, ErrAVResolutionExceeded) {
+		t.Fatalf("Convert with MaxSourceResolutionHeight=32 against a 64px fixture = %v, want errors.Is(err, ErrAVResolutionExceeded)", err)
+	}
+}
+
 // TestAVStreamCopyLegal pins avStreamCopyLegal's allowlist (AVC-05/T-34-11):
 // mp4<-h264/aac and webm<-vp9/opus are the ONLY legal combinations -- every
 // other combination, including an unknown target container, is false. Runs
