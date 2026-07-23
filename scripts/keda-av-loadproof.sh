@@ -427,6 +427,28 @@ while [ "$waited" -lt 240 ]; do
 	sleep 5
 	waited=$((waited + 5))
 done
+# Root-cause diagnostics on settle-to-0 failure (captured BEFORE the assert
+# exits): if av-worker never reached 0, the deployed api image + HPA + KEDA
+# state disambiguate the cause. HPA TARGETS `<unknown>` => the
+# octoconv_queue_depth{queue="av"} series is ABSENT (a stale api image whose
+# collector predates QueueAV in AllConvertQueues, or a seed that never
+# resolved) => ignoreNullValues:"false" holds fallback.replicas:1. A `0/1`
+# target => the metric IS a real zero and this is a scale-down timing issue.
+if [ "$AV_REPLICAS_BEFORE" != "0" ]; then
+	DIAG_FILE="$EVIDENCE_DIR/sc3-diagnostics-${RUN_TS}.txt"
+	{
+		echo "# STEP 6 settle-to-0 FAILED (av-worker status.replicas=$AV_REPLICAS_BEFORE after ${waited}s) -- root-cause diagnostics"
+		echo "## deployed api image (a stale api lacks QueueAV in its metrics collector => no octoconv_queue_depth{queue=\"av\"} series)"
+		kubectl get deployment api -n "$NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>&1; echo
+		echo "## HPA (TARGETS <unknown> => metric absent/fallback engaged; 0/1 => metric is a real zero, timing)"
+		kubectl get hpa -n "$NAMESPACE" -o wide 2>&1
+		echo "## ScaledObject status/conditions"
+		kubectl get scaledobject -n "$NAMESPACE" -o yaml 2>&1
+		echo "## keda-operator logs (av scaler errors / fallback)"
+		kubectl logs -n "$KEDA_NAMESPACE" -l app=keda-operator --tail=150 2>&1 | grep -iE 'av|error|fallback' || true
+	} > "$DIAG_FILE" 2>&1
+	echo "DIAGNOSTICS: STEP 6 settle-to-0 failure captured -> $DIAG_FILE"
+fi
 assert_eq "0" "$AV_REPLICAS_BEFORE" "av-worker Deployment status.replicas before any job (genuine zero)"
 
 # ---------------------------------------------------------------------------
