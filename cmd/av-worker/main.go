@@ -84,7 +84,7 @@ func main() {
 		repo,
 		store,
 		convert.Default,
-		envDuration("AV_ENGINE_TIMEOUT", 600*time.Second), // [ASSUMED] provisional, mirrors AUDIO_ENGINE_TIMEOUT's original 600s placeholder precedent (600s -> 742s after Phase 32's RTF measurement); Phase 36 re-derives the real value from an RTF matrix. Coupled to RECONCILER_ACTIVE_STALE_AFTER (global 900s default, docker-compose.yml) -- raising this timeout toward 900s requires raising that threshold too, in the same change (this near-broke the audio engine once).
+		envDuration("AV_ENGINE_TIMEOUT", 600*time.Second), // 600s is now purely a docker-compose.yml-unset fallback default -- the real, RTF-measured/finalized value (753s) was derived by Phase 36 Plan 04's supervised scripts/av-rtf-measure.sh matrix run and is set explicitly in docker-compose.yml/.env.example. Coupled to RECONCILER_ACTIVE_STALE_AFTER (global 900s default, docker-compose.yml) -- raising this timeout toward 900s requires raising that threshold too, in the same change (this near-broke the audio engine once).
 		nil, // webhookRepo — webhook-only; HandleAVConvert never reads it
 		nil, // deliverer — webhook-only; HandleAVConvert never reads it
 		qc,

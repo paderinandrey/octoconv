@@ -49,6 +49,17 @@ completed: 2026-07-23
 
 **AV_ENGINE_TIMEOUT finalized at 753s (Path B lever, AV_MAX_DURATION_SECONDS 14400s->90s) from a measured hevc@1080 worst case (4.179133s p95 RTF, contradicting the plan's VP9-dominance assumption), plus a new fail-closed guard bounding the unbounded no-scale passthrough path to <=1080p to close a live hevc@2160p OOM-DoS vector the measurement discovered.**
 
+## Correction (Phase 36 Plan 05 gap-closure, CR-01/HI-01)
+
+The passthrough-bound guard this plan shipped (`enforceNoScalePassthroughBound`) and the claims below/in `.env.example`/`docker-compose.yml` that it "closes the hevc@2160p OOM-KILL DoS vector" were **incomplete**: the guard only fired when `resolution_height==0` (no-scale) and only checked source Height. Code review (`36-REVIEW.md`) found two gaps this plan's own text did not disclose:
+
+- **CR-01 (CRITICAL):** a fully legal EXPLICIT `resolution_height` request (e.g. `{"resolution_height": 1080, "codec": "hevc"}`) against an oversized source bypassed this guard entirely -- ffmpeg still decodes the full source resolution before any `-vf scale` filter runs, reproducing the identical OOM mechanism this plan measured, just unguarded.
+- **HI-01 (HIGH):** the guard (and the pre-existing 4320p decode-bomb ceiling) checked Height only -- Width was probed but never bounded, so an extreme-width/modest-height source (e.g. 3840x1080) bypassed both memory-safety checks.
+
+Phase 36 Plan 05 (`36-05-SUMMARY.md`) generalized the guard (`enforceReencodeSourceBound`, renamed sentinel `ErrAVReencodeResolutionExceeded`) to fire on EVERY re-encode path (no-scale AND explicit resize alike) and to bound BOTH Height (>1080) and Width (>1920). The **accurate** claim, as of Plan 05: every re-encode (stream-copy remux exempt) is fail-closed bounded to a source envelope of <=1920x1080; re-encoding/downscaling FROM a source larger than 1080p is a **named, deliberate capability limitation** (rejected, not served) pending a future measured decode-then-downscale RTF envelope -- not a silently unaddressed gap.
+
+The historical narrative below (this plan's own account of what it built and why) is left as originally written for the audit trail, but its "closes the OOM DoS vector" framing should be read as **superseded** by the correction above wherever it discusses `enforceNoScalePassthroughBound`/`ErrAVNoScalePassthroughExceeded` (both renamed by Plan 05) or claims the fix was complete.
+
 ## Performance
 
 - **Duration:** ~25 min (Task 3 only; Tasks 1-2 were operator-run at the Docker daemon in a prior session)

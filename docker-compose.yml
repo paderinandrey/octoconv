@@ -513,12 +513,18 @@ services:
       # worst-cell derivation at the 4h ceiling would have breached the
       # 900s/15m reconciler CAP. Path A (VP9 -cpu-used/-deadline tuning) was
       # rejected as ineffective -- it cannot touch the HEVC/mp4 path that
-      # actually dominates (36-04-SUMMARY.md). Passthrough residual
-      # (resolution_height==0 above 1080p source height): disposition (b)
-      # "bound the path" -- fail-closed rejected in internal/convert/av.go
-      # (enforceNoScalePassthroughBound), NOT folded into this ceiling,
-      # closing the hevc@2160p OOM-KILL (exit 137) DoS vector found by this
-      # measurement (36-RESEARCH.md Open Q3 / 36-REVIEW blocker, RESOLVED).
+      # actually dominates (36-04-SUMMARY.md). Source-resolution bound
+      # (36-RESEARCH.md Open Q3 / 36-REVIEW blocker, RESOLVED by Plan 04,
+      # GENERALIZED by Plan 05's CR-01/HI-01 gap-closure): every re-encode
+      # (no-scale passthrough AND an explicit resolution_height resize
+      # alike) is fail-closed rejected in internal/convert/av.go
+      # (enforceReencodeSourceBound) when the source exceeds 1920x1080 on
+      # EITHER axis, NOT folded into this ceiling -- closing the
+      # hevc@2160p OOM-KILL (exit 137) DoS vector found by this measurement
+      # on EVERY re-encode path (not only the no-scale one). Stream-copy
+      # remux is exempt. NAMED capability limitation: re-encoding/
+      # downscaling FROM a source larger than 1080p is rejected, pending a
+      # future measured decode-then-downscale RTF envelope.
       AV_MAX_DURATION_SECONDS: "90"
       # queue.NewClient() (constructed by cmd/av-worker/main.go) also reads
       # every OTHER engine class's retry/timeout vars unconditionally, even
@@ -540,12 +546,14 @@ services:
           cpus: "2.0"
           # VALIDATED at 1g (Phase 36 Plan 04, D-05/AVE-04): every BOUNDED
           # (enum-legal, <=1080p) cell exited 0 cleanly at this limit across
-          # N=10 runs; the only OOM (exit 137) was the now-bounded hevc@2160p
-          # passthrough cell (see AV_MAX_DURATION_SECONDS's disposition (b)
-          # comment above and internal/convert/av.go's
-          # enforceNoScalePassthroughBound). Resolves Open Question 4
-          # (audio's 1g vs chromium's 2g) with a measured-not-assumed answer:
-          # 1g, matching audio-worker's own baseline.
+          # N=10 runs; the only OOM (exit 137) was the hevc@2160p
+          # passthrough cell -- now bounded on EVERY re-encode path, both
+          # Height and Width (see AV_MAX_DURATION_SECONDS's source-resolution
+          # bound comment above and internal/convert/av.go's
+          # enforceReencodeSourceBound, 36-05 gap-closure/CR-01/HI-01).
+          # Resolves Open Question 4 (audio's 1g vs chromium's 2g) with a
+          # measured-not-assumed answer: 1g, matching audio-worker's own
+          # baseline.
           memory: 1g
 
   # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
