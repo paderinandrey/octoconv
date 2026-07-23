@@ -134,15 +134,15 @@ internal/
   api/                — routes, handlers, auth middleware, rate limiting, SSRF guard
   convert/            — Converter interface + registry, hardened exec, engine implementations
   jobs/               — Postgres-backed job repository with guarded state transitions
-  queue/               — asynq task/queue definitions, retry schedules
-  reconciler/           — stranded-job and webhook-gap recovery sweep
-  webhook/             — HMAC signing, delivery, dead-letter tracking
-  storage/             — S3/MinIO client, deterministic object-key layout
-  metrics/             — Prometheus metric definitions
-  presets/             — named-preset resolution (scope precedence, versioning)
-  mcpserver/            — MCP tool implementations (convert_file, get_job_status, …)
-  auth/, clients/      — API-key hashing and client repository
-  db/                  — connection pool + embedded migration runner
+  queue/              — asynq task/queue definitions, retry schedules
+  reconciler/         — stranded-job and webhook-gap recovery sweep
+  webhook/            — HMAC signing, delivery, dead-letter tracking
+  storage/            — S3/MinIO client, deterministic object-key layout
+  metrics/            — Prometheus metric definitions
+  presets/            — named-preset resolution (scope precedence, versioning)
+  mcpserver/          — MCP tool implementations (convert_file, get_job_status, …)
+  auth/, clients/     — API-key hashing and client repository
+  db/                 — connection pool + embedded migration runner
 ```
 
 ## Quick Start
