@@ -1,0 +1,162 @@
+=== Phase 37 av downscale-survival live-proof gate (AVE-05, D-07 proof #2, SC4) ===
+run timestamp: 20260723T203018Z
+evidence dir: .planning/phases/37-keda-helm-chart-integration/evidence
+
+--- STEP 1: preflight ---
+PASS: kubectl reaches the OrbStack cluster (context: orbstack)
+PASS: compose stack is down (0 octoconv-* containers running)
+PASS: octoconv-av-worker:dev present locally
+PASS: KEDA v2.20.1 re-verified resolvable in kedacore/keda (live)
+
+--- STEP 2: helm install KEDA v2.20.1 into namespace keda ---
+NAME: keda
+LAST DEPLOYED: Thu Jul 23 23:30:20 2026
+NAMESPACE: keda
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+:::^.     .::::^:     :::::::::::::::    .:::::::::.                   .^.                  
+7???~   .^7????~.     7??????????????.   :?????????77!^.              .7?7.                 
+7???~  ^7???7~.       ~!!!!!!!!!!!!!!.   :????!!!!7????7~.           .7???7.                
+7???~^7????~.                            :????:    :~7???7.         :7?????7.               
+7???7????!.           ::::::::::::.      :????:      .7???!        :7??77???7.              
+7????????7:           7???????????~      :????:       :????:      :???7?5????7.             
+7????!~????^          !77777777777^      :????:       :????:     ^???7?#P7????7.            
+7???~  ^????~                            :????:      :7???!     ^???7J#@J7?????7.           
+7???~   :7???!.                          :????:   .:~7???!.    ~???7Y&@#7777????7.          
+7???~    .7???7:      !!!!!!!!!!!!!!!    :????7!!77????7^     ~??775@@@GJJYJ?????7.         
+7???~     .!????^     7?????????????7.   :?????????7!~:      !????G@@@@@@@@5??????7:        
+::::.       :::::     :::::::::::::::    .::::::::..        .::::JGGGB@@@&7:::::::::        
+                                                                      ?@@#~                  
+                                                                      P@B^                   
+                                                                    :&G:                    
+                                                                    !5.                     
+                                                                    .Kubernetes Event-driven Autoscaling (KEDA) - Application autoscaling made simple.
+
+Get started by deploying Scaled Objects to your cluster:
+    - Information about Scaled Objects : https://keda.sh/docs/latest/concepts/
+    - Samples: https://github.com/kedacore/samples
+
+Get information about the deployed ScaledObjects:
+  kubectl get scaledobject [--namespace <namespace>]
+
+Get details about a deployed ScaledObject:
+  kubectl describe scaledobject <scaled-object-name> [--namespace <namespace>]
+
+Get information about the deployed TriggerAuthentications:
+  kubectl get triggerauthentication [--namespace <namespace>]
+
+Get details about a deployed TriggerAuthentication:
+  kubectl describe triggerauthentication <trigger-authentication-name> [--namespace <namespace>]
+
+Get an overview of the Horizontal Pod Autoscalers (HPA) that KEDA is using behind the scenes:
+  kubectl get hpa [--all-namespaces] [--namespace <namespace>]
+
+Learn more about KEDA:
+- Documentation: https://keda.sh/
+- Support: https://keda.sh/support/
+- File an issue: https://github.com/kedacore/keda/issues/new/choose
+PASS: KEDA v2.20.1 installed/upgraded, operator Deployments Available
+
+--- STEP 3: waiting for v1beta1.external.metrics.k8s.io to become Available ---
+PASS: v1beta1.external.metrics.k8s.io Available:True
+
+--- STEP 4: helm install octoconv -f values-local.yaml -f values-loadproof.yaml ---
+NAME: octoconv
+LAST DEPLOYED: Thu Jul 23 23:30:43 2026
+NAMESPACE: octoconv
+STATUS: deployed
+REVISION: 1
+DESCRIPTION: Install complete
+TEST SUITE: None
+NOTES:
+OctoConv has been deployed to namespace "octoconv".
+
+In-cluster API URL (for other in-cluster services):
+  http://api.octoconv.svc.cluster.local:8090
+
+Note: /metrics on every pod is NOT publicly exposed — it is intended to be
+scoped by a NetworkPolicy to the observability namespace only (see plan 02).
+Do not assume it is reachable from arbitrary pods in this namespace.
+
+Check pod status:
+  kubectl --context orbstack -n octoconv get pods
+PASS: helm install octoconv complete (async install; readiness gated below)
+
+--- waiting for always-on / min-1 Deployments to become Available ---
+deployment.apps/postgres condition met
+PASS: deployment/postgres Available
+deployment.apps/redis condition met
+PASS: deployment/redis Available
+deployment.apps/minio condition met
+PASS: deployment/minio Available
+deployment.apps/api condition met
+PASS: deployment/api Available
+deployment.apps/prometheus condition met
+PASS: deployment/prometheus Available
+deployment.apps/webhook-worker condition met
+PASS: deployment/webhook-worker Available
+
+--- STEP 4b: seed asynq queue registry (Redis), including av ---
+PASS: redis pod discovered for queue-registry seeding == redis-6b657cd497-9sj2n
+PASS: asynq:queues seeded (image, document, html, audio, av, webhook) -- zero tasks created, no worker processing triggered
+
+--- STEP 5: port-forward api+postgres, mint client key ---
+waiting for port-forwarded /healthz...
+PASS: api reachable via port-forward, /healthz 200 ({"postgres":"ok","redis":"ok","s3":"ok","status":"ok"})
+PASS: minted gate client + API key == [REDACTED, 43 chars]
+
+--- STEP 6: confirm av-worker settles at 0 replicas before triggering ---
+waiting for av-worker to settle at 0 replicas (KEDA cooldownPeriod=180s + margin)...
+PASS: av-worker Deployment status.replicas before SC4 (TRUE zero precondition) == 0
+
+--- STEP 7: synthesize LONG (near-90s, 1080p) + SHORT lavfi fixtures ---
+PASS: LONG lavfi fixture synthesized (85s, 1920x1080, h264/aac in mkv) == -rw-r--r--@ 1 apaderin  staff  3590203 Jul 23 23:31 /var/folders/mq/nc0szqmx2ggc2jj2gj16r58h0000gn/T/tmp.rH3JIjfgFx/av-downscale-long.mkv
+PASS: SHORT lavfi fixture synthesized (3s, 640x360, h264/aac in mkv) == -rw-r--r--@ 1 apaderin  staff  108148 Jul 23 23:31 /var/folders/mq/nc0szqmx2ggc2jj2gj16r58h0000gn/T/tmp.rH3JIjfgFx/av-downscale-short.mkv
+
+--- STEP 8: submit LONG job (hevc@1080 re-encode), confirm active ---
+PASS: SC4: long av job submitted FIRST (hevc@1080, 85s fixture) == 3bcbb855-9bfe-42cf-9d89-bc35d1a89860
+PASS: SC4 -- av-worker scaled 0->1 after long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860
+waiting for long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 to reach status=active (confirms it is genuinely being processed before pod1 identification)...
+PASS: SC4: long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 reaches status=active == active
+
+--- STEP 9: submit SHORT job SECOND, scale to 2, identify + annotate busy pod ---
+PASS: SC4: short av job submitted SECOND == a47114ca-110a-4c89-858b-55c940145450
+PASS: SC4 -- av-worker scaled 1->2 after short job a47114ca-110a-4c89-858b-55c940145450
+PASS: SC4: busy pod (earliest creationTimestamp among Running/non-Terminating) identified == av-worker-798bcfbbbd-5r4j4
+pod/av-worker-798bcfbbbd-5r4j4 annotated
+PASS: SC4 -- pod-deletion-cost=-1000 annotated on busy pod av-worker-798bcfbbbd-5r4j4 (before downscale decision)
+PASS: SC4: busy pod av-worker-798bcfbbbd-5r4j4 spec.terminationGracePeriodSeconds is the PRODUCTION value (783) even under the loadproof overlay == 783
+
+--- STEP 10: start continuous pod-state watcher on busy pod av-worker-798bcfbbbd-5r4j4 ---
+busy-pod snapshot loop started (pid=96760, own process group)
+
+--- STEP 11: wait short job done, wait for genuine 2->1 downscale ---
+waiting for short job a47114ca-110a-4c89-858b-55c940145450 to reach a terminal status...
+PASS: SC4: short job a47114ca-110a-4c89-858b-55c940145450 reaches done == done
+PASS: SC4 -- av-worker downscaled 2->1 after short job completion
+
+--- STEP 12: triple-check -- long job survived the downscale gracefully (no exit-137/SIGKILL) ---
+waiting for long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 to reach a terminal status (bounded, well under AV_ENGINE_TIMEOUT=753s)...
+PASS: SC4(1): long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 reaches done despite the downscale == done
+PASS: SC4(2): exactly one queued->active transition for long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 (no false retry) == 1
+PASS: SC4(3): kubelet Killing event SIGTERM timestamp captured for av-worker-798bcfbbbd-5r4j4 == 2026-07-23T20:32:30Z
+waiting for the pod-status watcher to capture av-worker-798bcfbbbd-5r4j4's terminal state (bounded 90s)...
+termination capture: watcher lines=6
+PASS: SC4(3): pod av-worker-798bcfbbbd-5r4j4 terminated.finishedAt captured (live or via continuous snapshot) == 2026-07-23T20:37:58Z
+PASS: SC4(3): jobs.finished_at captured for long job 3bcbb855-9bfe-42cf-9d89-bc35d1a89860 == 2026-07-2320:37:58.979582+00
+PASS: SC4(3) -- SIGTERM (2026-07-23T20:32:30Z) occurred BEFORE job completion (2026-07-2320:37:58.979582+00)
+PASS: SC4(3) -- pod av-worker-798bcfbbbd-5r4j4 terminated gracefully (reason=Completed exit=0, NOT 137/SIGKILL), well before terminationGracePeriodSeconds=783
+PASS: SC4 evidence -- .planning/phases/37-keda-helm-chart-integration/evidence/sc4-av-downscale-survival-20260723T203018Z.txt
+
+=== ALL 22 ASSERTIONS PASSED ===
+SC4 (AVE-05, D-07 proof #2): long av transcode survived a genuine KEDA/HPA 2->1 downscale via deterministic pod-deletion-cost victim selection -- exactly one queued->active transition, graceful SIGTERM-before-completion exit (never exit-137/SIGKILL), validating terminationGracePeriodSeconds=783 live -- PASS
+Evidence: .planning/phases/37-keda-helm-chart-integration/evidence/sc4-av-downscale-survival-20260723T203018Z.txt, .planning/phases/37-keda-helm-chart-integration/evidence/gate-transcript-downscale-20260723T203018Z.log
+
+=== TEARDOWN (OrbStack must never be left hot) ===
+waiting for octoconv workloads to be gone...
+octoconv namespace deployments remaining: 0
+
+PASS -- Phase 37 av downscale-survival load-proof gate run complete (22 checks). Transcript: .planning/phases/37-keda-helm-chart-integration/evidence/gate-transcript-downscale-20260723T203018Z.log

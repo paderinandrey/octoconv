@@ -1,0 +1,17 @@
+# Phase 37 av downscale-survival evidence -- run 20260723T203018Z
+# long_job_id=3bcbb855-9bfe-42cf-9d89-bc35d1a89860 short_job_id=a47114ca-110a-4c89-858b-55c940145450 busy_pod=av-worker-798bcfbbbd-5r4j4
+# expected_termination_grace_period_seconds=783 observed_pod_spec_grace=783
+read_ts=2026-07-23T20:32:16Z pod=av-worker-798bcfbbbd-5r4j4 ADDED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-23T20:32:30Z pod=av-worker-798bcfbbbd-5r4j4 MODIFIED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-23T20:32:30Z pod=av-worker-798bcfbbbd-5r4j4 MODIFIED phase=Running term_reason= term_exit= term_finished=
+read_ts=2026-07-23T20:37:59Z pod=av-worker-798bcfbbbd-5r4j4 MODIFIED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-23T20:37:58Z
+read_ts=2026-07-23T20:37:59Z pod=av-worker-798bcfbbbd-5r4j4 MODIFIED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-23T20:37:58Z
+read_ts=2026-07-23T20:37:59Z pod=av-worker-798bcfbbbd-5r4j4 DELETED phase=Succeeded term_reason=Completed term_exit=0 term_finished=2026-07-23T20:37:58Z
+
+# SC4 triple-check raw evidence
+sigterm_killing_event_ts=2026-07-23T20:32:30Z
+pod_terminated_reason=Completed
+pod_terminated_exit_code=0
+pod_terminated_finished_at=2026-07-23T20:37:58Z
+job_finished_at=2026-07-2320:37:58.979582+00
+queued_to_active_count=1
