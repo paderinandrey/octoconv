@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
 status: verifying
-stopped_at: Completed 36-04-PLAN.md Task 3 (static verification); live E2E PENDING (operator-run)
-last_updated: "2026-07-23T01:30:53.293Z"
+stopped_at: "Completed 36-05-PLAN.md (gap-closure: generalized AV re-encode source-resolution bound, CR-01/HI-01)"
+last_updated: "2026-07-23T11:12:54.380Z"
 last_activity: 2026-07-23
 progress:
   total_phases: 4
-  completed_phases: 2
-  total_plans: 14
-  completed_plans: 14
-  percent: 50
+  completed_phases: 3
+  total_plans: 15
+  completed_plans: 15
+  percent: 75
 ---
 
 # Project State
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 ## Current Position
 
 Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
-Plan: 4 of 4
-Status: All 4 plans' static work + SUMMARYs done; PHASE NOT COMPLETE -- live compose E2E (D-05, operator-run) is the one remaining gate before Phase 36 can close
+Plan: 5 of 5 (36-05 gap-closure: CR-01/HI-01)
+Status: Phase complete — ready for verification
 Last activity: 2026-07-23
 
 ## Performance Metrics
@@ -88,6 +88,7 @@ Last activity: 2026-07-23
 | Phase 36 P02 | 30min | 2 tasks | 2 files |
 | Phase 36 P03 | 20min | 3 tasks | 3 files |
 | Phase 36 P04 | 25min | 1 tasks | 4 files |
+| Phase 36 P05 | 20min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,8 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - [Phase 36]: Path B NO-GO lever selected: AV_MAX_DURATION_SECONDS lowered 14400s->90s, deriving AV_ENGINE_TIMEOUT=753s; Path A (VP9 tuning) rejected as ineffective
 - [Phase 36]: Passthrough residual disposition (b): resolution_height==0 re-encode bound to <=1080p source height, fail-closed reject, closing the hevc@2160p OOM-DoS vector
 - [Phase 36]: AV_WORKER_CONCURRENCY=1, memory=1g validated from measured peak-RSS/CPU-saturation data
+- [Phase 36]: Generalized enforceNoScalePassthroughBound -> enforceReencodeSourceBound: every re-encode (no-scale AND explicit resolution_height alike) bounded on BOTH source Height (>1080) and Width (>1920), closing CR-01/HI-01
+- [Phase 36]: ErrAVReencodeResolutionExceeded classified terminal in isAVTerminal (predecessor sentinel lacked this classification -- Rule 2 fix)
 
 ### Quick Tasks Completed
 
@@ -180,8 +183,8 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-23T01:30:53.282Z
-Stopped at: Completed 36-04-PLAN.md Task 3 (static verification); live E2E PENDING (operator-run)
+Last session: 2026-07-23T11:12:54.367Z
+Stopped at: Completed 36-05-PLAN.md (gap-closure: generalized AV re-encode source-resolution bound, CR-01/HI-01)
 Resume file: None
 
 ## Operator Next Steps
