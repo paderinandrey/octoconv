@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: milestone_complete
-stopped_at: Milestone complete (Phase 37 was final phase)
-last_updated: 2026-07-23T21:46:12.514Z
-last_activity: 2026-07-23
+status: Awaiting next milestone
+stopped_at: Phase 37 Plan 03 Tasks 1-2 PASS (SC3 scale-from-zero + SC4 downscale-survival live-proven) - Task 3 human-verify checkpoint PENDING operator approval, AVE-05 still open
+last_updated: "2026-07-23T22:07:04.525Z"
+last_activity: 2026-07-23 — Milestone v1.8 completed and archived
 progress:
   total_phases: 4
   completed_phases: 4
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 ## Current Position
 
-Phase: 37
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-07-23
+Phase: Milestone v1.8 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-07-23 — Milestone v1.8 completed and archived
 
 ## Performance Metrics
 
@@ -197,4 +197,4 @@ Resume file: .planning/phases/37-keda-helm-chart-integration/37-03-SUMMARY.md
 
 ## Operator Next Steps
 
-- Start Phase 34 with `/gsd:plan-phase 34`
+- Start the next milestone with /gsd-new-milestone

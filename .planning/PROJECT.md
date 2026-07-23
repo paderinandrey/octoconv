@@ -10,18 +10,21 @@ OctoConv — внутренний асинхронный сервис конве
 
 ## Current State
 
-**v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18.** Четвёртый engine-класс (офлайн whisper.cpp-транскрипция) в полном контуре: fail-closed валидация → async-пайплайн со stage-aware retry → контейнер с RTF-измеренным таймаутом → KEDA scale-from-zero (live-proven). Плюс закрыт hardening-хвост v1.6. Аудит 12/12 требований, интеграция 22/22, E2E 2/2.
-
-**v1.8 в работе — Phase 35 (Queue, Worker & Routing Integration) завершена 2026-07-22.** `AVConverter` подключён к async-пайплайну: очередь `av`, `cmd/av-worker`, роутинг в API и реконсилере, stage-aware retry-классификатор (`isAVTerminal`: transcode-таймаут transient, остальное terminal), `AVUniqueTTL`. Видео→транскрипт едет через существующий audio-воркер (пары `AudioConverter` расширены 16→36, `Engine()` остаётся audio). Дифференциал доказан живьём: один mp4, `webm`→очередь av, `srt`→очередь audio. Верификация 4/4, security 31/31, требования AVE-03/AVT-01. `AV_ENGINE_TIMEOUT`=600s пока `[ASSUMED]` — RTF-замер это Phase 36.
+**v1.8 AV Engine (video/ffmpeg) — SHIPPED 2026-07-23.** Пятый engine-класс — обработка видео через ffmpeg в отдельном `av-worker` — в полном контуре: fail-closed magic-bytes валидация видео-контейнеров (mp4/mov/avi ftyp/RIFF + EBML mkv/webm) → standalone `AVConverter` (транскод / audio-extract / thumbnail, codec-allowlist stream-copy fast-path, каждый ffmpeg/ffprobe с `-protocol_whitelist file,crypto`) → async-пайплайн (очередь `av`, `cmd/av-worker`, stage-aware `isAVTerminal`, `AVUniqueTTL`) → контейнер с ffmpeg **n8.1.2 из исходников** и **RTF-замеренным** `AV_ENGINE_TIMEOUT=753s` (Path B lever от worst-case hevc@1080=4.179s p95; fail-closed re-encode source-bound ≤1920×1080 закрывает OOM-DoS, CR-01/HI-01) → KEDA scale-from-zero + N→N-1 downscale-survival **live-proven** (grace 783s honored, exit 0). Шестой conversion chain видео→транскрипт едет через существующий audio-воркер (не дублирует whisper.cpp). 18 планов; требования AVC-01..05 / AVO-01..03 / AVE-01..05 / AVT-01 validated.
 
 <details>
-<summary>Phase 34 (AV Engine Foundation) — завершена 2026-07-20</summary>
+<summary>v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18</summary>
 
-Standalone `AVConverter` (транскод / извлечение аудио / thumbnail) собран и проверен против живого ffmpeg 8.1.2, плюс магик-байтовые снифферы видео-контейнеров и закрытый `AVOpts` allowlist. Верификация 5/5 критериев, 10/10 требований (AVC-01..05, AVO-01..03, AVE-01/02). Конвертер намеренно **не был зарегистрирован** в `convert.Default` — это сделал Phase 35.
+Четвёртый engine-класс (офлайн whisper.cpp-транскрипция) в полном контуре: fail-closed валидация → async-пайплайн со stage-aware retry → контейнер с RTF-измеренным таймаутом → KEDA scale-from-zero (live-proven). Плюс закрыт hardening-хвост v1.6. Аудит 12/12 требований, интеграция 22/22, E2E 2/2.
 
 </details>
 
-## Current Milestone: v1.8 AV Engine (video/ffmpeg)
+## Next Milestone
+
+_Not yet defined — run `/gsd:new-milestone` to scope the next version. Candidate seeds/backlog: SEED-001 (lesson-recording analysis), AVX-01 (trim/crop opts), AVX-02 (registry cold-pull measurement), and the v1.8 tech-debt tail (av-worker env-parser unit tests, wav-demuxer justification)._
+
+<details>
+<summary>Shipped Milestone: v1.8 AV Engine (video/ffmpeg) — SHIPPED 2026-07-23 (goal & features)</summary>
 
 **Goal:** Пятый engine-класс — обработка видео через ffmpeg в отдельном av-воркере по проверенному паттерну (своя очередь, свой контейнер, свои таймауты, KEDA), включая сквозную цепочку видео → транскрипт через существующий whisper-пайплайн.
 
@@ -32,7 +35,9 @@ Standalone `AVConverter` (транскод / извлечение аудио / t
 - Видео → транскрипт: mp4/mov → txt/srt/vtt/json одним job'ом (ffmpeg-экстракция + whisper)
 - Отдельный `cmd/av-worker`: очередь `av`, Dockerfile с ffmpeg, fail-closed magic-bytes валидация видео-контейнеров, transient/terminal retry, compose + chart + KEDA ScaledObject
 
-**Key context:** воркеры остаются офлайн (ffmpeg локальный, без внешних API); паттерн v1.7 переиспользуется целиком (RTF-гейт → measured timeout, stage-aware retry, IN-02 пропагация, scale-from-zero proof); способ реализации видео→транскрипт (whisper внутри av-контейнера vs межочередная цепочка) решается на research/planning. SEED-001 остаётся в банке семян — не выбран в этот milestone.
+**Key context:** воркеры остаются офлайн (ffmpeg локальный, без внешних API); паттерн v1.7 переиспользуется целиком (RTF-гейт → measured timeout, stage-aware retry, IN-02 пропагация, scale-from-zero proof); способ реализации видео→транскрипт решён — межочередная цепочка на существующий audio-воркер. SEED-001 остаётся в банке семян — не выбран в этот milestone.
+
+</details>
 
 <details>
 <summary>v1.7 Audio Engine & Hardening — SHIPPED 2026-07-18</summary>
@@ -67,6 +72,8 @@ Standalone `AVConverter` (транскод / извлечение аудио / t
 ## Requirements
 
 ### Validated
+
+- ✓ **AV / video engine class (AVC-01..05, AVO-01..03, AVE-01..05, AVT-01) — v1.8** — пятый engine-класс: fail-closed video magic-bytes sniffers, standalone `AVConverter` (transcode/audio-extract/thumbnail, stream-copy fast-path, `-protocol_whitelist file,crypto`), `av` очередь + `cmd/av-worker` + stage-aware retry, ffmpeg n8.1.2-from-source container, RTF-measured `AV_ENGINE_TIMEOUT=753s` + fail-closed re-encode source-bound (OOM-DoS closed), KEDA scale-from-zero + downscale-survival live-proven, видео→транскрипт через audio-воркер (6-я conversion chain)
 
 <!-- Существующий код, вертикальный срез image/libvips на ветке feat/scaffold-and-infra. -->
 
@@ -221,4 +228,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-22 after Phase 35 (Queue, Worker & Routing Integration) completion*
+*Last updated: 2026-07-23 after v1.8 AV Engine (video/ffmpeg) milestone*

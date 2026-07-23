@@ -271,6 +271,35 @@
 - Sessions: 1 длинная оркестрация (фазы 30-33 + закрытие милстоуна); 2 agent-recovery (API-обрыв + операторский k8s-чекпойнт) через SendMessage-resume
 - Notable: RTF-замер и live load-proof — доминирующая стоимость по времени (~22 и ~45 мин прогоны); статические волны шли параллельно в worktree без конфликтов (11 executor-спавнов, 0 merge-конфликтов)
 
+## Milestone: v1.8 — AV Engine (video/ffmpeg)
+
+**Shipped:** 2026-07-23
+**Phases:** 4 (34-37) | **Plans:** 18 | **Tasks:** 42
+
+### What Was Built
+Fifth engine class — video via ffmpeg in a dedicated `av-worker`, following the proven engine-class pattern (own queue/worker/binary/container/KEDA) plus a sixth conversion chain (video→transcript) routed onto the existing audio pipeline instead of duplicating whisper.cpp. Fail-closed video sniffers (mp4/mov/avi ftyp/RIFF + EBML mkv/webm), standalone `AVConverter` (transcode/audio-extract/thumbnail, stream-copy fast-path, protocol-whitelisted), `av` queue + stage-aware retry, ffmpeg n8.1.2-from-source container, RTF-measured `AV_ENGINE_TIMEOUT=753s`, generalized fail-closed re-encode source-bound, KEDA scale-from-zero + downscale-survival live-proven.
+
+### What Worked
+- **Measure-don't-guess held its value again.** The RTF matrix overturned the plan's D-09 VP9-dominance assumption (HEVC actually dominated at 4.18 p95) and surfaced a real hevc@2160p OOM-kill — both invisible without live measurement. Path B lever chosen from data, not a copied constant.
+- **Cloning the audio precedent (Phase 33) verbatim** made Phase 37 fast and low-risk; the plan-checker confirmed clone-fidelity against the live chart.
+- **Operator-gated live gates with an abort-to-operator rule** kept OrbStack safe (0 daemon-wedge incidents across multiple heavy k8s+build runs); every run returned both stacks to DOWN.
+
+### What Was Inefficient
+- **The SC3 load-proof blocked on a stale `octoconv-api:dev` image** whose collector predated `QueueAV` in `AllConvertQueues()` — one wasted ~20-min live run before the root cause (deployed-image currency for a collector-driven autoscaler) was diagnosed. A "rebuild images from HEAD" preflight in the load-proof scripts would have prevented it.
+- **Two bugs surfaced only during live proof** (stale-image collector; WR-05 jsonpath `deletionTimestamp==""` vs `null`), not in static checks — live infra proofs remain irreplaceable but expensive.
+
+### Patterns Established
+- **Adversarial code review as a gate even for "clone" phases:** the Phase 36 review caught that the headline OOM-DoS fix (`enforceNoScalePassthroughBound`) closed only the no-scale path — gap-closure 36-05 generalized it to every re-encode path + both axes (CR-01/HI-01). Verify-then-generalize, don't trust the first fix's own claim.
+- **Self-diagnosing live scripts:** added STEP-6 root-cause diagnostics (HPA `TARGETS <unknown>` vs `0/1`) so a re-run explains itself.
+
+### Key Lessons
+- For a collector-driven KEDA scaler, a brand-new queue class's metric series is absent until the api emits it — `ignoreNullValues:"false"` + `fallback.replicas:1` then pins the class at 1 forever. Deployed-image currency is a first-class correctness input, not an ops detail.
+- A security fix's stated blast-radius must be verified independently — "closes the OOM DoS" was true for one path and false for the general case.
+
+### Cost Observations
+- Model mix: planner opus, executors/verifier/checker sonnet.
+- Notable: heavy live-cluster proofs (image builds + KEDA) dominated wall-clock; the abort-to-operator discipline prevented runaway retries.
+
 ## Cross-Milestone Trends
 
 ### Process Evolution

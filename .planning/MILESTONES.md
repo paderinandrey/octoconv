@@ -1,5 +1,32 @@
 # Milestones
 
+## v1.8 AV Engine (video/ffmpeg) (Shipped: 2026-07-23)
+
+**Phases completed:** 4 phases, 18 plans, 42 tasks
+
+**Key accomplishments:**
+
+- Fail-closed magic-bytes detection for mp4/mov/avi (fixed-offset ftyp/RIFF matchers) and mkv/webm (bounded-peek EBML/DocType walker) added to `internal/convert`, unit-tested against live-verified byte layouts, with a permanent brand-disjointness invariant against the existing image/audio sniffers.
+- Closed AVOpts allowlist (timecode/resolution-height enum/HEVC codec) with distinct x264/x265 CRF constants, a new protocol-whitelisted ffprobe resolution guard, and hardening of the reused duration probe with `-protocol_whitelist file,crypto`.
+- Standalone AVConverter shelling out to ffmpeg/ffprobe: mov/avi/mkv/webm->mp4 (H.264/AAC/+faststart) and mp4->webm (VP9/Opus) transcode with a codec-allowlist-gated stream-copy fast path, audio-extract to mp3/wav/m4a with AAC->m4a stream-copy, and input-side-seek thumbnail extraction to jpg/png/webp -- every ffmpeg/ffprobe invocation hardened with `-protocol_whitelist file,crypto`, live-verified against a real ffmpeg 8.1.2 binary, deliberately unregistered.
+- Split AV's shared ffmpeg-stage error into three errors.Is-distinguishable sentinels, gave whisper.go a video-aware source set with a -map 0:a:0 stream pin and a raised pre-stage budget floor, and pinned AV/Audio pair disjointness with a regression test.
+- Wires the `av` engine class into the queue layer (task type, queue name, task builder, D-03 retry schedule, unique-lock TTL, producer method) and replaces the API's hand-written queue-depth collector list with a derived `AllConvertQueues()` helper guarded by a completeness test (D-06).
+- A stage-aware isAVTerminal classifier (transcode-timeout transient, extract/thumbnail-timeout terminal, D-02) and HandleAVConvert with a distinguishable four-way terminal error_code mapping (timecode_out_of_range/duration_exceeded/resolution_exceeded/no_video_stream), pinned by a test proving isAVTerminal genuinely disagrees with isAudioTerminal.
+- Adds `EnqueueAVConvert` to the API's Enqueuer seam and its routing switch case, rewires `cmd/api/main.go`'s queue-depth collector to the derived `queue.AllConvertQueues()` helper (closing the phase's highest-risk silent seam), and implements D-07's two-tier upload ceiling — a 2 GiB global pre-parse bound plus a per-engine post-detection check that holds image/document/html/audio at their prior 100 MiB effective ceiling.
+- 1. [Rule 1 - Bug] `TestSweepSkipsUnknownEngine` fixture used `Engine: "av"`, which stopped being unroutable after Task 1
+- Registers AVConverter into convert.Default and wires SniffVideo into the upload detection chain in the same change (D-08) -- making video jobs reachable from outside for the first time -- plus the EngineAV opts-dispatch case and the third and final D-06 routing-completeness test.
+- Task 1 — `cmd/av-worker/main.go` (commit `7055b7c`).
+- Fail-closed `EnforceMinFreeDisk` disk-space guard (D-06) via `golang.org/x/sys/unix.Statfs`, plus an `AVConverter` struct-field refactor (D-09/Pitfall 4) that lets `cmd/av-worker` re-register a configured instance from `AV_MAX_DURATION_SECONDS`/`AV_DISK_SAFETY_FACTOR` at startup — no Docker, no measurement, pure-Go and fully `go test`-verified.
+- From-source ffmpeg n8.1.2 av-worker image (CVE-2026-8461-clean, fail-loud pin guard) plus a VP9/HEVC/H264 x 480/720/1080/passthrough RTF measurement script, both live-verified against the full production argv suite
+- 1. [Rule 3 - Blocking issue] audio-worker service missing from Task 2's IN-02 parity edit
+- AV_ENGINE_TIMEOUT finalized at 753s (Path B lever, AV_MAX_DURATION_SECONDS 14400s->90s) from a measured hevc@1080 worst case (4.179133s p95 RTF, contradicting the plan's VP9-dominance assumption), plus a new fail-closed guard bounding the unbounded no-scale passthrough path to <=1080p to close a live hevc@2160p OOM-DoS vector the measurement discovered.
+- Generalized the Phase 36 headline OOM-DoS fix from a no-scale-only, height-only guard to a fail-closed bound on every re-encode path (explicit resize included) checking both source Height (>1080) and Width (>1920), closing code-review findings CR-01 (CRITICAL) and HI-01 (HIGH) and correcting the docs' false "OOM DoS closed" claim.
+- 1. [Rule 1 - Bug] Comment wording in configmap.yaml initially double-counted the grep-gated env-key tokens
+- Two statically-verified live-proof gate scripts (scripts/keda-av-loadproof.sh for scale-from-zero, scripts/keda-av-downscale-survival.sh for N->N-1 downscale survival) plus a values-loadproof.yaml keda.av.scaleDownStabilizationSeconds:15 override, ready for Plan 03's live cluster execution.
+- Rebuilding octoconv-api:dev from current HEAD (which already has QueueAV wired into AllConvertQueues()) resolved the prior BLOCKED run's STEP 6 failure outright, and Task 1 (SC3 scale-from-zero) passed clean on the first attempt; Task 2 (SC4 downscale-survival) then surfaced and fixed a second, independent live bug (an inherited WR-05-class jsonpath defect in the non-frozen keda-av-downscale-survival.sh) before passing all 22 assertions on retry, live-proving that a long hevc@1080 av transcode survives a genuine KEDA/HPA 2->1 downscale under production terminationGracePeriodSeconds=783 with a graceful exit 0.
+
+---
+
 ## v1.7 Audio Engine & Hardening (Shipped: 2026-07-18)
 
 **Phases completed:** 5 phases, 18 plans, 44 tasks
