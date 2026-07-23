@@ -114,7 +114,7 @@ services:
       # constructing process; must be byte-identical across all 8 services
       # (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       STORAGE_TTL: "168h"
       METRICS_ADDR: "127.0.0.1:9090"
       # WEBHOOK_ALLOW_PRIVATE_IPS / WEBHOOK_ALLOW_INSECURE_HTTP: deliberately
@@ -164,7 +164,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -221,7 +221,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   webhook-worker-2:
@@ -268,7 +268,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       METRICS_ADDR: "127.0.0.1:9090"
 
   document-worker:
@@ -318,7 +318,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       VERAPDF_TIMEOUT: "60s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
@@ -367,7 +367,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       METRICS_ADDR: "127.0.0.1:9090"
     # /dev/shm sizing as a belt-and-suspenders compensating control
     # alongside the --disable-dev-shm-usage argv flag (D-09/Pitfall C) --
@@ -439,7 +439,7 @@ services:
       # IN-02 (Phase 36): same requirement, av engine -- must be
       # byte-identical across all 8 services (36-03-SUMMARY.md).
       AV_MAX_RETRY: "2"
-      AV_ENGINE_TIMEOUT: "600s"
+      AV_ENGINE_TIMEOUT: "753s"
       METRICS_ADDR: "127.0.0.1:9090"
     deploy:
       resources:
@@ -460,15 +460,18 @@ services:
       dockerfile: Dockerfile.av-worker
     container_name: octoconv-av-worker
     restart: always
-    # cmd/av-worker sets asynq ShutdownTimeout = AV_ENGINE_TIMEOUT (600s
-    # provisional, below) + 10s = 610s so an in-flight ffmpeg transcode
-    # survives SIGTERM instead of being aborted+requeued. Docker's default
-    # SIGKILL window is 10s, which would make that graceful window dead
-    # configuration -- grant 610s + 10s margin so the code's window is
-    # actually reachable under compose (mirrors audio-worker's WR-05
-    # precedent). BOTH the timeout and this margin are PROVISIONAL --
-    # finalized by Plan 04's supervised RTF measurement (D-05/AVE-04).
-    stop_grace_period: 620s
+    # cmd/av-worker sets asynq ShutdownTimeout = AV_ENGINE_TIMEOUT (753s,
+    # below) + 10s = 763s so an in-flight ffmpeg transcode survives SIGTERM
+    # instead of being aborted+requeued. Docker's default SIGKILL window is
+    # 10s, which would make that graceful window dead configuration -- grant
+    # 763s + 10s margin = 773s so the code's window is actually reachable
+    # under compose (mirrors audio-worker's WR-05/762s precedent exactly:
+    # AUDIO_ENGINE_TIMEOUT 742s + 20s = 762s). RTF-FINALIZED by Plan 04's
+    # supervised scripts/av-rtf-measure.sh matrix run (D-05/AVE-04,
+    # 36-04-SUMMARY.md): worst measured cell hevc@1080 p95_RTF=4.179133s
+    # (N=10, this exact --cpus=2.0/--memory=1g container) -- NOT VP9 as
+    # 36-RESEARCH.md's D-09 assumed; HEVC dominates VP9 by 1.86x.
+    stop_grace_period: 773s
     depends_on:
       postgres:
         condition: service_healthy
@@ -484,21 +487,39 @@ services:
       S3_SECRET_KEY: minioadmin
       S3_BUCKET: octoconv
       S3_USE_SSL: "false"
-      AV_WORKER_CONCURRENCY: "2"
-      # PROVISIONAL (Phase 35 D-05 placeholder, .env.example) -- Plan 04's
-      # scripts/av-rtf-measure.sh matrix run finalizes the real value
-      # (AVE-04). Coupled to stop_grace_period above and to
-      # RECONCILER_ACTIVE_STALE_AFTER (900s global cap, webhook-worker-1/-2
-      # below): must stay under that cap, never raised alongside it
-      # (32-03-SUMMARY.md near-miss precedent).
-      AV_ENGINE_TIMEOUT: "600s"
+      # RTF-measured (Phase 36 Plan 04, threads=avThreadCount()=2 saturates
+      # this service's own cpus=2.0 limit per job -- mirrors
+      # AUDIO_WORKER_CONCURRENCY=1's exact provenance, audio-worker above:
+      # concurrency > 1 would oversubscribe/CFS-thrash the 2 CPUs across
+      # concurrent jobs, WR-06).
+      AV_WORKER_CONCURRENCY: "1"
+      # RTF-derived (Phase 36 Plan 04, D-05/AVE-04, 36-04-SUMMARY.md):
+      # ceil(AV_MAX_DURATION_SECONDS x p95_RTF_worstcell x 2.0 safety) =
+      # ceil(90 x 4.179133 x 2.0) = 753s (16.3% margin under the 900s/15m
+      # reconciler CAP). Worst measured cell = hevc@1080 (NOT VP9 -- HEVC
+      # dominates by 1.86x, contradicting 36-RESEARCH.md's D-09 assumption).
+      # MUST be set identically in every queue.NewClient()-constructing
+      # service (api + all workers) -- AVUniqueTTL is derived from it in each
+      # enqueuing process (IN-02); a mismatch silently produces duplicate
+      # processing. Coupled to RECONCILER_ACTIVE_STALE_AFTER (900s global
+      # cap, webhook-worker-1/-2 below): raising this toward 900s requires
+      # raising that threshold in the same change (32-03-SUMMARY.md
+      # near-miss precedent).
+      AV_ENGINE_TIMEOUT: "753s"
       AV_MAX_RETRY: "2" # D-03 LOCKED -- fewer attempts, longer backoff
-      # PROVISIONAL 4h ceiling (av.go's const default). This is the NO-GO
-      # lever: if Plan 04's measured AV_ENGINE_TIMEOUT would breach the 900s
-      # reconciler cap, lower THIS value instead of raising the cap or the
-      # timeout (mirrors AUDIO_MAX_DURATION_SECONDS's Phase 32 precedent,
-      # 32-03-SUMMARY.md).
-      AV_MAX_DURATION_SECONDS: "14400"
+      # Path B NO-GO lever fired (Phase 36 Plan 04, mirrors
+      # AUDIO_MAX_DURATION_SECONDS's Phase 32 precedent, 32-03-SUMMARY.md):
+      # lowered from the 14400s (4h) placeholder because the measured
+      # worst-cell derivation at the 4h ceiling would have breached the
+      # 900s/15m reconciler CAP. Path A (VP9 -cpu-used/-deadline tuning) was
+      # rejected as ineffective -- it cannot touch the HEVC/mp4 path that
+      # actually dominates (36-04-SUMMARY.md). Passthrough residual
+      # (resolution_height==0 above 1080p source height): disposition (b)
+      # "bound the path" -- fail-closed rejected in internal/convert/av.go
+      # (enforceNoScalePassthroughBound), NOT folded into this ceiling,
+      # closing the hevc@2160p OOM-KILL (exit 137) DoS vector found by this
+      # measurement (36-RESEARCH.md Open Q3 / 36-REVIEW blocker, RESOLVED).
+      AV_MAX_DURATION_SECONDS: "90"
       # queue.NewClient() (constructed by cmd/av-worker/main.go) also reads
       # every OTHER engine class's retry/timeout vars unconditionally, even
       # though this process only runs the av engine (DEBT-05).
@@ -517,9 +538,14 @@ services:
           # Fleet baseline (D-11); must match the RTF-measurement container
           # exactly, mirrors audio-worker's precedent.
           cpus: "2.0"
-          # PROVISIONAL 1g (audio-worker baseline). Open Question 4 (audio's
-          # 1g vs chromium's 2g) is resolved by Plan 04's measurement's
-          # peak-RSS observation, not assumed here.
+          # VALIDATED at 1g (Phase 36 Plan 04, D-05/AVE-04): every BOUNDED
+          # (enum-legal, <=1080p) cell exited 0 cleanly at this limit across
+          # N=10 runs; the only OOM (exit 137) was the now-bounded hevc@2160p
+          # passthrough cell (see AV_MAX_DURATION_SECONDS's disposition (b)
+          # comment above and internal/convert/av.go's
+          # enforceNoScalePassthroughBound). Resolves Open Question 4
+          # (audio's 1g vs chromium's 2g) with a measured-not-assumed answer:
+          # 1g, matching audio-worker's own baseline.
           memory: 1g
 
   # Read-only asynq queue-inspection dashboard (OBS-03). Bound to 127.0.0.1
