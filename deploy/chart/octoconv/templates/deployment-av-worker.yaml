@@ -1,0 +1,77 @@
+{{/*
+av-worker Deployment — av engine class (ffmpeg remux/re-encode pipeline).
+Like audio-worker/document-worker, this image (Dockerfile.av-worker) is
+built with no --platform pin at all — it runs natively on any node arch, no
+emulation or fixed-arch framing needed.
+
+TIER LABEL: pod template carries octoconv.io/tier: app (see
+deployment-worker.yaml header for the full rationale — identical here).
+
+Grace 783s (AV_ENGINE_TIMEOUT 753s, ConfigMap + 30s margin) is >=
+AV_ENGINE_TIMEOUT — satisfies SC4 so a genuine N->N-1 downscale never
+premature-SIGTERMs a live transcode.
+
+startupProbe: the ffmpeg image plus baked codec libs is heavy (same
+reasoning as audio-worker/document-worker/chromium-worker) — a generous
+startup budget keeps this pod out of a CrashLoopBackOff before the metrics
+listener is up, while readiness/liveness stay tight once startup has
+succeeded.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: av-worker
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: av-worker
+spec:
+  {{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+  # spec.replicas intentionally omitted when KEDA/HPA owns this Deployment
+  # (WR-02, Phase 28 D-10): rendering a fixed value here would make every
+  # `helm upgrade` reset a scaled-to-zero class back to this default,
+  # fighting the HPA. Once KEDA/HPA has taken ownership it manages
+  # spec.replicas directly via the scale subresource.
+  {{- else }}
+  replicas: {{ .Values.avWorker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "octoconv.selectorLabels" (dict "component" "av-worker" "root" $) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octoconv.labels" . | nindent 8 }}
+        {{- include "octoconv.selectorLabels" (dict "component" "av-worker" "root" $) | nindent 8 }}
+        octoconv.io/tier: app
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.avWorker.terminationGracePeriodSeconds }}
+      containers:
+        - name: av-worker
+          image: "{{ .Values.avWorker.image.repository }}:{{ .Values.global.imageTag }}"
+          imagePullPolicy: IfNotPresent
+          {{- include "octoconv.commonEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: {{ .Values.avWorker.resources.limits.cpu | quote }}
+              memory: {{ .Values.avWorker.resources.limits.memory | quote }}

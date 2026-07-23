@@ -1,0 +1,64 @@
+{{/*
+KEDA ScaledObject — av worker (ffmpeg remux/re-encode pipeline). Scales the
+`av-worker` Deployment from 0 on the summed octoconv_queue_depth for queue
+av, counting pending + active + retry states, via the Prometheus scaler
+(D-06 — retry-inclusive, never scheduled/archived. Retry-state tasks are
+imminent work; excluding them left a zeroed class blind to a retry backlog
+until the reconciler's next sweep).
+
+CO-DEPENDENCY GUARD: see scaledobject-image.yaml header — gated on BOTH
+keda.enabled AND prometheus.enabled together.
+
+SCALE-DOWN STABILIZATION: unlike document/html (production null, k8s 300s
+HPA default preserved), av's 753s worst-case job duration exceeds that
+300s default, so keda.av.scaleDownStabilizationSeconds is a concrete
+non-null 900s in values.yaml — this knob is load-bearing here, not just a
+load-proof-overlay override (D-05, same divergence as audio).
+
+FALSY-0 GUARD (HARD-03/D-06 fix #1, kept for defensive consistency even
+though keda.av.scaleDownStabilizationSeconds is always non-null in
+production): the block below is gated on BOTH `hasKey` AND `ne ... nil`,
+not `hasKey` alone.
+*/}}
+{{- if and .Values.keda.enabled .Values.prometheus.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-av-scaledobject
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "octoconv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  scaleTargetRef:
+    name: av-worker
+  minReplicaCount: 0
+  maxReplicaCount: {{ .Values.keda.av.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.av.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.av.cooldownPeriod }}
+  {{- if and (hasKey .Values.keda.av "scaleDownStabilizationSeconds") (ne .Values.keda.av.scaleDownStabilizationSeconds nil) }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ .Values.keda.av.scaleDownStabilizationSeconds }}
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 15
+  {{- end }}
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.{{ .Values.global.namespace }}.svc.cluster.local:9090
+        query: sum(octoconv_queue_depth{queue="av", state=~"pending|active|retry"})
+        threshold: {{ .Values.keda.av.threshold | quote }}
+        # Sustained absence of a PromQL result (e.g. api unreachable or
+        # unscrapeable) now reads as a scaler ERROR, not queue-empty (D-01)
+        # — fallback.replicas: 1 holds one replica for this class instead
+        # of falsely scaling to zero with a live backlog behind an outage.
+        ignoreNullValues: "false"
+{{- end }}
