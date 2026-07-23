@@ -258,6 +258,47 @@ const avMaxSourceDuration = 4 * time.Hour
 // a resolution decode-bomb.
 const avMaxSourceResolutionHeight = 4320
 
+// avNoScalePassthroughMaxHeight bounds the resolution_height==0 ("no scale
+// requested", AVO-02) RE-ENCODE path to the SAME closed enum ceiling any
+// explicit resolution_height request is already validated against
+// (avResolutionHeights, avopts.go: {480,720,1080}) -- Phase 36 Plan 04's
+// supervised RTF matrix (scripts/av-rtf-measure.sh) measured this exact
+// passthrough (no "-vf scale") path as the true worst case: hevc@2160p
+// OOM-KILLED (exit 137) at the compose av-worker memory limit, a real
+// memory-safety DoS signal, not just slowness -- and it is unmeasurable
+// (unbounded) because no explicit AVOpts target ever exceeds 1080p. This is
+// disposition (b) "bound the path" from the 36-04-PLAN.md passthrough-
+// residual-disposition checkpoint (36-REVIEW blocker / 36-RESEARCH.md Open
+// Q3): rather than (a) folding the fixture-sized passthrough p95 into the
+// timeout derivation (which still under-covers a real source larger than
+// the fixture) or (c) accepting the gap as documented residual risk, every
+// legal request is aligned to the SAME measured envelope (hevc@1080
+// p95_RTF=4.179133s) that drives AV_ENGINE_TIMEOUT (.env.example).
+const avNoScalePassthroughMaxHeight = 1080
+
+// ErrAVNoScalePassthroughExceeded classifies a resolution_height==0
+// (no-scale) transcode request whose source height exceeds
+// avNoScalePassthroughMaxHeight -- a fail-closed guard-stage error, mirroring
+// ErrAVResolutionExceeded's shape (avduration.go), detected and returned
+// BEFORE the expensive re-encode ffmpeg invocation ever runs. Deliberately
+// scoped to the RE-ENCODE branch only (convertTranscode): a stream-copy
+// ("-c copy") remux performs no decode/encode at all -- it is gated on
+// avStreamCopyLegal requiring the source to ALREADY be in the target
+// container's exact codec contract, so it carries none of the measured
+// OOM/RTF risk this guard exists to close, and was never a cell the RTF
+// matrix measured in the first place.
+var ErrAVNoScalePassthroughExceeded = errors.New("av: no-scale passthrough resolution exceeds bound")
+
+// enforceNoScalePassthroughBound rejects a no-scale (resolution_height==0)
+// re-encode whose source height exceeds avNoScalePassthroughMaxHeight --
+// fail-closed, mirroring enforceMaxResolutionOf's shape (avduration.go).
+func enforceNoScalePassthroughBound(height int) error {
+	if height > avNoScalePassthroughMaxHeight {
+		return fmt.Errorf("%w: declared height %d exceeds %d", ErrAVNoScalePassthroughExceeded, height, avNoScalePassthroughMaxHeight)
+	}
+	return nil
+}
+
 // avDiskSafetyFactorDefault is the multiplier EnforceMinFreeDisk applies to
 // a probed input file's size when sizing its "at least this much free
 // space" ceiling (D-06/T-36-01), used when SetAVDiskSafetyFactor was never
@@ -572,6 +613,17 @@ func (c AVConverter) convertTranscode(ctx context.Context, inPath, outPath, targ
 	if avStreamCopyEligible(target, o, src) {
 		args = streamCopyArgs(inPath, outPath, target, src.primary.Index)
 	} else {
+		// Passthrough bound (disposition (b), Phase 36 Plan 04): a re-encode
+		// with no requested scale must not proceed against a source taller
+		// than avNoScalePassthroughMaxHeight -- checked HERE, in the re-encode
+		// branch only, BEFORE either argv builder runs (fail-closed before
+		// the expensive ffmpeg invocation, same discipline as Convert's
+		// duration/resolution guard stage).
+		if o.ResolutionHeight == 0 {
+			if err := enforceNoScalePassthroughBound(src.primary.Height); err != nil {
+				return fmt.Errorf("av: %w", err)
+			}
+		}
 		switch target {
 		case "mp4":
 			args = transcodeToMP4Args(inPath, outPath, o.Codec, o.ResolutionHeight, src.primary.Index, avThreadCount())

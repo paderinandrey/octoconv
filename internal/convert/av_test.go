@@ -814,6 +814,127 @@ func TestValidateAVOutput_SniffMismatch(t *testing.T) {
 	}
 }
 
+// TestConvertTranscode_NoScalePassthroughBound pins Phase 36 Plan 04's
+// disposition (b) "bound the path" fix (36-04-PLAN.md passthrough-residual-
+// disposition, 36-RESEARCH.md Open Q3): a no-scale (resolution_height==0)
+// re-encode request against a source taller than avNoScalePassthroughMaxHeight
+// (1080) must be rejected with ErrAVNoScalePassthroughExceeded BEFORE any
+// ffmpeg subprocess runs -- proven here by pointing convertTranscode at a
+// nonexistent input path: if the guard did not fire first, the error would
+// instead be ErrAVTranscodeFailed (a real ffmpeg invocation attempt), not
+// this sentinel. Mirrors TestAVStageSentinels_Distinguishable's same-package,
+// no-live-fixture-needed style.
+func TestConvertTranscode_NoScalePassthroughBound(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "does-not-exist.mp4")
+	c := AVConverter{}
+
+	t.Run("source taller than 1080 with no requested scale is rejected", func(t *testing.T) {
+		src := avSourceProbe{
+			primary:    avVideoStream{Index: 0, CodecName: "h265", Height: 2160},
+			audioCodec: "aac",
+		}
+		err := c.convertTranscode(context.Background(), missing, filepath.Join(dir, "out.mp4"), "mp4", AVOpts{}, src)
+		if err == nil {
+			t.Fatal("convertTranscode(2160p source, resolution_height=0) = nil, want a fail-closed error")
+		}
+		if !errors.Is(err, ErrAVNoScalePassthroughExceeded) {
+			t.Errorf("convertTranscode error = %v, want errors.Is ErrAVNoScalePassthroughExceeded", err)
+		}
+		if errors.Is(err, ErrAVTranscodeFailed) {
+			t.Error("convertTranscode error matches ErrAVTranscodeFailed, want the guard to fire BEFORE any ffmpeg invocation is attempted")
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "out.mp4")); statErr == nil {
+			t.Error("convertTranscode(rejected passthrough) produced an output file, want none")
+		}
+	})
+
+	t.Run("source at exactly the 1080 ceiling is not rejected by this guard", func(t *testing.T) {
+		src := avSourceProbe{
+			primary:    avVideoStream{Index: 0, CodecName: "h265", Height: 1080},
+			audioCodec: "aac",
+		}
+		err := c.convertTranscode(context.Background(), missing, filepath.Join(dir, "out2.mp4"), "mp4", AVOpts{}, src)
+		if err == nil {
+			t.Fatal("convertTranscode(1080p source, missing input) = nil, want an ffmpeg-invocation error")
+		}
+		if errors.Is(err, ErrAVNoScalePassthroughExceeded) {
+			t.Errorf("convertTranscode(1080p source) error = %v, want it NOT rejected by the no-scale passthrough bound", err)
+		}
+		if !errors.Is(err, ErrAVTranscodeFailed) {
+			t.Errorf("convertTranscode(1080p source) error = %v, want errors.Is ErrAVTranscodeFailed (guard passed, real ffmpeg invocation attempted)", err)
+		}
+	})
+
+	t.Run("an explicit resolution_height request bypasses the no-scale bound", func(t *testing.T) {
+		src := avSourceProbe{
+			primary:    avVideoStream{Index: 0, CodecName: "h265", Height: 2160},
+			audioCodec: "aac",
+		}
+		err := c.convertTranscode(context.Background(), missing, filepath.Join(dir, "out3.mp4"), "mp4", AVOpts{ResolutionHeight: 1080}, src)
+		if errors.Is(err, ErrAVNoScalePassthroughExceeded) {
+			t.Errorf("convertTranscode(2160p source, resolution_height=1080) error = %v, want it NOT rejected by the no-scale bound (an explicit scale request is not a passthrough)", err)
+		}
+		if !errors.Is(err, ErrAVTranscodeFailed) {
+			t.Errorf("convertTranscode(2160p source, resolution_height=1080) error = %v, want errors.Is ErrAVTranscodeFailed (guard passed, real ffmpeg invocation attempted)", err)
+		}
+	})
+
+	t.Run("stream-copy remux is exempt from the no-scale bound", func(t *testing.T) {
+		// h264/aac source, mp4 target, no resize/codec override requested:
+		// avStreamCopyEligible is true, so convertTranscode takes the "-c
+		// copy" branch and never reaches the passthrough guard at all -- a
+		// remux performs no decode/encode and carries none of the measured
+		// OOM/RTF risk this guard exists to close.
+		src := avSourceProbe{
+			primary:    avVideoStream{Index: 0, CodecName: "h264", Height: 2160},
+			audioCodec: "aac",
+		}
+		err := c.convertTranscode(context.Background(), missing, filepath.Join(dir, "out4.mp4"), "mp4", AVOpts{}, src)
+		if errors.Is(err, ErrAVNoScalePassthroughExceeded) {
+			t.Errorf("convertTranscode(h264/aac source, stream-copy eligible) error = %v, want it NOT rejected by the no-scale bound", err)
+		}
+		if !errors.Is(err, ErrAVTranscodeFailed) {
+			t.Errorf("convertTranscode(h264/aac source, stream-copy eligible) error = %v, want errors.Is ErrAVTranscodeFailed (stream-copy branch attempted against a missing input)", err)
+		}
+	})
+}
+
+// TestConvertTranscode_NoScaleBound_PreservesAVE02Flags re-asserts AVE-02
+// (T-36-11): the passthrough-bound fix touches ONLY convertTranscode's
+// guard logic, not the argv builders -- transcodeToMP4Args/
+// transcodeToWebMArgs, the two builders on the affected re-encode path, must
+// still carry -nostdin, -protocol_whitelist file,crypto, and "file:"-prefixed
+// input/output paths after this change, byte-for-byte identical to their
+// pre-fix shape (TestTranscodeToMP4Args/TestTranscodeToWebMArgs already pin
+// the exact argv; this test is the AVE-02-specific re-assertion the plan
+// requires alongside the new guard test above).
+func TestConvertTranscode_NoScaleBound_PreservesAVE02Flags(t *testing.T) {
+	builders := map[string][]string{
+		"transcodeToMP4Args (no-scale)":  transcodeToMP4Args("/work/in.mov", "/work/out.mp4", "hevc", 0, 0, 2),
+		"transcodeToWebMArgs (no-scale)": transcodeToWebMArgs("/work/in.mp4", "/work/out.webm", 0, 0, 2),
+	}
+	for name, argv := range builders {
+		t.Run(name, func(t *testing.T) {
+			joined := strings.Join(argv, " ")
+			if !slices.Contains(argv, "-nostdin") {
+				t.Errorf("%s = %v, want -nostdin", name, argv)
+			}
+			if !strings.Contains(joined, "-protocol_whitelist file,crypto") {
+				t.Errorf("%s = %v, want -protocol_whitelist file,crypto", name, argv)
+			}
+			for i, a := range argv {
+				if a == "-i" && i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "file:") {
+					t.Errorf("%s -i element = %q, want a file:-prefixed path", name, argv[i+1])
+				}
+			}
+			if last := argv[len(argv)-1]; !strings.HasPrefix(last, "file:") {
+				t.Errorf("%s output element = %q, want a file:-prefixed path", name, last)
+			}
+		})
+	}
+}
+
 // TestAVStageSentinels_Distinguishable proves each of the three ffmpeg-stage
 // call sites (D-01, 35-CONTEXT.md) wraps with its OWN sentinel, so
 // errors.Is can tell transcode/audio-extract/thumbnail failures apart
