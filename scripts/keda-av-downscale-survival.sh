@@ -496,10 +496,23 @@ echo "PASS: SC4 -- av-worker scaled ${AV_REPLICAS_1}->${AV_REPLICAS_2} after sho
 # creationTimestamp among Running, non-Terminating pods -- the pod that has
 # been running since the long job's submission (AV_WORKER_CONCURRENCY=1
 # guarantees it never picked up the short job).
+#
+# DEVIATION (Rule 1 -- bug fix, live-discovered during Task 2 re-run):
+# the WR-05 jsonpath filter shape `{.items[?(@.metadata.deletionTimestamp=="")]...}`
+# (copied from the SC3 precedent in the FROZEN scripts/keda-load-proof.sh, an
+# accepted residual there per 29-REVIEW.md/33-03-SUMMARY.md) never matches on
+# kubectl client v1.36.2: deletionTimestamp is entirely ABSENT from the JSON
+# when unset (not present as ""), and kubectl's jsonpath filter comparison
+# against an absent key never evaluates true -- so BUSY_POD was always empty.
+# UNLIKE keda-load-proof.sh, this script is NOT one of the three frozen
+# scripts (see file header), so the defect is fixed here directly rather than
+# carried as an accepted residual: `-o json | jq` correctly treats an absent
+# key the same as an explicit `null`, so `select(.metadata.deletionTimestamp
+# == null)` matches Running/non-Terminating pods as originally intended.
 BUSY_POD=$(kubectl get pod -n "$NAMESPACE" -l "app.kubernetes.io/component=av-worker" \
 	--field-selector=status.phase=Running \
 	--sort-by=.metadata.creationTimestamp \
-	-o jsonpath='{.items[?(@.metadata.deletionTimestamp=="")].metadata.name}' 2>/dev/null | awk '{print $1}')
+	-o json 2>/dev/null | jq -r '[.items[] | select(.metadata.deletionTimestamp == null)][0].metadata.name // empty')
 assert_nonempty "$BUSY_POD" "SC4: busy pod (earliest creationTimestamp among Running/non-Terminating) identified"
 
 # Annotate the busy pod IMMEDIATELY -- must land BEFORE the short job
