@@ -21,7 +21,16 @@ OctoConv — внутренний асинхронный сервис конве
 
 ## Next Milestone
 
-_Not yet defined — run `/gsd:new-milestone` to scope the next version. Candidate backlog: AVX-02 (registry cold-pull measurement for heavy images), K8SV2-01 (k8s validation in CI, kind/k3d), AVX-01 (video trim/crop opts), DOCV3-03 (fonts/CJK-RTL for HTML→PDF), and the v1.8 tech-debt tail (av-worker env-parser unit tests, wav-demuxer justification). SEED-001 is RESOLVED (transcription need shipped in v1.7/v1.8; analysis-product superstructure deliberately not pursued)._
+_Not yet defined — run `/gsd:new-milestone` to scope the next version._
+
+**Candidate backlog:**
+- **New engine classes (seeds):** SEED-005 CAD (dwg/dxf/step → pdf/svg/preview; open SDK/licensing/offline question), SEED-006 Archive/zip (unpack → convert-each → repackage; security-first), SEED-007 File-preview/thumbnail (unify per-type renderers into one `preview` class).
+- **Job UX:** SEED-008 conversion progress reporting (percent-complete, esp. video transcode via ffmpeg `-progress`).
+- **Ops / production-readiness:** AVX-02 (registry cold-pull measurement for heavy images), K8SV2-01 (k8s validation in CI, kind/k3d), K8SV2-03 (`is_operator` column vs env-allowlist).
+- **Engine extensions:** AVX-01 (video trim/crop opts), DOCV3-03 (fonts/CJK-RTL for HTML→PDF).
+- **Tech-debt tail (v1.8):** av-worker env-parser unit tests, wav-demuxer justification.
+
+_SEED-001 is RESOLVED (transcription need shipped in v1.7/v1.8; analysis-product superstructure deliberately not pursued)._
 
 <details>
 <summary>Shipped Milestone: v1.8 AV Engine (video/ffmpeg) — SHIPPED 2026-07-23 (goal & features)</summary>
