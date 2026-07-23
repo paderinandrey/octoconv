@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: planning
+status: executing
 stopped_at: Phase 37 context gathered
-last_updated: "2026-07-23T12:06:09.001Z"
+last_updated: "2026-07-23T19:24:01.059Z"
 last_activity: 2026-07-23
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 15
-  completed_plans: 15
+  total_plans: 18
+  completed_plans: 16
   percent: 75
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 37 — keda/helm chart integration
+**Current focus:** Phase 37 — keda-helm-chart-integration
 
 ## Current Position
 
-Phase: 37
-Plan: Not started
-Status: Ready to plan
+Phase: 37 (keda-helm-chart-integration) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-07-23
 
 ## Performance Metrics
@@ -89,6 +89,7 @@ Last activity: 2026-07-23
 | Phase 36 P03 | 20min | 3 tasks | 3 files |
 | Phase 36 P04 | 25min | 1 tasks | 4 files |
 | Phase 36 P05 | 20min | 2 tasks | 9 files |
+| Phase 37 P01 | 25min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - [Phase 36]: AV_WORKER_CONCURRENCY=1, memory=1g validated from measured peak-RSS/CPU-saturation data
 - [Phase 36]: Generalized enforceNoScalePassthroughBound -> enforceReencodeSourceBound: every re-encode (no-scale AND explicit resolution_height alike) bounded on BOTH source Height (>1080) and Width (>1920), closing CR-01/HI-01
 - [Phase 36]: ErrAVReencodeResolutionExceeded classified terminal in isAVTerminal (predecessor sentinel lacked this classification -- Rule 2 fix)
+- [Phase 37]: 37-01: av chart substrate cloned from audio precedent verbatim per 37-CONTEXT.md D-01..D-06 (grace 783s, non-null stabilization 900s, WR-01 triad, keda.av capacity parity); SC2 confirmed already-satisfied by Phase 35 collector, no code change
 
 ### Quick Tasks Completed
 
@@ -183,9 +185,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-23T12:06:08.988Z
+Last session: 2026-07-23T19:22:01.942Z
 Stopped at: Phase 37 context gathered
-Resume file: .planning/phases/37-keda-helm-chart-integration/37-CONTEXT.md
+Resume file: None
 
 ## Operator Next Steps
 
