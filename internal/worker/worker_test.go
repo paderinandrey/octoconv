@@ -399,6 +399,10 @@ func TestIsAVTerminal(t *testing.T) {
 		fmt.Errorf("convert: %w", convert.ErrAVOutputMissingOrEmpty),
 		fmt.Errorf("convert: %w", convert.ErrAVTimecodeOutOfRange),
 		fmt.Errorf("convert: %w", convert.ErrAVResolutionExceeded),
+		// 36-05 gap-closure (CR-01/HI-01): the generalized re-encode
+		// source-resolution bound must be terminal like ErrAVResolutionExceeded
+		// -- a rejected declared source resolution can never succeed on retry.
+		fmt.Errorf("convert: %w", convert.ErrAVReencodeResolutionExceeded),
 		fmt.Errorf("convert: %w", convert.ErrAudioDurationExceeded),
 		fmt.Errorf("convert: %w", convert.ErrAVNoVideoStream),
 	}

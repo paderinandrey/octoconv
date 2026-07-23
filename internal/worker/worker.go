@@ -362,6 +362,7 @@ func isAVTerminal(err error) bool {
 	if errors.Is(err, convert.ErrAVOutputMissingOrEmpty) ||
 		errors.Is(err, convert.ErrAVTimecodeOutOfRange) ||
 		errors.Is(err, convert.ErrAVResolutionExceeded) ||
+		errors.Is(err, convert.ErrAVReencodeResolutionExceeded) ||
 		errors.Is(err, convert.ErrAudioDurationExceeded) ||
 		errors.Is(err, convert.ErrAVNoVideoStream) {
 		return true
