@@ -3,11 +3,12 @@
 **An async, production-hardened file conversion service written in Go.**
 
 A client uploads a file through a REST API; OctoConv stores it in S3-compatible object
-storage, queues a conversion job, and a worker runs an external conversion engine
-(currently [libvips](https://www.libvips.org/) for images, with
-[LibreOffice](https://www.libreoffice.org/) for office documents landing next) and writes
-the result back to storage. PostgreSQL is the system of record for job state; Redis
-([asynq](https://github.com/hibiken/asynq)) is the queue broker.
+storage, queues a conversion job, and a worker runs an external conversion engine — images
+via [libvips](https://www.libvips.org/), office documents via headless
+[LibreOffice](https://www.libreoffice.org/), HTML via headless Chromium, audio transcription
+via whisper.cpp, or video via ffmpeg — and writes the result back to storage. PostgreSQL is
+the system of record for job state; Redis ([asynq](https://github.com/hibiken/asynq)) is the
+queue broker.
 
 Built to be the kind of internal conversion service you can actually depend on: mandatory
 API-key auth, rate limiting, signed webhook delivery with retries, automatic recovery of
@@ -50,10 +51,14 @@ that actually bite production systems —
 **Core pipeline**
 - Multipart file upload → S3/MinIO storage → async conversion via a queue → presigned
   download URL, or push delivery via signed webhook
-- Engine-class queue routing: each conversion engine (image, document, …) gets its own
-  asynq queue so worker pools scale independently
+- Engine-class queue routing: each conversion engine (image, document, html, audio, av) gets
+  its own asynq queue so worker pools scale independently
 - Postgres-backed job lifecycle (`queued → active → done/failed`) with an append-only event
   log for every state transition
+- Named conversion presets (create/list/show/update/deactivate) plus a registry-derived
+  `GET /v1/formats` capability-discovery endpoint
+- Kubernetes deployment via a Helm chart with KEDA queue-depth autoscaling, scaling each
+  engine-class worker independently
 
 **Security & reliability**
 - Mandatory API-key authentication (salted SHA-256 hashes, zero-downtime key rotation via
@@ -72,6 +77,8 @@ that actually bite production systems —
   embedded-macro rejection
 - Decompression-bomb protection via declared-dimension / declared-uncompressed-size limits,
   enforced before any decoding
+- OLE-CFB classification distinguishing encrypted vs. legacy-binary Office uploads before
+  conversion, and PDF/A (ISO 19005) export validated by a bundled veraPDF check
 
 **Observability**
 - Prometheus metrics (job outcomes, duration, webhook delivery, reconciler actions, queue
@@ -81,13 +88,14 @@ that actually bite production systems —
 - Automatic TTL-based cleanup of uploaded/converted files (MinIO ILM lifecycle rules)
 
 **Conversion engines**
-- ✅ **Images** (`png`, `jpg`, `webp`, `heic`, `tiff`) via libvips — the original,
-  fully-hardened vertical slice
-- 🚧 **Office documents** (`docx`, `xlsx`, `pptx`, `odt`, `ods`, `odp` → `pdf`) via
-  LibreOffice headless — content-safety validation and the conversion engine itself are
-  built and live-tested (including a real process-group-kill proof against LibreOffice's
-  `oosplash`/`soffice.bin` fork chain); wiring the dedicated worker, queue, and API routing
-  is in progress (see [Roadmap](#roadmap))
+- ✅ **Images** (`png`, `jpg`, `webp`, `heic`, `tiff`, any-to-any) via libvips
+- ✅ **Office documents** (`docx`, `xlsx`, `pptx`, `odt`, `ods`, `odp` → `pdf`, plus
+  `docx`↔`odt`, `xlsx`↔`ods`, `pptx`↔`odp` cross-format pairs) via LibreOffice headless
+- ✅ **HTML** (`html` → `pdf`) via headless Chromium
+- ✅ **Audio transcription** (`mp3`, `wav`, `m4a`, `ogg`, and video containers `mp4`, `mov`,
+  `avi`, `mkv`, `webm` → `txt`, `srt`, `vtt`, `json`) via whisper.cpp
+- ✅ **Video** (`mov`/`avi`/`mkv`/`webm` → `mp4`; `mp4` → `webm`; audio-extract to
+  `mp3`/`wav`/`m4a`; thumbnail to `jpg`/`png`/`webp`) via ffmpeg
 
 ## Architecture
 
@@ -96,9 +104,10 @@ that actually bite production systems —
 Client ────────────────────────▶ API ───────────────────────────▶ Worker
                                   │                                  │
                                   ▼                                  ▼
-                            PostgreSQL                    external engine (libvips,
-                        (jobs, job_events,                 LibreOffice, …) via a
-                         webhook_deliveries)                hardened process wrapper
+                            PostgreSQL                    external engine (libvips /
+                        (jobs, job_events,                 LibreOffice / Chromium /
+                         webhook_deliveries)                whisper.cpp / ffmpeg) via a
+                                  │                          hardened process wrapper
                                   │                                  │
                                   │                                  ▼
                                   │                          S3 / MinIO storage
@@ -109,9 +118,17 @@ Client ────────────────────────�
 
 ```
 cmd/
-  api/              — HTTP server: upload, status, presigned downloads
-  worker/            — asynq consumer: image conversion, webhook delivery, reconciler
+  api/                — HTTP server: upload, status, presigned downloads
+  worker/             — asynq consumer: image conversion (libvips)
+  document-worker/    — asynq consumer: office document conversion (LibreOffice)
+  chromium-worker/    — asynq consumer: HTML → PDF conversion (headless Chromium)
+  audio-worker/       — asynq consumer: audio transcription (whisper.cpp)
+  av-worker/          — asynq consumer: video transcode/extract/thumbnail (ffmpeg)
+  webhook-worker/     — asynq consumer: signed webhook delivery + reconciler sweep
+  mcp-server/         — stdio MCP server exposing OctoConv to agents
+  mcp-http/           — streamable-HTTP MCP server for in-cluster deployment
   manage-clients/     — operator CLI: issue/rotate/revoke API keys
+  manage-presets/     — operator CLI: create/update/list/show/deactivate presets
   migrate/            — apply embedded SQL migrations
 internal/
   api/                — routes, handlers, auth middleware, rate limiting, SSRF guard
@@ -122,6 +139,8 @@ internal/
   webhook/             — HMAC signing, delivery, dead-letter tracking
   storage/             — S3/MinIO client, deterministic object-key layout
   metrics/             — Prometheus metric definitions
+  presets/             — named-preset resolution (scope precedence, versioning)
+  mcpserver/            — MCP tool implementations (convert_file, get_job_status, …)
   auth/, clients/      — API-key hashing and client repository
   db/                  — connection pool + embedded migration runner
 ```
@@ -144,6 +163,12 @@ docker compose up -d
 | minio    | `minio/minio`     | `9100` (API), `9101` (console)     | `minioadmin / minioadmin`, bucket auto-created |
 | api      | `Dockerfile.api`  | `8090`                              | HTTP API                                      |
 | worker   | `Dockerfile.worker`| —                                   | image engine worker, runs as `nobody`, CPU/RAM limited |
+| document-worker, chromium-worker, audio-worker, av-worker | per-engine `Dockerfile.*` | — | one worker per remaining engine class (document/html/audio/video), each resource-limited |
+| webhook-worker-1, webhook-worker-2 | `Dockerfile.webhook-worker` | —             | two replicas — sole webhook-delivery consumer + reconciler sweeper |
+| asynqmon | `hibiken/asynqmon:0.7.2` | `127.0.0.1:8980`               | read-only asynq queue-inspection dashboard    |
+
+> Each conversion engine class runs as its own dedicated worker service, so worker pools
+> scale independently per class.
 
 > **Presigned URLs and Docker networking:** the containerized `api` presigns URLs against
 > the internal `minio:9000` endpoint, which isn't reachable from your host. To download
