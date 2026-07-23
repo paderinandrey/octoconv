@@ -122,7 +122,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 - [x] **Phase 34: AV Engine Foundation** - Standalone AVConverter (transcode/audio-extract/thumbnail via ffmpeg), video container sniffers (mp4/mov ftyp, RIFF AVI, EBML mkv/webm), validated AVOpts, duration/resolution guards + protocol-whitelist hardening (completed 2026-07-20)
 - [x] **Phase 35: Queue, Worker & Routing Integration** - av queue + cmd/av-worker, stage-aware retry classification, API/reconciler engine routing, video→transcript pairs routed onto the existing audio queue/worker with a pair-disjointness test (completed 2026-07-22)
 - [x] **Phase 36: Containerization & RTF-Measured Timeout** - Dockerfile.av-worker (pinned ffmpeg n8.1.2), compose service, RTF-matrix measured AV_ENGINE_TIMEOUT=753s (Path B lever, AV_MAX_DURATION_SECONDS=90), disk-space guard, CI bake; live compose E2E PASSED (operator-run mp4→webm, valid WebM downloaded); gap-closure 36-05 generalized the re-encode source bound (CR-01/HI-01) (completed 2026-07-23)
-- [ ] **Phase 37: KEDA/Helm Chart Integration** - av-worker Deployment + ScaledObject (WR-01 triad), QueueAV collector, scale-from-zero load-proof
+- [x] **Phase 37: KEDA/Helm Chart Integration** - av-worker Deployment + ScaledObject (WR-01 triad), QueueAV collector, scale-from-zero load-proof (completed 2026-07-23)
 
 ## Phase Details
 
@@ -236,7 +236,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
 | 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete    | 2026-07-22 |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 5/5 | Complete    | 2026-07-23 |
-| 37. KEDA/Helm Chart Integration | v1.8 | 2/3 | In Progress|  |
+| 37. KEDA/Helm Chart Integration | v1.8 | 3/3 | Complete    | 2026-07-23 |
 
 ---
 

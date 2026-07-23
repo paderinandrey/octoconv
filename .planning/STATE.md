@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: AWAITING CHECKPOINT — Tasks 1-2 (SC3 + SC4) PASS after api rebuild + jsonpath fix; Task 3 human-verify PENDING operator; see 37-03-SUMMARY.md
-stopped_at: Phase 37 Plan 03 Tasks 1-2 PASS (SC3 scale-from-zero + SC4 downscale-survival live-proven) - Task 3 human-verify checkpoint PENDING operator approval, AVE-05 still open until approved
-last_updated: "2026-07-23T20:43:31.307Z"
+status: milestone_complete
+stopped_at: Milestone complete (Phase 37 was final phase)
+last_updated: 2026-07-23T21:46:12.514Z
 last_activity: 2026-07-23
 progress:
   total_phases: 4
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 37 — keda-helm-chart-integration
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 37 (keda-helm-chart-integration) — EXECUTING
-Plan: 3 of 3
-Status: AWAITING CHECKPOINT — Tasks 1-2 (SC3 + SC4) PASS after api rebuild + jsonpath fix; Task 3 human-verify PENDING operator; see 37-03-SUMMARY.md
+Phase: 37
+Plan: Not started
+Status: Milestone complete
 Last activity: 2026-07-23
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 99 (all v1.0–v1.7)
+- Total plans completed: 102 (all v1.0–v1.7)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -76,7 +76,7 @@ Last activity: 2026-07-23
 | 34 | 3 | - | - |
 | 35 | 7 | - | - |
 | 36 | 5 | - | - |
-| 37 | TBD | - | - |
+| 37 | 3 | - | - |
 
 **Recent Trend:**
 
