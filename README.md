@@ -248,9 +248,16 @@ the full, documented list. Highlights:
 | `MAX_UPLOAD_BYTES` | upload size ceiling |
 | `MAX_IMAGE_PIXELS` | decompression-bomb guard for images (default 100 MP) |
 | `MAX_DOCUMENT_UNCOMPRESSED_BYTES` | zip-bomb guard for office documents (default 500 MiB) |
+| `WORKER_CONCURRENCY` / `ENGINE_TIMEOUT` / `IMAGE_MAX_RETRY` | image engine concurrency, timeout, and retry budget |
+| `DOCUMENT_WORKER_CONCURRENCY` / `DOCUMENT_ENGINE_TIMEOUT` / `DOCUMENT_MAX_RETRY` / `VERAPDF_TIMEOUT` | document (LibreOffice) engine concurrency, timeout, retry budget, and veraPDF validation timeout |
+| `HTML_WORKER_CONCURRENCY` / `HTML_ENGINE_TIMEOUT` / `HTML_MAX_RETRY` | HTML (Chromium) engine concurrency, timeout, and retry budget |
+| `AUDIO_ENGINE_TIMEOUT` / `AUDIO_MAX_RETRY` / `AUDIO_WORKER_CONCURRENCY` / `AUDIO_MAX_DURATION_SECONDS` / `AUDIO_MODEL_PATH` / `AUDIO_THREADS` | audio (whisper.cpp) engine timeout, retry budget, concurrency, max input duration, model path, and thread count |
+| `AV_ENGINE_TIMEOUT` / `AV_MAX_RETRY` / `AV_WORKER_CONCURRENCY` / `AV_MAX_DURATION_SECONDS` / `AV_DISK_SAFETY_FACTOR` | video (ffmpeg) engine timeout, retry budget, concurrency, max input duration, and disk-space safety multiplier |
+| `OPERATOR_CLIENT_IDS` | comma-separated client UUIDs authorized for `/v1/system/presets` (empty = no operators, fail-closed) |
 | `RATE_LIMIT_IP_RPM` / `RATE_LIMIT_CLIENT_RPM` | pre-auth and per-client rate limits |
 | `WEBHOOK_SIGNING_SECRET` | HMAC-SHA256 secret for signed webhook callbacks (required) |
 | `WEBHOOK_ALLOW_PRIVATE_IPS` | opt-in: allow `callback_url` to target RFC1918 addresses (loopback/link-local always blocked) |
+| `WEBHOOK_WORKER_CONCURRENCY` / `WEBHOOK_PRESIGN_TTL` / `WEBHOOK_ALLOW_INSECURE_HTTP` | webhook-worker concurrency, presigned-URL TTL per delivery attempt, and opt-in non-https callback support |
 | `RECONCILER_*` | staleness thresholds, sweep interval, recovery cap |
 | `METRICS_ADDR` | localhost-only Prometheus `/metrics` listener |
 
@@ -362,31 +369,34 @@ end-to-end verification pass, not just green unit tests.
 - **v1.1 — Tech Debt Cleanup**: opt-in RFC1918 webhook delivery for internal networks,
   reconciler coverage for silently-dropped webhook deliveries, a real wall-clock soak test
   proving staleness recovery, decompression-bomb protection for images
-
-### 🚧 In progress — v1.2: Document Engine Class
-
-Adding a second conversion engine class (office documents → PDF via LibreOffice) on top of
-the existing hardened infrastructure:
-
-- ✅ Structural content validation for `docx`/`xlsx`/`pptx`/`odt`/`ods`/`odp` (zip-bomb
-  guard, embedded-macro rejection, format spoofing detection)
-- ✅ `LibreOfficeConverter` engine: per-job profile isolation, output validation, a live
-  process-group-kill proof against LibreOffice's real process tree
-- ⬜ Dedicated `cmd/document-worker` binary, resource-isolated from the image worker, with
-  its own timeout budget
-- ⬜ Engine-aware reconciler recovery and end-to-end API routing for document jobs
+- **v1.2 — Document Engine Class**: `docx`/`xlsx`/`pptx`/`odt`/`ods`/`odp` → `pdf` via
+  LibreOffice headless, structural zip-bomb/macro validation, dedicated `document-worker`
+- **v1.3 — Document Class v2**: cross-format document conversion (`docx`↔`odt`, `xlsx`↔`ods`,
+  `pptx`↔`odp`), OLE-CFB legacy-binary rejection, HTML/Chromium engine class, dedicated
+  `webhook-worker` decoupled from the engine workers
+- **v1.4 — CI, Presets & Debt Cleanup**: first CI workflow, named conversion presets, and a
+  registry-derived `GET /v1/formats` capability endpoint
+- **v1.5 — MCP Access & Document Fidelity**: stdio MCP server (`cmd/mcp-server`), veraPDF
+  ISO-19005 PDF/A validation, OLE-CFB encrypted-vs-legacy classification
+- **v1.6 — Kubernetes & KEDA**: Helm chart deployment, KEDA queue-depth autoscaling,
+  MCP-over-HTTP (`cmd/mcp-http`), operator-gated system-scope presets
+- **v1.7 — Audio Engine & Hardening**: audio transcription via whisper.cpp
+  (`cmd/audio-worker`)
+- **v1.8 — AV Engine**: video conversion via ffmpeg (`cmd/av-worker`) — transcode, audio
+  extraction, thumbnail generation
 
 ### 🔭 Planned
 
-- Additional engine classes (audio/video via ffmpeg, archive handling)
-- Cross-format conversion within the document class (`docx ↔ odt`, etc.)
-- Kubernetes + KEDA autoscaling for production deployment
-- Audio/video transcription-with-summary engine — early idea
+- Kubernetes validation in CI (kind/k3d)
+- `is_operator` DB column vs. env-allowlist for operators
+- Trim/crop as validated closed-opts for video (start/end timecodes)
+- Dependency-advisory tracking for pinned engine binaries (ffmpeg, whisper.cpp, LibreOffice,
+  veraPDF)
 
 ## Contributing
 
-Issues and pull requests are welcome. This is a young project — expect the architecture to
-still be settling in places outside the hardened v1.0/v1.1 core.
+Issues and pull requests are welcome. OctoConv has shipped eight audited milestones
+(v1.0–v1.8), each closed with a live end-to-end verification pass, not just green unit tests.
 
 ## License
 
