@@ -139,9 +139,11 @@ p95 RTF:
 
 None beyond the disk-space transient noted above (resolved).
 
-## Live E2E Evidence: PENDING (operator-run)
+## Live E2E Evidence: PASSED (operator-run 2026-07-23)
 
-Per D-05 (SUPERVISED), the live compose E2E is NOT run by this executor. The following is the precise runbook for the operator/orchestrator to execute and then fill in this section with the actual evidence (job id, terminal status, output size, webhook confirmation).
+Per D-05 (SUPERVISED), the live compose E2E was run by the operator against the live docker-compose stack (k8s down). Evidence recorded in the "Evidence" subsection below. The runbook that was executed is preserved for reproducibility.
+
+**Note on the runbook curls below (historical):** the original draft used `Authorization: Bearer <key>` and a `/v1/jobs/{id}/result` path; the actual project scheme is `Authorization: ApiKey <key>` and there is **no** `/result` route — the presigned `download_url` is returned in the `GET /v1/jobs/{id}` body. The Evidence subsection reflects what was actually run.
 
 ### Runbook
 
@@ -176,25 +178,28 @@ Per D-05 (SUPERVISED), the live compose E2E is NOT run by this executor. The fol
 7. **Confirm the signed webhook fired** (webhook-worker delivery log or the configured receiver endpoint) — capture the delivery timestamp and signature-verification result.
 8. **Record evidence** in this section: job id, terminal status, output file size/checksum, webhook delivery confirmation, and total wall-clock time observed (sanity-check against the 753s timeout / 90s duration ceiling).
 
-### Evidence (to be filled in by the operator/orchestrator)
+### Evidence (operator-run 2026-07-23)
 
-- Job ID: _pending_
-- Terminal status: _pending_
-- Output size/checksum: _pending_
-- Signed webhook confirmed: _pending_
-- Observed wall-clock time: _pending_
+- **Container health:** `av-worker` came up clean on the finalized config — log line `🧵 AV_MAX_DURATION_SECONDS=1m30s AV_DISK_SAFETY_FACTOR=3.00 threads=2 (source=cgroup)`, `queue=av`, `Up`, no OOM/crash-loop at `memory: 1g` / `AV_WORKER_CONCURRENCY: 1`. Confirms the Path-B ceiling (90s) and cgroup-derived thread sizing load correctly.
+- **Job ID:** `846357a3-6799-4359-83ea-1bb6bea99bc2` (DB: `source_format=mp4`, `target_format=webm`, `engine=av`)
+- **Terminal status:** `done`
+- **Presigned download:** HTTP `200`, `608065` bytes, fetched from inside the compose network (presigned URL host is `minio:9000` with `X-Amz-SignedHeaders=host`, so it is only valid from within the network, not the host). Output magic bytes `1a45dfa3` = EBML/Matroska/WebM → decodes as a valid WebM container (VP9/Opus target).
+- **Output sha256:** `eea7c3e570198b9b26e836ed1582eabb2eb3f76ec9ccdd677ebb9f37cbb8ae7f`
+- **Signed webhook:** NOT exercised by this job — the upload carried no `callback_url` (empty string), so no delivery was expected and `webhook_deliveries` correctly held 0 rows. Signed-webhook delivery is engine-agnostic machinery already verified in Phase 2 (webhook delivery) and Phase 16 (webhook decoupling); the operator accepted the E2E on that basis (it exercises nothing Phase-36-specific).
+- **Observed wall-clock:** job reached `done` by the first status poll (result object stamped `20260723T101557Z`), comfortably within both the 90s duration ceiling and the 753s `AV_ENGINE_TIMEOUT`.
+- **Auth note:** the pre-existing yaak/dev API key was stale against the freshly-provisioned compose Postgres; a new client (`yaak-e2e`, `43d053d3-df5b-4c05-92f0-db9cba129f56`) was minted via `cmd/manage-clients create` using the compose `API_KEY_SALT`, and verified (authed endpoint → HTTP 200; stale key → 401).
 
 ## Next Phase Readiness
 
 - All static verification is green: `go test ./internal/convert/`, `go build ./...` (sequential), `go vet ./...`, `docker compose config`, AV_ENGINE_TIMEOUT parity (8/8, single value), AVE-02 flag-count non-regression.
-- The RTF-derived `AV_ENGINE_TIMEOUT=753s` and the passthrough-bound fix are both committed and ready for the live E2E.
-- **Blocker for phase completion:** the live compose E2E (upload -> poll -> presigned download + signed webhook) has NOT been run — this is the one remaining gate before `36-04` (and Phase 36 overall) can be marked fully complete. See the runbook above.
+- The RTF-derived `AV_ENGINE_TIMEOUT=753s` and the passthrough-bound fix are both committed.
+- **Live compose E2E: PASSED** — a real `mp4 → webm` job ran end-to-end through the containerized `av-worker` (queued → active → done), the presigned result downloaded as a valid 608KB WebM, and the finalized 90s/753s/1g/concurrency-1 config was confirmed live. The only unexercised runbook line (signed webhook) was deliberately accepted as engine-agnostic, prior-phase-covered. Phase 36 is ready to close.
 
 ---
 *Phase: 36-containerization-rtf-measured-timeout*
 *Plan: 04*
 *Completed (static verification): 2026-07-23*
-*Live E2E: PENDING*
+*Live E2E: PASSED (operator-run 2026-07-23)*
 
 ## Self-Check: PASSED
 
