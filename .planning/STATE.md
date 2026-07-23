@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: executing
-stopped_at: Phase 37 context gathered
-last_updated: "2026-07-23T19:37:51.834Z"
+status: BLOCKED — Task 1 (SC3 av scale-from-zero) failing at STEP 6 x2; Task 2/3 not attempted; see 37-03-SUMMARY.md
+stopped_at: Phase 37 Plan 03 BLOCKED at Task 1 (SC3 av scale-from-zero, keda-av-loadproof.sh STEP 6 failed x2) - Task 2/3 not attempted, AVE-05 open
+last_updated: "2026-07-23T20:04:25.404Z"
 last_activity: 2026-07-23
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 18
-  completed_plans: 17
-  percent: 75
+  completed_plans: 18
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 Phase: 37 (keda-helm-chart-integration) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: BLOCKED — Task 1 (SC3 av scale-from-zero) failing at STEP 6 x2; Task 2/3 not attempted; see 37-03-SUMMARY.md
 Last activity: 2026-07-23
 
 ## Performance Metrics
@@ -137,7 +137,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 
 ### Blockers/Concerns
 
-None currently blocking. Sequencing carried into the roadmap:
+currently blocking. Sequencing carried into the roadmap:
 
 - Hard-ordered spine: 34 (independent, first) → 35 → 36 (RTF go/no-go gate) → 37. Phase 36's measured RTF/`AV_ENGINE_TIMEOUT` is a hard input to Phase 37's KEDA cooldown/stabilization/grace-period tuning — keep this ordering.
 - Phase 34's `AVOpts` allowlist must be closed before Phase 36 measures the RTF matrix — the opts scope determines the measurement matrix bounds (codec × resolution × preset), not the other way around.
@@ -145,6 +145,7 @@ None currently blocking. Sequencing carried into the roadmap:
 - `-protocol_whitelist file,crypto` must land on every ffmpeg/ffprobe invocation from Phase 34's first commit (day-one exec-hardening scope, not deferred) — closes an SSRF/LFI vector (HLS/concat/subtitle references embedded in file content) that the existing `"file:"`-prefix argv hardening does not cover.
 - Operational discipline (OrbStack): pre-build all images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (four confirmed daemon wedges on record, per v1.6/v1.7 history).
 - `MAX_UPLOAD_BYTES` (global 100 MiB default) will likely 413 legitimate video uploads — decide a per-format/engine ceiling deliberately during Phase 34/36, do not let it fail silently (carried from research Gaps to Address).
+- Phase 37 Plan 03 Task 1 (SC3 av scale-from-zero) BLOCKED: keda-av-loadproof.sh failed twice at STEP 6 (av-worker Deployment never settles to 0 replicas within 240s bound, observed replicas=1 both runs). See 37-03-SUMMARY.md for full diagnosis/hypotheses. Task 2/3 not attempted. AVE-05 still open; do not run phase.complete for Phase 37 until a retry passes.
 
 ## Deferred Items
 
@@ -187,9 +188,9 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-23T19:35:58.106Z
-Stopped at: Phase 37 context gathered
-Resume file: None
+Last session: 2026-07-23T20:03:22.144Z
+Stopped at: Phase 37 Plan 03 BLOCKED at Task 1 (SC3 av scale-from-zero, keda-av-loadproof.sh STEP 6 failed x2) - Task 2/3 not attempted, AVE-05 open
+Resume file: .planning/phases/37-keda-helm-chart-integration/37-03-SUMMARY.md
 
 ## Operator Next Steps
 
