@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: BLOCKED — Task 1 (SC3 av scale-from-zero) failing at STEP 6 x2; Task 2/3 not attempted; see 37-03-SUMMARY.md
-stopped_at: Phase 37 Plan 03 BLOCKED at Task 1 (SC3 av scale-from-zero, keda-av-loadproof.sh STEP 6 failed x2) - Task 2/3 not attempted, AVE-05 open
-last_updated: "2026-07-23T20:04:25.404Z"
+status: AWAITING CHECKPOINT — Tasks 1-2 (SC3 + SC4) PASS after api rebuild + jsonpath fix; Task 3 human-verify PENDING operator; see 37-03-SUMMARY.md
+stopped_at: Phase 37 Plan 03 Tasks 1-2 PASS (SC3 scale-from-zero + SC4 downscale-survival live-proven) - Task 3 human-verify checkpoint PENDING operator approval, AVE-05 still open until approved
+last_updated: "2026-07-23T20:43:31.307Z"
 last_activity: 2026-07-23
 progress:
   total_phases: 4
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 Phase: 37 (keda-helm-chart-integration) — EXECUTING
 Plan: 3 of 3
-Status: BLOCKED — Task 1 (SC3 av scale-from-zero) failing at STEP 6 x2; Task 2/3 not attempted; see 37-03-SUMMARY.md
+Status: AWAITING CHECKPOINT — Tasks 1-2 (SC3 + SC4) PASS after api rebuild + jsonpath fix; Task 3 human-verify PENDING operator; see 37-03-SUMMARY.md
 Last activity: 2026-07-23
 
 ## Performance Metrics
@@ -91,6 +91,7 @@ Last activity: 2026-07-23
 | Phase 36 P05 | 20min | 2 tasks | 9 files |
 | Phase 37 P01 | 25min | 3 tasks | 4 files |
 | Phase 37 P02 | 30min | 2 tasks | 3 files |
+| Phase 37 P03 | 40min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,8 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - [Phase 36]: ErrAVReencodeResolutionExceeded classified terminal in isAVTerminal (predecessor sentinel lacked this classification -- Rule 2 fix)
 - [Phase 37]: 37-01: av chart substrate cloned from audio precedent verbatim per 37-CONTEXT.md D-01..D-06 (grace 783s, non-null stabilization 900s, WR-01 triad, keda.av capacity parity); SC2 confirmed already-satisfied by Phase 35 collector, no code change
 - [Phase 37]: 37-02: two av live-proof gate scripts authored (keda-av-loadproof.sh SC3 scale-from-zero, keda-av-downscale-survival.sh SC4 downscale-survival) + values-loadproof.yaml keda.av.scaleDownStabilizationSeconds:15 override, statically verified; AVE-05 deliberately left incomplete pending Plan 03's live run
+- [Phase 37]: 37-03 retry: rebuilt octoconv-api:dev from current HEAD (stale pre-Phase-35 image was missing QueueAV in AllConvertQueues); Task 1 SC3 passed clean on first attempt, confirming this was the sole root cause of the prior BLOCKED run
+- [Phase 37]: 37-03 retry: fixed a second, independent live bug in keda-av-downscale-survival.sh (WR-05-class BUSY_POD jsonpath defect on kubectl v1.36.2, fixed via -o json | jq since this script is not one of the three frozen scripts); Task 2 SC4 then passed all 22 assertions on retry
 
 ### Quick Tasks Completed
 
@@ -145,7 +148,7 @@ currently blocking. Sequencing carried into the roadmap:
 - `-protocol_whitelist file,crypto` must land on every ffmpeg/ffprobe invocation from Phase 34's first commit (day-one exec-hardening scope, not deferred) — closes an SSRF/LFI vector (HLS/concat/subtitle references embedded in file content) that the existing `"file:"`-prefix argv hardening does not cover.
 - Operational discipline (OrbStack): pre-build all images sequentially with non-`latest` tags; never run compose and k8s stacks hot simultaneously (four confirmed daemon wedges on record, per v1.6/v1.7 history).
 - `MAX_UPLOAD_BYTES` (global 100 MiB default) will likely 413 legitimate video uploads — decide a per-format/engine ceiling deliberately during Phase 34/36, do not let it fail silently (carried from research Gaps to Address).
-- Phase 37 Plan 03 Task 1 (SC3 av scale-from-zero) BLOCKED: keda-av-loadproof.sh failed twice at STEP 6 (av-worker Deployment never settles to 0 replicas within 240s bound, observed replicas=1 both runs). See 37-03-SUMMARY.md for full diagnosis/hypotheses. Task 2/3 not attempted. AVE-05 still open; do not run phase.complete for Phase 37 until a retry passes.
+- Phase 37 Plan 03 Tasks 1-2 (SC3 + SC4) RESOLVED and PASSING (2026-07-23 retry): rebuilding `octoconv-api:dev` from current HEAD fixed Task 1's prior STEP 6 blocker (stale image was missing QueueAV in AllConvertQueues); Task 2 then surfaced and fixed an independent WR-05-class jsonpath bug in `scripts/keda-av-downscale-survival.sh` (not one of the three frozen scripts) before passing all 22 assertions. See 37-03-SUMMARY.md. Task 3 (human-verify checkpoint) is still PENDING operator approval — AVE-05 remains open and `phase.complete`/`roadmap.update-plan-progress` must NOT run for Phase 37 until the operator approves.
 
 ## Deferred Items
 
@@ -188,8 +191,8 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-23T20:03:22.144Z
-Stopped at: Phase 37 Plan 03 BLOCKED at Task 1 (SC3 av scale-from-zero, keda-av-loadproof.sh STEP 6 failed x2) - Task 2/3 not attempted, AVE-05 open
+Last session: 2026-07-23T20:41:01.984Z
+Stopped at: Phase 37 Plan 03 Tasks 1-2 PASS (SC3 scale-from-zero + SC4 downscale-survival live-proven) - Task 3 human-verify checkpoint PENDING operator approval, AVE-05 still open
 Resume file: .planning/phases/37-keda-helm-chart-integration/37-03-SUMMARY.md
 
 ## Operator Next Steps
