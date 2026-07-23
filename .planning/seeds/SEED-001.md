@@ -1,9 +1,13 @@
 ---
 planted_during: "Phase 5 discussion (v1.1 Tech Debt Cleanup), 2026-07-08"
 trigger_when: "A new milestone considers adding a document/audio-transcription engine class, or a vertical/niche product surface on top of OctoConv's conversion pipeline"
+status: resolved
+resolved_at: "2026-07-23 (after v1.8)"
 ---
 
 # SEED-001: Lesson-recording analysis for tutors and language schools
+
+> **RESOLVED (2026-07-23).** The needed capability — audio/video → transcript — is delivered: v1.7 (audio via whisper.cpp) + v1.8 (video→transcript on the audio pipeline), returning `txt`/`srt`/`vtt`/`json` with timestamps. The vertical analysis-product superstructure below (top-mistakes list + spaced-repetition deck for tutors/language schools) is **deliberately NOT pursued** — an LLM analysis layer that was never the actual requirement. Do NOT resurface this seed as a backlog candidate; the transcription need it stood in for is closed. Original text preserved below for the record.
 
 A vertical product built on top of OctoConv's existing async job pipeline: a tutor/language-school uploads a lesson recording, the service returns a transcript, a list of the student's top mistakes, and a ready-made spaced-repetition deck for review.
 

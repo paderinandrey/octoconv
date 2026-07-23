@@ -157,7 +157,7 @@ Acknowledged at v1.7 close (2026-07-18):
 
 | Category | Item | Status |
 |----------|------|--------|
-| seed | SEED-001: Lesson-recording analysis (tutors/language schools) | Deferred — not resumed by v1.8 (video processing, not lesson-analysis); still awaiting a future milestone |
+| seed | SEED-001: Lesson-recording analysis (tutors/language schools) | RESOLVED 2026-07-23 — the actual need (audio/video → transcript) shipped in v1.7 + v1.8; the vertical analysis-product (top-mistakes + spaced-repetition deck) was deliberately NOT pursued. Do not resurface as a backlog candidate. |
 | seed | SEED-004: Local k8s + KEDA full-stack validation | Deferred — superseded in practice by per-phase live gates (keda-gate 21/21, load-proofs Phases 28/33); revisit as CI k8s validation (K8SV2-01) |
 | tech_debt | WR-05 keda-load-proof.sh BUSY_POD jsonpath defect (kubectl v1.36.2, `deletionTimestamp==""` vs absent key) | Accepted residual (29-REVIEW), empirically confirmed live in Phase 33; forward-fix of the frozen script recommended in a future phase |
 | tech_debt | Registry cold-pull time for 682MB audio image | Unmeasurable on OrbStack shared store (Pulling→Pulled ≈0 recorded); measure in a real-registry environment before production KEDA tuning is trusted; same open question now applies to the av-worker image (AVX-02, v2 requirement) |

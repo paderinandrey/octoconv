@@ -21,7 +21,7 @@ OctoConv — внутренний асинхронный сервис конве
 
 ## Next Milestone
 
-_Not yet defined — run `/gsd:new-milestone` to scope the next version. Candidate seeds/backlog: SEED-001 (lesson-recording analysis), AVX-01 (trim/crop opts), AVX-02 (registry cold-pull measurement), and the v1.8 tech-debt tail (av-worker env-parser unit tests, wav-demuxer justification)._
+_Not yet defined — run `/gsd:new-milestone` to scope the next version. Candidate backlog: AVX-02 (registry cold-pull measurement for heavy images), K8SV2-01 (k8s validation in CI, kind/k3d), AVX-01 (video trim/crop opts), DOCV3-03 (fonts/CJK-RTL for HTML→PDF), and the v1.8 tech-debt tail (av-worker env-parser unit tests, wav-demuxer justification). SEED-001 is RESOLVED (transcription need shipped in v1.7/v1.8; analysis-product superstructure deliberately not pursued)._
 
 <details>
 <summary>Shipped Milestone: v1.8 AV Engine (video/ffmpeg) — SHIPPED 2026-07-23 (goal & features)</summary>
