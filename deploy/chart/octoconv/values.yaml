@@ -73,6 +73,22 @@ audioWorker:
       cpu: "2"
       memory: "1Gi"
 
+avWorker:
+  image:
+    repository: "octoconv-av-worker"
+  replicas: 1
+  # 783s = AV_ENGINE_TIMEOUT (753s, ConfigMap) + 30s, the same
+  # ENGINE_TIMEOUT+30s chart convention as worker/documentWorker/
+  # audioWorker/chromiumWorker (RESEARCH Pattern 4, D-04).
+  terminationGracePeriodSeconds: 783
+  resources:
+    limits:
+      # MUST match the RTF-measurement container exactly (Phase 36
+      # docker-compose.yml av-worker deploy.resources.limits) -- the
+      # measured 753s timeout is only valid at these limits.
+      cpu: "2"
+      memory: "1Gi"
+
 chromiumWorker:
   image:
     repository: "octoconv-chromium-worker"
@@ -163,11 +179,12 @@ prometheus:
 # INVARIANT (WR-06): each class's cooldownPeriod below must exceed that
 # class's max per-task retry backoff step (internal/queue/queue.go —
 # imageRetrySchedule tops out at 15s; documentRetrySchedule/htmlRetrySchedule
-# top out at 30s; audioRetrySchedule also tops out at 30s), otherwise a
-# ScaledObject can cool down to 0 replicas while a task is still legitimately
-# mid-retry, stranding it until the reconciler recovers it. image=60s /
-# document=120s / html=90s / audio=180s below all comfortably clear their
-# respective schedules.
+# top out at 30s; audioRetrySchedule also tops out at 30s; avRetrySchedule
+# also tops out at 30s), otherwise a ScaledObject can cool down to 0
+# replicas while a task is still legitimately mid-retry, stranding it until
+# the reconciler recovers it. image=60s / document=120s / html=90s /
+# audio=180s / av=180s below all comfortably clear their respective
+# schedules.
 keda:
   enabled: false
   image:
@@ -195,4 +212,16 @@ keda:
     # k8s 300s HPA default, so this is load-bearing in production, not just
     # a load-proof-overlay knob. 900s = 742s + ~21% margin, aligned with the
     # 15m/900s reconciler cap -- a genuine downscale never races a live job.
+    scaleDownStabilizationSeconds: 900
+  av:
+    threshold: "1"
+    maxReplicaCount: 2
+    pollingInterval: 15
+    cooldownPeriod: 180
+    # NON-NULL (D-05): av's 753s worst-case job duration exceeds the k8s
+    # 300s HPA default, so this knob is load-bearing in production, not
+    # just a load-proof-overlay override -- same rationale as audio above.
+    # 900s = 753s + ~19.5% margin, aligned with the 15m/900s reconciler cap
+    # -- a genuine downscale never races a live job. Gated on BOTH hasKey
+    # AND ne nil (falsy-0 guard, HARD-03/D-06) in scaledobject-av.yaml.
     scaleDownStabilizationSeconds: 900
