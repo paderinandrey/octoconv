@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: verifying
-stopped_at: "Completed 36-05-PLAN.md (gap-closure: generalized AV re-encode source-resolution bound, CR-01/HI-01)"
-last_updated: "2026-07-23T11:12:54.380Z"
+status: ready_to_plan
+stopped_at: Phase 36 complete (5/5) — ready to discuss Phase 37
+last_updated: 2026-07-23T11:15:52.197Z
 last_activity: 2026-07-23
 progress:
   total_phases: 4
@@ -21,20 +21,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 **Core value:** Внутренние сервисы компании могут безопасно (через аутентификацию по API-ключу) и надёжно поставить задачу конвертации файла (изображения, офисные документы, HTML, аудио, видео) и получить результат — без риска для стабильности или безопасности продакшена.
-**Current focus:** Phase 36 — containerization-rtf-measured-timeout
+**Current focus:** Phase 37 — keda/helm chart integration
 
 ## Current Position
 
-Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
-Plan: 5 of 5 (36-05 gap-closure: CR-01/HI-01)
-Status: Phase complete — ready for verification
+Phase: 37
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-07-23
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 94 (all v1.0–v1.7)
+- Total plans completed: 99 (all v1.0–v1.7)
 - Average duration: - min
 - Total execution time: 0 hours
 
@@ -75,7 +75,7 @@ Last activity: 2026-07-23
 | 33 | 3 | - | - |
 | 34 | 3 | - | - |
 | 35 | 7 | - | - |
-| 36 | TBD | - | - |
+| 36 | 5 | - | - |
 | 37 | TBD | - | - |
 
 **Recent Trend:**
