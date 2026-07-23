@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
-status: executing
-stopped_at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
-last_updated: "2026-07-22T15:17:58.665Z"
-last_activity: 2026-07-22
+status: verifying
+stopped_at: Completed 36-04-PLAN.md Task 3 (static verification); live E2E PENDING (operator-run)
+last_updated: "2026-07-23T01:30:53.293Z"
+last_activity: 2026-07-23
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
   percent: 50
 ---
 
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 
 Phase: 36 (containerization-rtf-measured-timeout) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
-Last activity: 2026-07-22
+Status: All 4 plans' static work + SUMMARYs done; PHASE NOT COMPLETE -- live compose E2E (D-05, operator-run) is the one remaining gate before Phase 36 can close
+Last activity: 2026-07-23
 
 ## Performance Metrics
 
@@ -87,6 +87,7 @@ Last activity: 2026-07-22
 | Phase 36 P01 | 15min | 3 tasks | 6 files |
 | Phase 36 P02 | 30min | 2 tasks | 2 files |
 | Phase 36 P03 | 20min | 3 tasks | 3 files |
+| Phase 36 P04 | 25min | 1 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -104,6 +105,10 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - [Phase 36]: lavfi/testsrc/sine/wrapped_avframe + format/aformat/aresample/zlib/webp-muxer added to Dockerfile.av-worker's minimal ffmpeg build — beyond RESEARCH.md's flag list; required for the RTF measurement script's lavfi fixture synthesis AND for production audio-resample/png/webp-thumbnail paths, confirmed via live smoke test of the full av.go argv suite
 - [Phase 36]: audio-worker's own env block also needed the IN-02 AV_MAX_RETRY/AV_ENGINE_TIMEOUT parity pair (constructs queue.NewClient() too) -- caught by the plan's own grep-count-8 acceptance criterion before commit — IN-02 parity must hold across every queue.NewClient()-constructing process, not just the ones named in prose
 - [Phase 36]: AV_MAX_DURATION_SECONDS/AV_DISK_SAFETY_FACTOR excluded from IN-02 docker-compose parity — only av-worker's own process reads them; queue.NewClient() never touches either var, so parity does not apply
+- [Phase 36]: Worst-case RTF cell is hevc@1080 (p95=4.179133s), NOT VP9 as D-09 assumed -- HEVC dominates VP9 by 1.86x
+- [Phase 36]: Path B NO-GO lever selected: AV_MAX_DURATION_SECONDS lowered 14400s->90s, deriving AV_ENGINE_TIMEOUT=753s; Path A (VP9 tuning) rejected as ineffective
+- [Phase 36]: Passthrough residual disposition (b): resolution_height==0 re-encode bound to <=1080p source height, fail-closed reject, closing the hevc@2160p OOM-DoS vector
+- [Phase 36]: AV_WORKER_CONCURRENCY=1, memory=1g validated from measured peak-RSS/CPU-saturation data
 
 ### Quick Tasks Completed
 
@@ -175,8 +180,8 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-22T15:16:19.678Z
-Stopped at: Completed 36-02-PLAN.md (Dockerfile.av-worker + scripts/av-rtf-measure.sh)
+Last session: 2026-07-23T01:30:53.282Z
+Stopped at: Completed 36-04-PLAN.md Task 3 (static verification); live E2E PENDING (operator-run)
 Resume file: None
 
 ## Operator Next Steps
