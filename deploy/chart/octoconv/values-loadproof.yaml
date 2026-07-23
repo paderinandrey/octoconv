@@ -19,6 +19,17 @@ keda:
     # invalidate the scenario's timing assumptions. 15s makes the downscale
     # observable within the gate's polling window.
     scaleDownStabilizationSeconds: 15
+  av:
+    # Fast, deterministic 2->1 downscale (Phase 37 D-07 proof #2, SC4,
+    # mirrors the document override above). Production
+    # keda.av.scaleDownStabilizationSeconds (values.yaml) is 900s, which
+    # would push the N->N-1 downscale far past any reasonable gate window.
+    # 15s here makes the downscale fire promptly and be observable within
+    # scripts/keda-av-downscale-survival.sh's polling window. The av
+    # Deployment's pod-termination grace period stays at its PRODUCTION
+    # 783s value in every overlay -- that grace is exactly the value SC4
+    # validates and MUST NOT be lowered here or anywhere else.
+    scaleDownStabilizationSeconds: 15
 
 worker:
   resources:
