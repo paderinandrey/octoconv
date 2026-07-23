@@ -4,13 +4,13 @@ milestone: v1.8
 milestone_name: AV Engine (video/ffmpeg)
 status: executing
 stopped_at: Phase 37 context gathered
-last_updated: "2026-07-23T19:24:01.059Z"
+last_updated: "2026-07-23T19:37:51.834Z"
 last_activity: 2026-07-23
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 18
-  completed_plans: 16
+  completed_plans: 17
   percent: 75
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-07-19 after v1.8 milestone start)
 ## Current Position
 
 Phase: 37 (keda-helm-chart-integration) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-07-23
 
@@ -90,6 +90,7 @@ Last activity: 2026-07-23
 | Phase 36 P04 | 25min | 1 tasks | 4 files |
 | Phase 36 P05 | 20min | 2 tasks | 9 files |
 | Phase 37 P01 | 25min | 3 tasks | 4 files |
+| Phase 37 P02 | 30min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -114,6 +115,7 @@ Decisions are logged in PROJECT.md Key Decisions table. v1.8-specific decisions 
 - [Phase 36]: Generalized enforceNoScalePassthroughBound -> enforceReencodeSourceBound: every re-encode (no-scale AND explicit resolution_height alike) bounded on BOTH source Height (>1080) and Width (>1920), closing CR-01/HI-01
 - [Phase 36]: ErrAVReencodeResolutionExceeded classified terminal in isAVTerminal (predecessor sentinel lacked this classification -- Rule 2 fix)
 - [Phase 37]: 37-01: av chart substrate cloned from audio precedent verbatim per 37-CONTEXT.md D-01..D-06 (grace 783s, non-null stabilization 900s, WR-01 triad, keda.av capacity parity); SC2 confirmed already-satisfied by Phase 35 collector, no code change
+- [Phase 37]: 37-02: two av live-proof gate scripts authored (keda-av-loadproof.sh SC3 scale-from-zero, keda-av-downscale-survival.sh SC4 downscale-survival) + values-loadproof.yaml keda.av.scaleDownStabilizationSeconds:15 override, statically verified; AVE-05 deliberately left incomplete pending Plan 03's live run
 
 ### Quick Tasks Completed
 
@@ -185,7 +187,7 @@ Items acknowledged and carried forward at milestone closes (see `.planning/miles
 
 ## Session Continuity
 
-Last session: 2026-07-23T19:22:01.942Z
+Last session: 2026-07-23T19:35:58.106Z
 Stopped at: Phase 37 context gathered
 Resume file: None
 

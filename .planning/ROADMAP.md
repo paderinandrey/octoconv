@@ -236,7 +236,7 @@ Full details: `.planning/milestones/v1.7-ROADMAP.md`
 | 34. AV Engine Foundation | v1.8 | 3/3 | Complete    | 2026-07-20 |
 | 35. Queue, Worker & Routing Integration | v1.8 | 7/7 | Complete    | 2026-07-22 |
 | 36. Containerization & RTF-Measured Timeout | v1.8 | 5/5 | Complete    | 2026-07-23 |
-| 37. KEDA/Helm Chart Integration | v1.8 | 1/3 | In Progress|  |
+| 37. KEDA/Helm Chart Integration | v1.8 | 2/3 | In Progress|  |
 
 ---
 
